@@ -57,5 +57,10 @@ There is no broker order endpoint. Future broker integration begins with read-on
 positions and fills. Any later order workflow must be previewed and explicitly confirmed
 by the trader, with deterministic risk limits and an audit log.
 
-See [the starting playbook](docs/playbook-v0.md) and
-[architecture notes](docs/architecture.md).
+See:
+
+- [the starting playbook](docs/playbook-v0.md);
+- [architecture notes](docs/architecture.md);
+- [the sequenced roadmap](docs/roadmap.md);
+- [the autonomous-execution boundary](docs/autonomous-execution-boundary.md); and
+- [the July 2026 trading-agent landscape review](docs/research/trading-agent-landscape-2026-07.md).
