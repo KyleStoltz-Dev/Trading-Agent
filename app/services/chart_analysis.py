@@ -47,6 +47,7 @@ def analyze_chart(
             }
         ],
         instructions=SYSTEM_PROMPT,
+        safety_identifier=settings.openai_safety_identifier,
         text={
             "format": {
                 "type": "json_schema",
@@ -57,4 +58,3 @@ def analyze_chart(
         },
     )
     return ChartAnalysis.model_validate(json.loads(response.output_text))
-

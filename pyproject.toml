@@ -13,9 +13,14 @@ dependencies = [
   "psycopg[binary]>=3.2,<4",
   "pydantic-settings>=2.7,<3",
   "python-multipart>=0.0.20,<1",
+  "rich>=14,<15",
   "sqlalchemy>=2.0,<3",
+  "typer>=0.16,<1",
   "uvicorn[standard]>=0.34,<1",
 ]
+
+[project.scripts]
+trading-agent = "app.cli:run"
 
 [project.optional-dependencies]
 dev = [
@@ -36,4 +41,3 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
-
