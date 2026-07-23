@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Trading Agent — Journal First</title>
+    <style>
+      :root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; }
+      body { margin: 0; background: #071b1a; color: #e8f5f1; }
+      main { max-width: 920px; margin: 0 auto; padding: 48px 20px; }
+      h1 { font-size: clamp(2rem, 6vw, 4.5rem); margin: 0; letter-spacing: -.05em; }
+      .lede { color: #9fc8bd; max-width: 650px; line-height: 1.6; }
+      .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit,minmax(250px,1fr)); margin-top: 36px; }
+      section { background: #0d2926; border: 1px solid #1e4a43; border-radius: 16px; padding: 20px; }
+      label { display: grid; gap: 6px; color: #a7cec4; font-size: .85rem; margin-bottom: 12px; }
+      input { background: #061513; color: white; border: 1px solid #2c5c53; border-radius: 8px; padding: 10px; }
+      button { background: #63e6be; color: #05211c; border: 0; border-radius: 9px; padding: 11px 16px; font-weight: 750; cursor: pointer; }
+      output { display: block; margin-top: 16px; white-space: pre-wrap; color: #d2fff2; }
+      .boundary { color: #f8d486; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p>JOURNAL-FIRST MVP</p>
+      <h1>Evidence over prediction.</h1>
+      <p class="lede">Capture context, trigger, risk, execution, and outcome. The assistant helps test a playbook; it does not place trades or promise what happens next.</p>
+      <div class="grid">
+        <section>
+          <h2>Position size</h2>
+          <form id="risk-form">
+            <label>Account equity <input name="account_equity" type="number" step="any" required /></label>
+            <label>Risk % <input name="risk_percent" type="number" step="any" value="1" required /></label>
+            <label>Entry <input name="entry" type="number" step="any" required /></label>
+            <label>Stop <input name="stop" type="number" step="any" required /></label>
+            <label>Target <input name="target" type="number" step="any" /></label>
+            <label>Value per price unit <input name="value_per_price_unit" type="number" step="any" value="1" required /></label>
+            <button>Calculate</button>
+          </form>
+          <output id="risk-output"></output>
+        </section>
+        <section>
+          <h2>Review loop</h2>
+          <ol>
+            <li>Record visible facts.</li>
+            <li>Label context hypotheses.</li>
+            <li>Define a lower-timeframe trigger.</li>
+            <li>Predefine invalidation and risk.</li>
+            <li>Review execution separately from outcome.</li>
+          </ol>
+          <p class="boundary">No autonomous order placement. Every moment is unique; the purpose is to measure repeatable decisions across regimes.</p>
+        </section>
+      </div>
+    </main>
+    <script>
+      document.querySelector("#risk-form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const payload = Object.fromEntries(new FormData(event.target));
+        if (!payload.target) delete payload.target;
+        const response = await fetch("/api/risk/position-size", {
+          method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        document.querySelector("#risk-output").textContent = response.ok
+          ? `Risk: $${data.risk_amount}\nQuantity: ${data.quantity}\nPlanned R: ${data.planned_r ?? "—"}`
+          : JSON.stringify(data, null, 2);
+      });
+    </script>
+  </body>
+</html>
+

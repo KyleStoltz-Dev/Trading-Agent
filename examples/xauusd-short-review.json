@@ -1,0 +1,28 @@
+{
+  "instrument": "XAUUSD",
+  "direction": "short",
+  "reported_outcome": {
+    "maximum_r": 6,
+    "partial": {
+      "fraction_closed": 0.75,
+      "realized_pnl_usd": 180,
+      "reported_r": 4
+    },
+    "runner_left_open": true
+  },
+  "context_hypotheses": [
+    "Price interacted with a higher-timeframe range/accumulation model.",
+    "The trader considered the 80% level meaningful.",
+    "New York price action was treated as a mitigation reference.",
+    "Equal highs affected the management decision."
+  ],
+  "management_review_questions": [
+    "What exact rule justified taking 75% at 4R?",
+    "Was the hedge idea part of the pre-trade plan or introduced after entry?",
+    "What objective condition would have justified a long from the 80% level?",
+    "What trailing rule would have captured the retracement without hindsight?",
+    "How much additional R was actually available after the partial?"
+  ],
+  "data_quality": "Narrative seed only. Exact prices, timestamps, fills, spread, and chart evidence must be attached before statistical use."
+}
+
