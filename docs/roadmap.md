@@ -34,13 +34,19 @@ The model can propose a hypothesis. It cannot promote one to an edge.
 Goal: make the current MVP feel like an active terminal agent without duplicating business
 logic.
 
-- Add a Typer/Rich CLI entry point.
-- Add `chat`, `plan`, `chart`, `journal`, `review`, `doctor`, and `serve` commands.
+- Add a Typer/Rich CLI entry point. Running `trading-agent` performs lightweight startup
+  health checks and opens the interactive agent; `chat` remains an explicit alias.
+- Add `plan`, `chart`, `journal`, `review`, `health`, and optional `api` commands.
+- Keep CLI domain calls in-process. Do not require an HTTP server for normal terminal use.
+- Reserve `api` for the long-running FastAPI process needed by the browser UI, hosted
+  deployments, Discord/webhooks, or remote integrations.
 - Accept screenshot paths from the CLI.
 - Persist conversational sessions and link them to plans/trades.
 - Move domain operations behind services shared by CLI and FastAPI.
 - Stream progress without exposing hidden reasoning.
 - Add redacted diagnostics and a resolved-configuration view.
+- Make startup checks non-destructive and fast; direct users to `trading-agent health` for
+  the full database, configuration, model, and provider diagnostic report.
 - Test CLI exit codes, missing configuration, image errors, and database failures.
 
 Acceptance boundary: all commands remain decision support; no broker mutation exists.
@@ -166,4 +172,3 @@ time or backtest excitement.
 - No arbitrary model-generated Python execution.
 - No silent data-provider fallback.
 - No claim that Wyckoff/SMC labels are facts before operational definition and review.
-

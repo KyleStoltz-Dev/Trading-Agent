@@ -276,15 +276,20 @@ capture configuration hashes, data sources, warnings, and artifacts.
 Start with a compact command surface:
 
 ```text
-trading-agent chat
+trading-agent                    # Health check, then interactive agent
+trading-agent chat               # Explicit alias
 trading-agent plan
 trading-agent chart <image>
 trading-agent journal add
 trading-agent review <trade-id>
 trading-agent replay <dataset>
-trading-agent doctor
-trading-agent serve
+trading-agent health             # Full environment diagnostics
+trading-agent api                # Optional HTTP/browser/integration server
 ```
+
+Normal CLI operations should call shared application services directly; they should not
+start or depend on an HTTP server. The optional `api` process exists for the browser UI,
+hosted deployments, Discord/webhooks, and remote integrations that need a stable endpoint.
 
 The journal-to-rule loop should generate **candidate hypotheses**, not “profitable rules.”
 Every hypothesis retains its discovery sample and must be evaluated on later, untouched
