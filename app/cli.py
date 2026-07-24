@@ -2,6 +2,7 @@ import json
 import mimetypes
 import uuid
 from decimal import Decimal
+from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
 
@@ -15,6 +16,8 @@ from rich.table import Table
 from app.config import get_settings
 from app.db import Base, SessionLocal, engine
 from app.models import ConversationSession
+from app.policy import ExecutionHooks, PolicyEngine, ToolContext
+from app.providers import ProviderConfigurationError, create_model_provider
 from app.schemas import (
     PositionSizeRequest,
     ReflectionCreate,
@@ -28,9 +31,9 @@ from app.services.conversations import (
     add_turn,
     conversation_history,
     create_conversation,
-    get_conversation,
     latest_conversation,
     list_conversations,
+    resolve_conversation,
 )
 from app.services.health import HealthReport, check_health
 from app.services.journal import (
@@ -54,6 +57,34 @@ app.add_typer(journal_app, name="journal")
 sessions_app = typer.Typer(help="Inspect locally persisted agent conversations.")
 app.add_typer(sessions_app, name="sessions")
 console = Console()
+
+
+@lru_cache
+def _runtime_policy() -> PolicyEngine:
+    return PolicyEngine.load()
+
+
+def _authorize_direct(
+    name: str,
+    arguments: dict,
+    *,
+    mutating: bool = False,
+    deterministic: bool = False,
+    assume_yes: bool = False,
+) -> None:
+    hooks = ExecutionHooks(
+        _runtime_policy(),
+        lambda action, values: assume_yes
+        or _confirm_agent_mutation(action, values),
+    )
+    hooks.before_execute(
+        ToolContext(
+            name=name,
+            arguments=arguments,
+            mutating=mutating,
+            deterministic=deterministic,
+        )
+    )
 
 
 def _print_model(value: object) -> None:
@@ -120,8 +151,12 @@ def _save_plan(request: TradePlanCreate, assume_yes: bool) -> None:
             title="Plan preview",
         )
     )
-    if not assume_yes and not typer.confirm("Save this trade plan?"):
-        raise typer.Abort()
+    _authorize_direct(
+        "create_trade_plan",
+        request.model_dump(mode="json"),
+        mutating=True,
+        assume_yes=assume_yes,
+    )
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
         trade = create_trade_plan(db, request)
@@ -133,9 +168,14 @@ def _confirm_agent_mutation(action: str, arguments: dict) -> bool:
     return typer.confirm("Apply this journal change?")
 
 
-def _run_chat(session_id: uuid.UUID | None, new_session: bool) -> None:
+def _run_chat(
+    session_reference: str | None,
+    new_session: bool,
+    session_name: str | None,
+) -> None:
     settings = get_settings()
-    report = check_health(settings, engine)
+    policy = _runtime_policy()
+    report = check_health(settings, engine, policy=policy)
     _render_health(report)
     if not report.ready:
         console.print(
@@ -143,19 +183,26 @@ def _run_chat(session_id: uuid.UUID | None, new_session: bool) -> None:
             "then run `trading-agent health`.[/red]"
         )
         raise typer.Exit(1)
-    if not settings.openai_api_key:
-        console.print("[red]Set OPENAI_API_KEY to use interactive chat.[/red]")
-        raise typer.Exit(1)
+    try:
+        provider = create_model_provider(settings)
+    except ProviderConfigurationError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    if session_reference and (new_session or session_name):
+        console.print("[red]Use either --session or --new/--name, not both.[/red]")
+        raise typer.Exit(2)
 
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
-        conversation = get_conversation(db, session_id) if session_id else None
-        if session_id and conversation is None:
-            console.print(f"[red]Conversation {session_id} was not found.[/red]")
+        conversation = (
+            resolve_conversation(db, session_reference) if session_reference else None
+        )
+        if session_reference and conversation is None:
+            console.print(f"[red]Conversation {session_reference} was not found.[/red]")
             raise typer.Exit(1)
         if conversation is None:
             conversation = (
-                create_conversation(db)
+                create_conversation(db, name=session_name)
                 if new_session
                 else latest_conversation(db) or create_conversation(db)
             )
@@ -165,10 +212,13 @@ def _run_chat(session_id: uuid.UUID | None, new_session: bool) -> None:
             db=db,
             engine=engine,
             confirm_mutation=_confirm_agent_mutation,
+            provider=provider,
+            policy=policy,
         )
         console.print(
             Panel(
-                f"Session {conversation.id}\nType /help for commands; /exit to leave.",
+                f"Session {conversation.name} ({conversation.id})\n"
+                "Type /help for commands; /exit to leave.",
                 title="Trading Agent",
             )
         )
@@ -208,32 +258,45 @@ def _run_chat(session_id: uuid.UUID | None, new_session: bool) -> None:
 def main(
     ctx: typer.Context,
     session: Annotated[
-        uuid.UUID | None,
-        typer.Option("--session", help="Resume a saved interactive session UUID."),
+        str | None,
+        typer.Option("--session", help="Resume a session by name or UUID."),
     ] = None,
     new: Annotated[
         bool,
         typer.Option("--new", help="Start a new session instead of resuming the latest."),
     ] = False,
+    name: Annotated[
+        str | None,
+        typer.Option("--name", help="Predictable name for a new session."),
+    ] = None,
 ) -> None:
     """Start the interactive agent when no individual command is supplied."""
+    try:
+        _runtime_policy().assert_unchanged()
+    except Exception as exc:
+        console.print(f"[red]Runtime policy failed: {exc}[/red]")
+        raise typer.Exit(1) from exc
     if ctx.invoked_subcommand is None:
-        _run_chat(session, new)
+        _run_chat(session, new or bool(name), name)
 
 
 @app.command()
 def chat(
     session: Annotated[
-        uuid.UUID | None,
-        typer.Option("--session", help="Resume a saved interactive session UUID."),
+        str | None,
+        typer.Option("--session", help="Resume a session by name or UUID."),
     ] = None,
     new: Annotated[
         bool,
         typer.Option("--new", help="Start a new session instead of resuming the latest."),
     ] = False,
+    name: Annotated[
+        str | None,
+        typer.Option("--name", help="Predictable name for a new session."),
+    ] = None,
 ) -> None:
     """Open the interactive agent explicitly."""
-    _run_chat(session, new)
+    _run_chat(session, new or bool(name), name)
 
 
 @app.command()
@@ -243,8 +306,9 @@ def health(
         typer.Option(help="Exit unsuccessfully when any required check fails."),
     ] = False,
 ) -> None:
-    """Check configuration, OpenAI credentials, and database connectivity."""
-    report = check_health(get_settings(), engine)
+    """Check policy, model-provider configuration, and database connectivity."""
+    _authorize_direct("get_system_health", {})
+    report = check_health(get_settings(), engine, policy=_runtime_policy())
     _render_health(report)
     if strict and not report.ready:
         raise typer.Exit(1)
@@ -272,6 +336,11 @@ def risk(
     except ValidationError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(2) from exc
+    _authorize_direct(
+        "calculate_position_size",
+        request.model_dump(mode="json"),
+        deterministic=True,
+    )
     _print_model(calculate_position_size(request))
 
 
@@ -312,6 +381,7 @@ def journal_list(
     limit: Annotated[int, typer.Option(min=1, max=100)] = 20,
 ) -> None:
     """List recent journaled plans."""
+    _authorize_direct("list_trade_plans", {"limit": limit})
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
         trades = list_trade_plans(db, limit=limit)
@@ -324,6 +394,7 @@ def journal_list(
 @journal_app.command("show")
 def journal_show(trade_id: uuid.UUID) -> None:
     """Show one journaled plan."""
+    _authorize_direct("get_trade_plan", {"trade_id": str(trade_id)})
     with SessionLocal() as db:
         try:
             trade = get_trade_plan(db, trade_id)
@@ -343,11 +414,13 @@ def sessions_list(
         conversations = list_conversations(db, limit)
         table = Table(title="Trading Agent sessions")
         table.add_column("Session ID")
+        table.add_column("Name")
         table.add_column("Title")
         table.add_column("Updated")
         for conversation in conversations:
             table.add_row(
                 str(conversation.id),
+                conversation.name,
                 conversation.title,
                 str(conversation.updated_at),
             )
@@ -355,12 +428,12 @@ def sessions_list(
 
 
 @sessions_app.command("show")
-def sessions_show(session_id: uuid.UUID) -> None:
+def sessions_show(session: str) -> None:
     """Show the saved transcript for one session."""
     with SessionLocal() as db:
-        conversation: ConversationSession | None = get_conversation(db, session_id)
+        conversation: ConversationSession | None = resolve_conversation(db, session)
         if conversation is None:
-            console.print(f"[red]Conversation {session_id} was not found.[/red]")
+            console.print(f"[red]Conversation {session} was not found.[/red]")
             raise typer.Exit(1)
         for turn in conversation_history(db, conversation, limit=100):
             console.print(Panel(turn["content"], title=turn["role"]))
@@ -386,8 +459,12 @@ def review(
     except ValidationError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(2) from exc
-    if not yes and not typer.confirm("Save this reflection?"):
-        raise typer.Abort()
+    _authorize_direct(
+        "add_trade_reflection",
+        {"trade_id": str(trade_id), **request.model_dump(mode="json")},
+        mutating=True,
+        assume_yes=yes,
+    )
     with SessionLocal() as db:
         try:
             reflection = create_reflection(db, trade_id, request)
@@ -406,6 +483,10 @@ def chart(
     ] = "",
 ) -> None:
     """Analyze a local chart screenshot."""
+    _authorize_direct(
+        "analyze_chart",
+        {"image_path": str(image), "context": context},
+    )
     content_type, _ = mimetypes.guess_type(image)
     if content_type not in {"image/png", "image/jpeg", "image/webp"}:
         console.print("[red]Chart must be PNG, JPEG, or WebP.[/red]")

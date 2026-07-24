@@ -114,8 +114,13 @@ class ChartAnalysis(BaseModel):
     unreadable_or_missing: list[str]
     context_hypotheses: list[str]
     trigger_hypotheses: list[str]
-    playbook_checks: list[dict]
+    playbook_checks: list["PlaybookCheck"]
     risk_questions: list[str]
     management_questions: list[str]
     disclaimer: str
 
+
+class PlaybookCheck(BaseModel):
+    check: str
+    status: Literal["met", "not_met", "unclear"]
+    evidence: list[str]

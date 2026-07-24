@@ -6,12 +6,12 @@ from pathlib import Path
 from typing import Any
 
 from fastapi.encoders import jsonable_encoder
-from openai import OpenAI
-from pydantic import ValidationError
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from app.config import Settings
+from app.policy import ExecutionHooks, PolicyEngine, policy_wrapped_executor
+from app.providers import ModelProvider, create_model_provider
 from app.schemas import (
     PositionSizeRequest,
     ReflectionCreate,
@@ -207,6 +207,16 @@ TOOLS = [
     },
 ]
 
+TOOL_METADATA = {
+    "calculate_position_size": {"mutating": False, "deterministic": True},
+    "list_trade_plans": {"mutating": False, "deterministic": False},
+    "get_trade_plan": {"mutating": False, "deterministic": False},
+    "create_trade_plan": {"mutating": True, "deterministic": False},
+    "add_trade_reflection": {"mutating": True, "deterministic": False},
+    "analyze_chart": {"mutating": False, "deterministic": False},
+    "get_system_health": {"mutating": False, "deterministic": False},
+}
+
 
 def _json(value: Any) -> str:
     return json.dumps(jsonable_encoder(value))
@@ -219,49 +229,33 @@ class TradingAgent:
         db: Session,
         engine: Engine,
         confirm_mutation: ConfirmMutation,
-        client: OpenAI | None = None,
+        provider: ModelProvider | None = None,
+        policy: PolicyEngine | None = None,
     ) -> None:
-        if not settings.openai_api_key and client is None:
-            raise RuntimeError("OPENAI_API_KEY is required for interactive chat")
         self.settings = settings
         self.db = db
         self.engine = engine
         self.confirm_mutation = confirm_mutation
-        self.client = client or OpenAI(api_key=settings.openai_api_key)
+        self.provider = provider or create_model_provider(settings)
+        self.policy = policy or PolicyEngine.load()
+        self.policy.validate_tool_surface(TOOLS, TOOL_METADATA)
+        self.hooks = ExecutionHooks(self.policy, confirm_mutation)
 
     def respond(self, message: str, history: list[dict[str, str]] | None = None) -> str:
-        input_items: list[Any] = [*(history or []), {"role": "user", "content": message}]
-
-        for _ in range(5):
-            response = self.client.responses.create(
-                model=self.settings.openai_model,
-                instructions=AGENT_INSTRUCTIONS,
-                input=input_items,
-                tools=TOOLS,
-                reasoning={"effort": "medium", "context": "current_turn"},
-                safety_identifier=self.settings.openai_safety_identifier,
-                store=False,
-            )
-            tool_calls = [item for item in response.output if item.type == "function_call"]
-            if not tool_calls:
-                return response.output_text
-
-            input_items.extend(response.output)
-            for call in tool_calls:
-                try:
-                    arguments = json.loads(call.arguments)
-                    output = self._execute_tool(call.name, arguments)
-                except (ValueError, ValidationError, OSError, LookupError) as exc:
-                    output = _json({"ok": False, "error": str(exc)})
-                input_items.append(
-                    {
-                        "type": "function_call_output",
-                        "call_id": call.call_id,
-                        "output": output,
-                    }
-                )
-
-        raise RuntimeError("agent exceeded the maximum tool-call rounds")
+        instructions = f"{AGENT_INSTRUCTIONS}\n\n{self.policy.instructions}"
+        execute_tool = policy_wrapped_executor(
+            self._execute_tool,
+            self.hooks,
+            TOOL_METADATA,
+        )
+        return self.provider.complete(
+            instructions=instructions,
+            message=message,
+            history=history or [],
+            tools=TOOLS,
+            execute_tool=execute_tool,
+            max_tool_rounds=self.policy.policy.tool_policy.max_tool_rounds,
+        )
 
     def _execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
         if name == "calculate_position_size":
@@ -283,8 +277,6 @@ class TradingAgent:
 
         if name == "create_trade_plan":
             request = TradePlanCreate.model_validate(arguments)
-            if not self.confirm_mutation("Create this trade plan", arguments):
-                return _json({"ok": False, "error": "trader declined journal mutation"})
             trade = create_trade_plan(self.db, request)
             return _json({"ok": True, "result": TradePlanRead.model_validate(trade)})
 
@@ -294,8 +286,6 @@ class TradingAgent:
                 key: value for key, value in arguments.items() if key != "trade_id"
             }
             request = ReflectionCreate.model_validate(reflection_data)
-            if not self.confirm_mutation("Add this trade reflection", arguments):
-                return _json({"ok": False, "error": "trader declined journal mutation"})
             reflection = create_reflection(self.db, trade_id, request)
             return _json({"ok": True, "result": ReflectionRead.model_validate(reflection)})
 
@@ -312,11 +302,12 @@ class TradingAgent:
                 content_type=content_type,
                 user_context=arguments["context"],
                 settings=self.settings,
+                provider=self.provider,
             )
             return _json({"ok": True, "result": result})
 
         if name == "get_system_health":
-            report = check_health(self.settings, self.engine)
+            report = check_health(self.settings, self.engine, policy=self.policy)
             return _json({"ok": True, "result": report.model_dump()})
 
         raise ValueError(f"unknown tool: {name}")

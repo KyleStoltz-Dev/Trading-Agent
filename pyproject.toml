@@ -9,7 +9,6 @@ description = "Human-in-the-loop trading copilot for playbook analysis and journ
 requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.115,<1",
-  "openai>=1.99,<3",
   "psycopg[binary]>=3.2,<4",
   "pydantic-settings>=2.7,<3",
   "python-multipart>=0.0.20,<1",
@@ -23,6 +22,16 @@ dependencies = [
 trading-agent = "app.cli:run"
 
 [project.optional-dependencies]
+openai = [
+  "openai>=1.99,<3",
+]
+anthropic = [
+  "anthropic>=0.75,<1",
+]
+ai = [
+  "openai>=1.99,<3",
+  "anthropic>=0.75,<1",
+]
 dev = [
   "httpx>=0.28,<1",
   "pytest>=8.3,<9",

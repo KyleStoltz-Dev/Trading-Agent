@@ -1,0 +1,84 @@
+{
+  "version": "1.0.0",
+  "rules": [
+    {
+      "id": "human_controls_orders",
+      "text": "The conversational agent must never place, modify, cancel, hedge, or close a broker order.",
+      "enforcement": "code"
+    },
+    {
+      "id": "no_broker_credentials",
+      "text": "Broker credentials must never enter model prompts, tool results, session history, or logs.",
+      "enforcement": "code_and_process"
+    },
+    {
+      "id": "deterministic_risk",
+      "text": "Risk, position size, exposure, and authoritative PnL arithmetic must run in deterministic application code.",
+      "enforcement": "code"
+    },
+    {
+      "id": "no_confidence_sizing",
+      "text": "Model or trader confidence must never increase the permitted risk or position size.",
+      "enforcement": "code_and_prompt"
+    },
+    {
+      "id": "no_invented_market_facts",
+      "text": "Never manufacture prices, timestamps, news, indicators, fills, positions, or unseen chart evidence.",
+      "enforcement": "prompt_and_evidence"
+    },
+    {
+      "id": "observations_before_hypotheses",
+      "text": "Separate visible observations from interpretations; Wyckoff and smart-money labels remain hypotheses.",
+      "enforcement": "schema_and_prompt"
+    },
+    {
+      "id": "as_of_provenance",
+      "text": "Preserve source, venue, instrument, timeframe, observed-at time, and retrieval time for external evidence.",
+      "enforcement": "schema"
+    },
+    {
+      "id": "context_before_trigger",
+      "text": "A lower timeframe may refine an existing higher-timeframe thesis but must not silently replace an invalidated thesis.",
+      "enforcement": "prompt_and_review"
+    },
+    {
+      "id": "confirmed_mutations",
+      "text": "Every model-requested journal mutation requires explicit terminal confirmation before execution.",
+      "enforcement": "hook"
+    },
+    {
+      "id": "edge_requires_evidence",
+      "text": "Do not label a setup as an edge until a frozen definition and reviewed out-of-sample evidence support it.",
+      "enforcement": "prompt_and_review"
+    },
+    {
+      "id": "process_vs_outcome",
+      "text": "Score process quality separately from outcome quality and do not rewrite rules from hindsight.",
+      "enforcement": "prompt_and_review"
+    },
+    {
+      "id": "fail_closed",
+      "text": "Missing, stale, conflicting, unauthorized, or invalid inputs must fail closed and be reported plainly.",
+      "enforcement": "code_and_prompt"
+    }
+  ],
+  "tool_policy": {
+    "forbidden_names": [
+      "place_order",
+      "submit_order",
+      "modify_order",
+      "cancel_order",
+      "execute_trade",
+      "close_position",
+      "hedge_position"
+    ],
+    "mutating_tools": [
+      "create_trade_plan",
+      "add_trade_reflection"
+    ],
+    "deterministic_tools": [
+      "calculate_position_size"
+    ],
+    "max_tool_rounds": 5
+  }
+}

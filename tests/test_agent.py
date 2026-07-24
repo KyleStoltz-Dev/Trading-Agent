@@ -1,77 +1,72 @@
 import json
-from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 from app.config import Settings
+from app.policy import PolicyViolation
 from app.services.agent import TOOLS, TradingAgent
 
 
-class FakeResponses:
-    def __init__(self, outputs):
-        self.outputs = iter(outputs)
-        self.calls = []
+class RiskToolProvider:
+    name = "test"
+    model = "test-model"
 
-    def create(self, **kwargs):
-        self.calls.append(kwargs)
-        return next(self.outputs)
+    def __init__(self) -> None:
+        self.arguments = {
+            "account_equity": "10000",
+            "risk_percent": "1",
+            "entry": "2000",
+            "stop": "1990",
+            "target": "2040",
+            "value_per_price_unit": "1",
+        }
+        self.instructions = ""
+
+    def complete(self, *, instructions, execute_tool, **kwargs) -> str:
+        self.instructions = instructions
+        payload = json.loads(execute_tool("calculate_position_size", self.arguments))
+        assert payload["result"]["quantity"] == "10.00000000"
+        return "Risk is $100 and planned R is 4."
+
+    def analyze_chart(self, **kwargs):
+        raise AssertionError("not used")
 
 
-def test_agent_executes_risk_tool_and_returns_final_text() -> None:
-    tool_call = SimpleNamespace(
-        type="function_call",
-        name="calculate_position_size",
-        call_id="call-1",
-        arguments=json.dumps(
-            {
-                "account_equity": "10000",
-                "risk_percent": "1",
-                "entry": "2000",
-                "stop": "1990",
-                "target": "2040",
-                "value_per_price_unit": "1",
-            }
-        ),
-    )
-    fake_responses = FakeResponses(
-        [
-            SimpleNamespace(output=[tool_call], output_text=""),
-            SimpleNamespace(output=[], output_text="Risk is $100 and planned R is 4."),
-        ]
-    )
-    client = SimpleNamespace(responses=fake_responses)
+class MutationProvider:
+    name = "test"
+    model = "test-model"
+
+    def __init__(self, arguments) -> None:
+        self.arguments = arguments
+
+    def complete(self, *, execute_tool, **kwargs) -> str:
+        execute_tool("create_trade_plan", self.arguments)
+        return "unreachable"
+
+    def analyze_chart(self, **kwargs):
+        raise AssertionError("not used")
+
+
+def test_agent_executes_risk_tool_and_loads_runtime_policy() -> None:
+    provider = RiskToolProvider()
     agent = TradingAgent(
-        settings=Settings(openai_api_key="test"),
+        settings=Settings(),
         db=Mock(),
         engine=Mock(),
         confirm_mutation=Mock(return_value=False),
-        client=client,
+        provider=provider,
     )
 
     result = agent.respond("Calculate this risk.")
 
     assert result == "Risk is $100 and planned R is 4."
-    second_input = fake_responses.calls[1]["input"]
-    tool_outputs = [item for item in second_input if isinstance(item, dict)]
-    function_output = next(
-        item for item in tool_outputs if item.get("type") == "function_call_output"
-    )
-    payload = json.loads(function_output["output"])
-    assert payload["ok"] is True
-    assert payload["result"]["quantity"] == "10.00000000"
-    assert fake_responses.calls[0]["store"] is False
-    assert fake_responses.calls[0]["reasoning"]["context"] == "current_turn"
-    assert fake_responses.calls[0]["safety_identifier"] == "trading-agent-local"
+    assert "Runtime policy 1.0.0" in provider.instructions
+    assert "human_controls_orders" in provider.instructions
 
 
 def test_agent_does_not_apply_declined_mutation() -> None:
     confirmation = Mock(return_value=False)
-    agent = TradingAgent(
-        settings=Settings(openai_api_key="test"),
-        db=Mock(),
-        engine=Mock(),
-        confirm_mutation=confirmation,
-        client=SimpleNamespace(responses=Mock()),
-    )
     arguments = {
         "instrument": "XAUUSD",
         "venue": "OANDA",
@@ -91,12 +86,20 @@ def test_agent_does_not_apply_declined_mutation() -> None:
         "observations": ["Price traded above the reference high."],
         "interpretations": ["The move may be a liquidity sweep."],
     }
+    db = Mock()
+    agent = TradingAgent(
+        settings=Settings(),
+        db=db,
+        engine=Mock(),
+        confirm_mutation=confirmation,
+        provider=MutationProvider(arguments),
+    )
 
-    result = json.loads(agent._execute_tool("create_trade_plan", arguments))
+    with pytest.raises(PolicyViolation, match="declined"):
+        agent.respond("Journal this trade.")
 
-    assert result == {"ok": False, "error": "trader declined journal mutation"}
     confirmation.assert_called_once()
-    agent.db.add.assert_not_called()
+    db.add.assert_not_called()
 
 
 def test_all_function_schemas_are_strict() -> None:

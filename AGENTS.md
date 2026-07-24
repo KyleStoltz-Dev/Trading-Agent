@@ -6,6 +6,10 @@ This application is a decision-support and journaling tool. It must not autonomo
 place, modify, or cancel orders. Broker integrations are read-only until a separately
 reviewed order-preview flow exists, and every submission requires explicit human approval.
 
+`app/trading-rules.json` is the runtime policy for the product. Do not add or expose a tool
+without explicit policy metadata and a pre-execution policy-hook check. Never bypass a policy
+failure, confirmation hook, or policy-hash mismatch.
+
 ## Domain rules
 
 - Separate chart observations from interpretations and proposed scenarios.
@@ -15,6 +19,8 @@ reviewed order-preview flow exists, and every submission requires explicit human
 - Preserve source, market timestamp, instrument, venue, and timeframe with evidence.
 - Do not encode a setup as an edge until a reviewed sample supports it.
 - Never commit credentials, account data, private journal exports, or raw broker payloads.
+- Keep model providers behind the provider protocol. OpenAI and Anthropic SDKs are optional
+  adapters; domain services must not depend directly on either.
 
 ## Verification
 
@@ -24,4 +30,3 @@ Run before committing:
 ruff check .
 pytest
 ```
-
