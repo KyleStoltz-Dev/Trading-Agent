@@ -1,0 +1,4 @@
+Single-database Alembic migrations for the local or hosted PostgreSQL journal.
+
+Run `trading-agent db upgrade` to apply forward migrations. The application never stores
+the live quote stream in these tables.

@@ -3,8 +3,8 @@ import importlib
 import json
 from typing import Any
 
-from app.config import Settings
-from app.providers.base import ProviderConfigurationError, ToolExecutor
+from app.config import Settings, secret_value
+from app.providers.base import ProviderConfigurationError, ToolExecutor, safe_tool_error
 
 
 class OpenAIProvider:
@@ -20,7 +20,7 @@ class OpenAIProvider:
                 raise ProviderConfigurationError(
                     'Install the OpenAI adapter with `pip install -e ".[openai]"`'
                 ) from exc
-            client = openai.OpenAI(api_key=settings.openai_api_key)
+            client = openai.OpenAI(api_key=secret_value(settings.openai_api_key))
         self.client = client
 
     def complete(
@@ -53,7 +53,12 @@ class OpenAIProvider:
                 try:
                     output = execute_tool(call.name, json.loads(call.arguments))
                 except Exception as exc:
-                    output = json.dumps({"ok": False, "error": str(exc)})
+                    output = json.dumps(
+                        {
+                            "ok": False,
+                            "error": safe_tool_error(exc),
+                        }
+                    )
                 input_items.append(
                     {
                         "type": "function_call_output",

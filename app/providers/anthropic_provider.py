@@ -2,8 +2,8 @@ import base64
 import importlib
 from typing import Any
 
-from app.config import Settings
-from app.providers.base import ProviderConfigurationError, ToolExecutor
+from app.config import Settings, secret_value
+from app.providers.base import ProviderConfigurationError, ToolExecutor, safe_tool_error
 
 
 def _anthropic_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -38,7 +38,9 @@ class AnthropicProvider:
                 raise ProviderConfigurationError(
                     'Install the Anthropic adapter with `pip install -e ".[anthropic]"`'
                 ) from exc
-            client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+            client = anthropic.Anthropic(
+                api_key=secret_value(settings.anthropic_api_key)
+            )
         self.client = client
 
     def complete(
@@ -80,7 +82,7 @@ class AnthropicProvider:
                     output = execute_tool(call.name, call.input)
                     is_error = False
                 except Exception as exc:
-                    output = str(exc)
+                    output = safe_tool_error(exc)
                     is_error = True
                 results.append(
                     {

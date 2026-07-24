@@ -2,10 +2,13 @@ import importlib.util
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Literal
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
 
-from app.config import Settings
+from app.config import Settings, secret_value
+from app.db import inspect_schema
+from app.models import BrokerConnection
 from app.providers import ProviderConfigurationError, resolve_provider_name
 
 if TYPE_CHECKING:
@@ -48,6 +51,71 @@ def check_health(
             detail=f"environment={settings.app_env}; provider={settings.model_provider}",
         )
     ]
+    if settings.trading_agent_api_key is None:
+        checks.append(
+            HealthCheck(
+                "api_security",
+                "warning",
+                "API disabled until TRADING_AGENT_API_KEY is configured",
+            )
+        )
+    elif len(secret_value(settings.trading_agent_api_key) or "") < 32:
+        checks.append(
+            HealthCheck(
+                "api_security",
+                "error",
+                "TRADING_AGENT_API_KEY must contain at least 32 characters",
+            )
+        )
+    else:
+        checks.append(HealthCheck("api_security", "ok", "API key is configured"))
+
+    oanda_values = (settings.oanda_api_token, settings.oanda_account_id)
+    if all(oanda_values):
+        checks.append(
+            HealthCheck(
+                "oanda",
+                "warning" if settings.oanda_environment == "live" else "ok",
+                (
+                    "read-only adapter points to a LIVE account"
+                    if settings.oanda_environment == "live"
+                    else "read-only adapter configured for practice"
+                ),
+            )
+        )
+    elif any(oanda_values):
+        checks.append(
+            HealthCheck(
+                "oanda",
+                "error",
+                "OANDA token and account id must be configured together",
+            )
+        )
+    else:
+        checks.append(
+            HealthCheck(
+                "oanda",
+                "warning",
+                "OANDA read-only data is not configured",
+            )
+        )
+
+    if settings.trading_economics_api_key:
+        checks.append(
+            HealthCheck(
+                "news",
+                "ok",
+                "Trading Economics read-only connector is configured",
+            )
+        )
+    else:
+        checks.append(
+            HealthCheck(
+                "news",
+                "warning",
+                "economic calendar and news sync are not configured",
+            )
+        )
 
     try:
         provider_name = resolve_provider_name(settings)
@@ -98,9 +166,11 @@ def check_health(
             )
         )
 
+    database_available = False
     try:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
+        database_available = True
         checks.append(HealthCheck("database", "ok", "database connection succeeded"))
     except Exception as exc:
         checks.append(
@@ -110,5 +180,63 @@ def check_health(
                 f"database connection failed: {type(exc).__name__}",
             )
         )
+
+    if database_available:
+        try:
+            state = inspect_schema(engine)
+        except Exception as exc:
+            checks.append(
+                HealthCheck(
+                    "database_schema",
+                    "error",
+                    f"schema inspection failed: {type(exc).__name__}",
+                )
+            )
+        else:
+            if state.legacy_unmanaged:
+                checks.append(
+                    HealthCheck(
+                        "database_schema",
+                        "error",
+                        "legacy schema requires `trading-agent db adopt-legacy`",
+                    )
+                )
+            elif not state.current:
+                checks.append(
+                    HealthCheck(
+                        "database_schema",
+                        "error",
+                        f"revision={state.current_revision}; expected={state.head_revision}",
+                    )
+                )
+            else:
+                checks.append(
+                    HealthCheck(
+                        "database_schema",
+                        "ok",
+                        f"revision={state.current_revision}",
+                    )
+                )
+                with Session(engine) as session:
+                    connections = list(session.scalars(select(BrokerConnection)))
+                for connection in connections:
+                    detail = f"{connection.provider}/{connection.environment}: {connection.status}"
+                    if connection.last_healthy_at is not None:
+                        detail += (
+                            f"; last healthy={connection.last_healthy_at.isoformat()}"
+                        )
+                    checks.append(
+                        HealthCheck(
+                            f"broker_connection:{connection.provider}",
+                            (
+                                "ok"
+                                if connection.status == "healthy"
+                                else "warning"
+                                if connection.status in {"configured", "disabled"}
+                                else "error"
+                            ),
+                            detail,
+                        )
+                    )
 
     return HealthReport(tuple(checks))

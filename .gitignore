@@ -1,4 +1,6 @@
 .env
+.env.*
+!.env.example
 .venv/
 __pycache__/
 .pytest_cache/
@@ -6,4 +8,6 @@ __pycache__/
 *.pyc
 *.sqlite3
 uploads/
-
+.data/
+dist/
+*.egg-info/

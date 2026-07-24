@@ -26,6 +26,11 @@
       <p class="lede">Capture context, trigger, risk, execution, and outcome. The assistant helps test a playbook; it does not place trades or promise what happens next.</p>
       <div class="grid">
         <section>
+          <h2>Local API access</h2>
+          <label>API key <input id="api-key" type="password" autocomplete="off" /></label>
+          <p class="lede">Stored only in this browser tab. Journal and chart mutations also require explicit confirmation.</p>
+        </section>
+        <section>
           <h2>Position size</h2>
           <form id="risk-form">
             <label>Account equity <input name="account_equity" type="number" step="any" required /></label>
@@ -54,10 +59,17 @@
     <script>
       document.querySelector("#risk-form").addEventListener("submit", async (event) => {
         event.preventDefault();
+        const apiKey = document.querySelector("#api-key").value;
+        if (!apiKey) {
+          document.querySelector("#risk-output").textContent = "Enter the local API key.";
+          return;
+        }
         const payload = Object.fromEntries(new FormData(event.target));
         if (!payload.target) delete payload.target;
         const response = await fetch("/api/risk/position-size", {
-          method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify(payload)
+          method: "POST",
+          headers: {"content-type": "application/json", "X-API-Key": apiKey},
+          body: JSON.stringify(payload)
         });
         const data = await response.json();
         document.querySelector("#risk-output").textContent = response.ok
@@ -67,4 +79,3 @@
     </script>
   </body>
 </html>
-

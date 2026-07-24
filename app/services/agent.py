@@ -1,7 +1,10 @@
+import asyncio
 import json
 import mimetypes
 import uuid
 from collections.abc import Callable
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -10,16 +13,20 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from app.config import Settings
+from app.connectors import create_news_connector, create_oanda_connector
 from app.policy import ExecutionHooks, PolicyEngine, policy_wrapped_executor
 from app.providers import ModelProvider, create_model_provider
 from app.schemas import (
+    BrokerPositionSizeRequest,
     PositionSizeRequest,
     ReflectionCreate,
     ReflectionRead,
     TradePlanCreate,
     TradePlanRead,
 )
-from app.services.chart_analysis import analyze_chart
+from app.services.catalog import active_instrument_specification
+from app.services.chart_analysis import SYSTEM_PROMPT, analyze_chart
+from app.services.evidence import record_chart_analysis
 from app.services.health import check_health
 from app.services.journal import (
     create_reflection,
@@ -27,7 +34,7 @@ from app.services.journal import (
     get_trade_plan,
     list_trade_plans,
 )
-from app.services.risk import calculate_position_size
+from app.services.risk import calculate_broker_position_size, calculate_position_size
 
 ConfirmMutation = Callable[[str, dict[str, Any]], bool]
 
@@ -84,6 +91,41 @@ TOOLS = [
     },
     {
         "type": "function",
+        "name": "calculate_broker_position_size",
+        "description": (
+            "Calculate authoritative quantity from a stored broker contract, costs, "
+            "margin, quantity step, and configured risk ceiling."
+        ),
+        "strict": True,
+        "parameters": _object_schema(
+            {
+                "provider": {"type": "string"},
+                "symbol": {"type": "string"},
+                "account_equity": {"type": "string"},
+                "available_margin": {"type": ["string", "null"]},
+                "risk_percent": {"type": "string"},
+                "entry": {"type": "string"},
+                "stop": {"type": "string"},
+                "target": {"type": ["string", "null"]},
+                "conversion_rate_to_account": {"type": "string"},
+                "estimated_slippage": {"type": "string"},
+            },
+            [
+                "provider",
+                "symbol",
+                "account_equity",
+                "available_margin",
+                "risk_percent",
+                "entry",
+                "stop",
+                "target",
+                "conversion_rate_to_account",
+                "estimated_slippage",
+            ],
+        ),
+    },
+    {
+        "type": "function",
         "name": "list_trade_plans",
         "description": "List recent journaled trade plans.",
         "strict": True,
@@ -111,6 +153,8 @@ TOOLS = [
                 "direction": {"type": "string", "enum": ["long", "short"]},
                 "setup_name": {"type": "string"},
                 "regime": {"type": ["string", "null"]},
+                "session_name": {"type": ["string", "null"]},
+                "market_time": {"type": ["string", "null"]},
                 "context_timeframe": {"type": "string"},
                 "trigger_timeframe": {"type": "string"},
                 "entry": {"type": "string"},
@@ -123,6 +167,11 @@ TOOLS = [
                 "invalidation": {"type": "string"},
                 "observations": {"type": "array", "items": {"type": "string"}},
                 "interpretations": {"type": "array", "items": {"type": "string"}},
+                "sizing_provider": {"type": ["string", "null"]},
+                "sizing_symbol": {"type": ["string", "null"]},
+                "available_margin": {"type": ["string", "null"]},
+                "conversion_rate_to_account": {"type": "string"},
+                "estimated_slippage": {"type": "string"},
             },
             [
                 "instrument",
@@ -130,6 +179,8 @@ TOOLS = [
                 "direction",
                 "setup_name",
                 "regime",
+                "session_name",
+                "market_time",
                 "context_timeframe",
                 "trigger_timeframe",
                 "entry",
@@ -142,6 +193,11 @@ TOOLS = [
                 "invalidation",
                 "observations",
                 "interpretations",
+                "sizing_provider",
+                "sizing_symbol",
+                "available_margin",
+                "conversion_rate_to_account",
+                "estimated_slippage",
             ],
         ),
     },
@@ -205,16 +261,87 @@ TOOLS = [
         "strict": True,
         "parameters": _object_schema({}, []),
     },
+    {
+        "type": "function",
+        "name": "get_live_quote",
+        "description": "Get one timestamped current quote from the configured OANDA feed.",
+        "strict": True,
+        "parameters": _object_schema(
+            {"instrument": {"type": "string"}},
+            ["instrument"],
+        ),
+    },
+    {
+        "type": "function",
+        "name": "get_recent_candles",
+        "description": "Get timestamped recent OANDA candles without persisting every update.",
+        "strict": True,
+        "parameters": _object_schema(
+            {
+                "instrument": {"type": "string"},
+                "timeframe": {"type": "string"},
+                "count": {"type": "integer", "minimum": 1, "maximum": 500},
+            },
+            ["instrument", "timeframe", "count"],
+        ),
+    },
+    {
+        "type": "function",
+        "name": "get_broker_state",
+        "description": (
+            "Get read-only account totals and open positions without account identifiers."
+        ),
+        "strict": True,
+        "parameters": _object_schema({}, []),
+    },
+    {
+        "type": "function",
+        "name": "get_market_news",
+        "description": "Get timestamped economic news metadata and provider summaries.",
+        "strict": True,
+        "parameters": _object_schema(
+            {
+                "country": {"type": ["string", "null"]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+            },
+            ["country", "limit"],
+        ),
+    },
+    {
+        "type": "function",
+        "name": "get_economic_calendar",
+        "description": "Get scheduled economic events with importance and source timestamps.",
+        "strict": True,
+        "parameters": _object_schema(
+            {
+                "start": {"type": "string"},
+                "end": {"type": "string"},
+                "countries": {"type": "array", "items": {"type": "string"}},
+                "minimum_importance": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 3,
+                },
+            },
+            ["start", "end", "countries", "minimum_importance"],
+        ),
+    },
 ]
 
 TOOL_METADATA = {
     "calculate_position_size": {"mutating": False, "deterministic": True},
+    "calculate_broker_position_size": {"mutating": False, "deterministic": True},
     "list_trade_plans": {"mutating": False, "deterministic": False},
     "get_trade_plan": {"mutating": False, "deterministic": False},
     "create_trade_plan": {"mutating": True, "deterministic": False},
     "add_trade_reflection": {"mutating": True, "deterministic": False},
-    "analyze_chart": {"mutating": False, "deterministic": False},
+    "analyze_chart": {"mutating": True, "deterministic": False},
     "get_system_health": {"mutating": False, "deterministic": False},
+    "get_live_quote": {"mutating": False, "deterministic": False},
+    "get_recent_candles": {"mutating": False, "deterministic": False},
+    "get_broker_state": {"mutating": False, "deterministic": False},
+    "get_market_news": {"mutating": False, "deterministic": False},
+    "get_economic_calendar": {"mutating": False, "deterministic": False},
 }
 
 
@@ -262,6 +389,24 @@ class TradingAgent:
             result = calculate_position_size(PositionSizeRequest.model_validate(arguments))
             return _json({"ok": True, "result": result})
 
+        if name == "calculate_broker_position_size":
+            request_values = {
+                key: value
+                for key, value in arguments.items()
+                if key not in {"provider", "symbol"}
+            }
+            request_values["maximum_risk_percent"] = str(
+                self.settings.maximum_trade_risk_percent
+            )
+            request = BrokerPositionSizeRequest.model_validate(request_values)
+            specification = active_instrument_specification(
+                self.db,
+                provider=arguments["provider"],
+                external_symbol=arguments["symbol"],
+            )
+            result = calculate_broker_position_size(request, specification)
+            return _json({"ok": True, "result": result})
+
         if name == "list_trade_plans":
             trades = list_trade_plans(self.db, limit=arguments["limit"])
             return _json(
@@ -277,7 +422,15 @@ class TradingAgent:
 
         if name == "create_trade_plan":
             request = TradePlanCreate.model_validate(arguments)
-            trade = create_trade_plan(self.db, request)
+            trade = create_trade_plan(
+                self.db,
+                request,
+                policy_hash=self.policy.content_hash,
+                source="agent",
+                maximum_risk_percent=Decimal(
+                    str(self.settings.maximum_trade_risk_percent)
+                ),
+            )
             return _json({"ok": True, "result": TradePlanRead.model_validate(trade)})
 
         if name == "add_trade_reflection":
@@ -304,10 +457,98 @@ class TradingAgent:
                 settings=self.settings,
                 provider=self.provider,
             )
+            record_chart_analysis(
+                self.db,
+                image_bytes=image_bytes,
+                content_type=content_type,
+                evidence_directory=self.settings.evidence_directory,
+                analysis=result,
+                provider=self.provider,
+                policy_hash=self.policy.content_hash,
+                prompt=SYSTEM_PROMPT,
+                source="agent",
+                market_time=None,
+                instrument=None,
+                venue=None,
+                timeframe=None,
+            )
             return _json({"ok": True, "result": result})
 
         if name == "get_system_health":
             report = check_health(self.settings, self.engine, policy=self.policy)
             return _json({"ok": True, "result": report.model_dump()})
+
+        if name == "get_live_quote":
+            async def read_quote():
+                connector = create_oanda_connector(self.settings)
+                try:
+                    return await connector.latest_quote(arguments["instrument"])
+                finally:
+                    await connector.aclose()
+
+            return _json({"ok": True, "result": asyncio.run(read_quote())})
+
+        if name == "get_recent_candles":
+            async def read_candles():
+                connector = create_oanda_connector(self.settings)
+                try:
+                    return await connector.candles(
+                        arguments["instrument"],
+                        arguments["timeframe"],
+                        count=arguments["count"],
+                    )
+                finally:
+                    await connector.aclose()
+
+            return _json({"ok": True, "result": asyncio.run(read_candles())})
+
+        if name == "get_broker_state":
+            async def read_broker_state():
+                connector = create_oanda_connector(self.settings)
+                try:
+                    account = await connector.account()
+                    positions = await connector.positions()
+                    return {
+                        "currency": account.currency,
+                        "balance": account.balance,
+                        "equity": account.equity,
+                        "margin_used": account.margin_used,
+                        "margin_available": account.margin_available,
+                        "as_of": account.retrieved_at,
+                        "source": account.source,
+                        "positions": positions,
+                    }
+                finally:
+                    await connector.aclose()
+
+            return _json({"ok": True, "result": asyncio.run(read_broker_state())})
+
+        if name == "get_market_news":
+            async def read_news():
+                connector = create_news_connector(self.settings)
+                try:
+                    return await connector.news(
+                        country=arguments["country"],
+                        limit=arguments["limit"],
+                    )
+                finally:
+                    await connector.aclose()
+
+            return _json({"ok": True, "result": asyncio.run(read_news())})
+
+        if name == "get_economic_calendar":
+            async def read_calendar():
+                connector = create_news_connector(self.settings)
+                try:
+                    return await connector.calendar(
+                        start=date.fromisoformat(arguments["start"]),
+                        end=date.fromisoformat(arguments["end"]),
+                        countries=arguments["countries"],
+                        minimum_importance=arguments["minimum_importance"],
+                    )
+                finally:
+                    await connector.aclose()
+
+            return _json({"ok": True, "result": asyncio.run(read_calendar())})
 
         raise ValueError(f"unknown tool: {name}")

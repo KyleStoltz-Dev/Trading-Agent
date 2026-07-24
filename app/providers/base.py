@@ -8,6 +8,12 @@ class ProviderConfigurationError(RuntimeError):
     pass
 
 
+def safe_tool_error(exc: Exception) -> str:
+    if isinstance(exc, (ValueError, LookupError, ProviderConfigurationError)):
+        return str(exc)[:500]
+    return f"{type(exc).__name__}: tool execution failed"
+
+
 class ModelProvider(Protocol):
     name: str
     model: str

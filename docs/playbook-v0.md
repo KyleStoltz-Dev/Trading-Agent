@@ -47,7 +47,15 @@ used to invent a new thesis after the original invalidates.
 - Hedge considered, hedge taken, and whether it changed net directional exposure.
 - Maximum favorable/adverse excursion after each management decision.
 
-## Definitions that still need operationalization
+## Operational definitions
+
+The machine-readable starting definition is `docs/playbook-schema-v1.json`. It declares
+measurable parameters for equal levels, sweeps/reclaims, body-close structure breaks,
+three-candle gaps, POI revisits, and 80% range location. Accumulation/distribution remains
+explicitly a hypothesis requiring a declared range, event sequence, and invalidation.
+
+The following labels remain research questions whose parameter values must be selected and
+tested:
 
 - Accumulation/distribution and nested reaccumulation.
 - “80% of accumulation”: exact range anchors and calculation.
@@ -71,4 +79,3 @@ Do not rewrite rules based on the latest few trades. Segment results by:
 
 Promote a rule change only after recording the previous version, sample size, hypothesis,
 and expected improvement.
-

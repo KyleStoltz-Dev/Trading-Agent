@@ -1,6 +1,8 @@
+import asyncio
 import json
 import mimetypes
 import uuid
+from datetime import date, datetime
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
@@ -12,13 +14,30 @@ from pydantic import ValidationError
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from sqlalchemy import select
 
-from app.config import get_settings
-from app.db import Base, SessionLocal, engine
-from app.models import ConversationSession
+from app.config import get_settings, secret_value
+from app.connectors import (
+    BrokerConfigurationError,
+    create_news_connector,
+    create_oanda_connector,
+)
+from app.db import (
+    LegacySchemaDetectedError,
+    SessionLocal,
+    adopt_legacy_database,
+    engine,
+    inspect_schema,
+    schema_revisions,
+    upgrade_database,
+)
+from app.models import BrokerConnection, ConnectorCursor, ConversationSession
 from app.policy import ExecutionHooks, PolicyEngine, ToolContext
 from app.providers import ProviderConfigurationError, create_model_provider
 from app.schemas import (
+    BrokerPositionSizeRequest,
+    InstrumentSpecificationCreate,
+    ManagementEventCreate,
     PositionSizeRequest,
     ReflectionCreate,
     ReflectionRead,
@@ -26,7 +45,15 @@ from app.schemas import (
     TradePlanRead,
 )
 from app.services.agent import TradingAgent
-from app.services.chart_analysis import analyze_chart
+from app.services.analytics import build_edge_report
+from app.services.broker_sync import synchronize_broker
+from app.services.catalog import (
+    active_instrument_specification,
+    configure_account,
+    configure_instrument_specification,
+    create_playbook_version,
+)
+from app.services.chart_analysis import SYSTEM_PROMPT, analyze_chart
 from app.services.conversations import (
     add_turn,
     conversation_history,
@@ -35,6 +62,8 @@ from app.services.conversations import (
     list_conversations,
     resolve_conversation,
 )
+from app.services.evidence import record_chart_analysis
+from app.services.execution_ledger import record_management_event
 from app.services.health import HealthReport, check_health
 from app.services.journal import (
     ReflectionExistsError,
@@ -44,7 +73,8 @@ from app.services.journal import (
     get_trade_plan,
     list_trade_plans,
 )
-from app.services.risk import calculate_position_size
+from app.services.news import store_calendar_events, store_news_items
+from app.services.risk import calculate_broker_position_size, calculate_position_size
 
 app = typer.Typer(
     name="trading-agent",
@@ -56,6 +86,18 @@ journal_app = typer.Typer(help="Create and inspect journal entries.")
 app.add_typer(journal_app, name="journal")
 sessions_app = typer.Typer(help="Inspect locally persisted agent conversations.")
 app.add_typer(sessions_app, name="sessions")
+database_app = typer.Typer(help="Inspect or migrate the PostgreSQL schema.")
+app.add_typer(database_app, name="db")
+broker_app = typer.Typer(help="Read-only broker configuration and synchronization.")
+app.add_typer(broker_app, name="broker")
+instrument_app = typer.Typer(help="Broker instrument specifications and deterministic sizing.")
+app.add_typer(instrument_app, name="instrument")
+edge_app = typer.Typer(help="Review measured setup performance.")
+app.add_typer(edge_app, name="edge")
+playbook_app = typer.Typer(help="Create immutable playbook versions.")
+app.add_typer(playbook_app, name="playbook")
+news_app = typer.Typer(help="Read and retain timestamped news/calendar metadata.")
+app.add_typer(news_app, name="news")
 console = Console()
 
 
@@ -110,12 +152,27 @@ def _split_list(value: str) -> list[str]:
 
 
 def _prompt_plan() -> TradePlanCreate:
+    market_time = typer.prompt(
+        "Market time (ISO-8601 with timezone; blank if unknown)",
+        default="",
+    )
+    sizing_provider = typer.prompt(
+        "Sizing provider (blank for manual value-per-price-unit)",
+        default="",
+    )
+    sizing_symbol = (
+        typer.prompt("Broker symbol", default="XAU_USD")
+        if sizing_provider
+        else None
+    )
     return TradePlanCreate(
         instrument=typer.prompt("Instrument", default="XAUUSD"),
         venue=typer.prompt("Venue", default="OANDA"),
         direction=typer.prompt("Direction (long/short)"),
         setup_name=typer.prompt("Setup name"),
         regime=typer.prompt("Regime", default="unknown"),
+        session_name=typer.prompt("Session", default="New York"),
+        market_time=market_time or None,
         context_timeframe=typer.prompt("Context timeframe", default="4h"),
         trigger_timeframe=typer.prompt("Trigger timeframe", default="5m"),
         entry=Decimal(typer.prompt("Entry")),
@@ -123,7 +180,28 @@ def _prompt_plan() -> TradePlanCreate:
         target=Decimal(typer.prompt("Target")),
         account_equity=Decimal(typer.prompt("Account equity")),
         risk_percent=Decimal(typer.prompt("Risk percent", default="1")),
-        value_per_price_unit=Decimal(typer.prompt("Value per price unit")),
+        value_per_price_unit=(
+            Decimal("1")
+            if sizing_provider
+            else Decimal(typer.prompt("Value per price unit"))
+        ),
+        sizing_provider=sizing_provider or None,
+        sizing_symbol=sizing_symbol,
+        available_margin=(
+            Decimal(typer.prompt("Available margin"))
+            if sizing_provider
+            else None
+        ),
+        conversion_rate_to_account=(
+            Decimal(typer.prompt("PnL-to-account currency rate", default="1"))
+            if sizing_provider
+            else Decimal("1")
+        ),
+        estimated_slippage=(
+            Decimal(typer.prompt("Estimated slippage in price units", default="0"))
+            if sizing_provider
+            else Decimal("0")
+        ),
         thesis=typer.prompt("Thesis"),
         invalidation=typer.prompt("Invalidation"),
         observations=_split_list(
@@ -142,10 +220,41 @@ def _read_plan(path: Path | None) -> TradePlanCreate:
 
 
 def _save_plan(request: TradePlanCreate, assume_yes: bool) -> None:
-    sizing = calculate_position_size(request)
+    settings = get_settings()
+    maximum_risk = Decimal(str(settings.maximum_trade_risk_percent))
+    if request.risk_percent > maximum_risk:
+        raise ValueError("requested risk exceeds the configured maximum")
+    if request.sizing_provider and request.sizing_symbol:
+        upgrade_database()
+        with SessionLocal() as db:
+            specification = active_instrument_specification(
+                db,
+                provider=request.sizing_provider,
+                external_symbol=request.sizing_symbol,
+            )
+            sizing = calculate_broker_position_size(
+                BrokerPositionSizeRequest(
+                    account_equity=request.account_equity,
+                    available_margin=request.available_margin,
+                    risk_percent=request.risk_percent,
+                    entry=request.entry,
+                    stop=request.stop,
+                    target=request.target,
+                    conversion_rate_to_account=request.conversion_rate_to_account,
+                    estimated_slippage=request.estimated_slippage,
+                    maximum_risk_percent=maximum_risk,
+                ),
+                specification,
+            )
+            risk_display = (
+                sizing.estimated_loss_at_stop + sizing.estimated_costs
+            )
+    else:
+        sizing = calculate_position_size(request)
+        risk_display = sizing.risk_amount
     console.print(
         Panel(
-            f"Risk: ${sizing.risk_amount}\n"
+            f"Estimated total risk: ${risk_display}\n"
             f"Quantity: {sizing.quantity}\n"
             f"Planned R: {sizing.planned_r}",
             title="Plan preview",
@@ -157,9 +266,15 @@ def _save_plan(request: TradePlanCreate, assume_yes: bool) -> None:
         mutating=True,
         assume_yes=assume_yes,
     )
-    Base.metadata.create_all(bind=engine)
+    upgrade_database()
     with SessionLocal() as db:
-        trade = create_trade_plan(db, request)
+        trade = create_trade_plan(
+            db,
+            request,
+            policy_hash=_runtime_policy().content_hash,
+            source="cli",
+            maximum_risk_percent=maximum_risk,
+        )
         _print_model(TradePlanRead.model_validate(trade))
 
 
@@ -192,7 +307,8 @@ def _run_chat(
         console.print("[red]Use either --session or --new/--name, not both.[/red]")
         raise typer.Exit(2)
 
-    Base.metadata.create_all(bind=engine)
+    if settings.database_auto_migrate:
+        upgrade_database()
     with SessionLocal() as db:
         conversation = (
             resolve_conversation(db, session_reference) if session_reference else None
@@ -344,6 +460,80 @@ def risk(
     _print_model(calculate_position_size(request))
 
 
+@instrument_app.command("configure")
+def instrument_configure(
+    file: Annotated[
+        Path,
+        typer.Option("--file", exists=True, dir_okay=False),
+    ],
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+) -> None:
+    """Add a time-versioned broker contract specification from JSON."""
+    try:
+        request = InstrumentSpecificationCreate.model_validate_json(file.read_text())
+    except (OSError, ValidationError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
+    _authorize_direct(
+        "configure_instrument_specification",
+        request.model_dump(mode="json"),
+        mutating=True,
+        deterministic=True,
+        assume_yes=yes,
+    )
+    upgrade_database()
+    with SessionLocal() as db:
+        specification = configure_instrument_specification(db, request)
+        _print_model(
+            {
+                "id": specification.id,
+                "effective_from": specification.effective_from,
+                "source": specification.source,
+            }
+        )
+
+
+@instrument_app.command("risk")
+def instrument_risk(
+    provider: Annotated[str, typer.Option()],
+    symbol: Annotated[str, typer.Option()],
+    account_equity: Annotated[str, typer.Option()],
+    risk_percent: Annotated[str, typer.Option()],
+    entry: Annotated[str, typer.Option()],
+    stop: Annotated[str, typer.Option()],
+    target: Annotated[str | None, typer.Option()] = None,
+    available_margin: Annotated[str | None, typer.Option()] = None,
+    conversion_rate: Annotated[str, typer.Option()] = "1",
+    slippage: Annotated[str, typer.Option()] = "0",
+) -> None:
+    """Size from a stored broker contract, spread, fees, margin, and step size."""
+    settings = get_settings()
+    request = BrokerPositionSizeRequest(
+        account_equity=account_equity,
+        available_margin=available_margin,
+        risk_percent=risk_percent,
+        entry=entry,
+        stop=stop,
+        target=target,
+        conversion_rate_to_account=conversion_rate,
+        estimated_slippage=slippage,
+        maximum_risk_percent=Decimal(str(settings.maximum_trade_risk_percent)),
+    )
+    _authorize_direct(
+        "calculate_broker_position_size",
+        request.model_dump(mode="json"),
+        deterministic=True,
+    )
+    upgrade_database()
+    with SessionLocal() as db:
+        specification = active_instrument_specification(
+            db,
+            provider=provider,
+            external_symbol=symbol,
+        )
+        _print_model(calculate_broker_position_size(request, specification))
+
+
 @app.command()
 def plan(
     file: Annotated[
@@ -355,7 +545,7 @@ def plan(
     """Create a trade plan interactively or from JSON."""
     try:
         _save_plan(_read_plan(file), yes)
-    except (ValidationError, OSError) as exc:
+    except (ValidationError, OSError, ValueError, LookupError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(2) from exc
 
@@ -371,7 +561,7 @@ def journal_add(
     """Add a journaled trade plan; equivalent to `trading-agent plan`."""
     try:
         _save_plan(_read_plan(file), yes)
-    except (ValidationError, OSError) as exc:
+    except (ValidationError, OSError, ValueError, LookupError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(2) from exc
 
@@ -382,7 +572,7 @@ def journal_list(
 ) -> None:
     """List recent journaled plans."""
     _authorize_direct("list_trade_plans", {"limit": limit})
-    Base.metadata.create_all(bind=engine)
+    upgrade_database()
     with SessionLocal() as db:
         trades = list_trade_plans(db, limit=limit)
         serialized = [
@@ -395,6 +585,7 @@ def journal_list(
 def journal_show(trade_id: uuid.UUID) -> None:
     """Show one journaled plan."""
     _authorize_direct("get_trade_plan", {"trade_id": str(trade_id)})
+    upgrade_database()
     with SessionLocal() as db:
         try:
             trade = get_trade_plan(db, trade_id)
@@ -409,7 +600,7 @@ def sessions_list(
     limit: Annotated[int, typer.Option(min=1, max=100)] = 20,
 ) -> None:
     """List recent interactive sessions."""
-    Base.metadata.create_all(bind=engine)
+    upgrade_database()
     with SessionLocal() as db:
         conversations = list_conversations(db, limit)
         table = Table(title="Trading Agent sessions")
@@ -427,9 +618,343 @@ def sessions_list(
         console.print(table)
 
 
+@database_app.command("upgrade")
+def database_upgrade() -> None:
+    """Apply all forward-only PostgreSQL migrations."""
+    upgrade_database()
+    current, head = schema_revisions()
+    console.print(f"[green]Database schema is current: {current or head}[/green]")
+
+
+@database_app.command("status")
+def database_status() -> None:
+    """Show the applied and expected schema revisions."""
+    state = inspect_schema()
+    status = (
+        "legacy adoption required"
+        if state.legacy_unmanaged
+        else "current"
+        if state.current
+        else "upgrade required"
+    )
+    _print_model(
+        {
+            "status": status,
+            "current": state.current_revision,
+            "head": state.head_revision,
+            "legacy_unmanaged": state.legacy_unmanaged,
+        }
+    )
+
+
+@database_app.command("adopt-legacy")
+def database_adopt_legacy(
+    backup: Annotated[
+        Path,
+        typer.Option(
+            "--backup",
+            help="New absolute path for a mandatory pg_dump backup.",
+        ),
+    ],
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Confirm the backup and transactional adoption."),
+    ] = False,
+) -> None:
+    """Back up and transactionally adopt tables created before Alembic."""
+    if not backup.is_absolute():
+        console.print("[red]--backup must be an absolute path[/red]")
+        raise typer.Exit(2)
+    if not yes and not typer.confirm(
+        "Back up the database, migrate the schema, verify copied rows, and remove legacy tables?"
+    ):
+        raise typer.Exit(1)
+    try:
+        adopt_legacy_database(backup)
+    except (LegacySchemaDetectedError, FileExistsError, FileNotFoundError, RuntimeError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    current, head = schema_revisions()
+    console.print(
+        f"[green]Legacy schema adopted; backup={backup}; revision={current or head}[/green]"
+    )
+
+
+@broker_app.command("configure-oanda")
+def broker_configure_oanda(
+    label: Annotated[str, typer.Option(prompt=True)],
+    currency: Annotated[str, typer.Option(prompt=True)] = "USD",
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+) -> None:
+    """Register the configured OANDA account without storing its token."""
+    settings = get_settings()
+    if not settings.oanda_account_id or not settings.oanda_api_token:
+        console.print(
+            "[red]Set OANDA_ACCOUNT_ID and OANDA_API_TOKEN in .env first.[/red]"
+        )
+        raise typer.Exit(1)
+    arguments = {
+        "provider": "oanda-v20",
+        "label": label,
+        "currency": currency,
+        "environment": settings.oanda_environment,
+    }
+    _authorize_direct(
+        "configure_broker_connection",
+        arguments,
+        mutating=True,
+        assume_yes=yes,
+    )
+    upgrade_database()
+    with SessionLocal() as db:
+        account, connection = configure_account(
+            db,
+            broker="OANDA",
+            external_account_id=secret_value(settings.oanda_account_id),
+            label=label,
+            currency=currency,
+            mode=settings.oanda_environment,
+            provider="oanda-v20",
+            environment=settings.oanda_environment,
+            config_reference="env:OANDA_API_TOKEN",
+        )
+        _print_model(
+            {
+                "account_id": account.id,
+                "connection_id": connection.id,
+                "provider": connection.provider,
+                "environment": connection.environment,
+            }
+        )
+
+
+def _configured_oanda_connection(db) -> BrokerConnection:
+    settings = get_settings()
+    statement = select(BrokerConnection).where(
+        BrokerConnection.provider == "oanda-v20"
+    )
+    connections = list(db.scalars(statement))
+    matches = [
+        item
+        for item in connections
+        if item.account.external_account_id == secret_value(settings.oanda_account_id)
+    ]
+    if len(matches) != 1:
+        raise LookupError(
+            "run `trading-agent broker configure-oanda` for the configured account"
+        )
+    return matches[0]
+
+
+@broker_app.command("quote")
+def broker_quote(instrument: str) -> None:
+    """Read one live OANDA quote with market and retrieval timestamps."""
+    _authorize_direct("get_live_quote", {"instrument": instrument})
+    try:
+        connector = create_oanda_connector(get_settings())
+    except BrokerConfigurationError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    async def read():
+        try:
+            return await connector.latest_quote(instrument)
+        finally:
+            await connector.aclose()
+
+    _print_model(asyncio.run(read()))
+
+
+@broker_app.command("sync")
+def broker_sync(
+    from_transaction_id: Annotated[
+        str | None,
+        typer.Option(
+            "--from-transaction-id",
+            help="Explicit first OANDA transaction id for a one-time history import.",
+        ),
+    ] = None,
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+) -> None:
+    """Import new OANDA transactions and reconcile account/position snapshots."""
+    _authorize_direct(
+        "synchronize_broker",
+        {
+            "provider": "oanda-v20",
+            "from_transaction_id": from_transaction_id,
+        },
+        mutating=True,
+        assume_yes=yes,
+    )
+    upgrade_database()
+    try:
+        connector = create_oanda_connector(get_settings())
+    except BrokerConfigurationError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    with SessionLocal() as db:
+        try:
+            connection = _configured_oanda_connection(db)
+            if from_transaction_id is not None:
+                if not from_transaction_id.isdigit():
+                    raise ValueError("--from-transaction-id must contain only digits")
+                existing_cursor = db.scalar(
+                    select(ConnectorCursor).where(
+                        ConnectorCursor.connection_id == connection.id,
+                        ConnectorCursor.stream_name == "transactions",
+                    )
+                )
+                if existing_cursor is not None:
+                    raise ValueError(
+                        "a transaction cursor already exists; refusing to rewind it"
+                    )
+                db.add(
+                    ConnectorCursor(
+                        connection_id=connection.id,
+                        stream_name="transactions",
+                        cursor_value=from_transaction_id,
+                    )
+                )
+                db.flush()
+
+            async def synchronize():
+                try:
+                    return await synchronize_broker(
+                        db,
+                        connection_id=connection.id,
+                        connector=connector,
+                    )
+                finally:
+                    await connector.aclose()
+
+            _print_model(asyncio.run(synchronize()))
+        except (LookupError, ValueError) as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1) from exc
+
+
+@edge_app.command("report")
+def edge_report(
+    minimum_sample: Annotated[int, typer.Option(min=5, max=1000)] = 30,
+) -> None:
+    """Report expectancy only by stable setup/instrument/regime/timeframe segments."""
+    _authorize_direct("build_edge_report", {"minimum_sample": minimum_sample})
+    upgrade_database()
+    with SessionLocal() as db:
+        _print_model(build_edge_report(db, minimum_sample))
+
+
+@playbook_app.command("version")
+def playbook_version(
+    name: Annotated[str, typer.Option()],
+    file: Annotated[Path, typer.Option(exists=True, dir_okay=False)],
+    hypothesis: Annotated[str | None, typer.Option()] = None,
+    minimum_sample: Annotated[int | None, typer.Option(min=5)] = None,
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+) -> None:
+    """Freeze a measurable playbook definition as a new immutable version."""
+    try:
+        definition = json.loads(file.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
+    _authorize_direct(
+        "create_playbook_version",
+        {
+            "name": name,
+            "definition": definition,
+            "change_hypothesis": hypothesis,
+            "minimum_sample": minimum_sample,
+        },
+        mutating=True,
+        assume_yes=yes,
+    )
+    upgrade_database()
+    with SessionLocal() as db:
+        version = create_playbook_version(
+            db,
+            name=name,
+            definition=definition,
+            change_hypothesis=hypothesis,
+            sample_requirement=minimum_sample,
+        )
+        _print_model(
+            {
+                "id": version.id,
+                "version": version.version,
+                "content_hash": version.content_hash,
+            }
+        )
+
+
+@news_app.command("sync")
+def news_sync(
+    start: Annotated[str, typer.Option()],
+    end: Annotated[str, typer.Option()],
+    countries: Annotated[str, typer.Option()] = "United States",
+    news_country: Annotated[str | None, typer.Option()] = "United States",
+    minimum_importance: Annotated[int, typer.Option(min=0, max=3)] = 2,
+    news_limit: Annotated[int, typer.Option(min=1, max=250)] = 50,
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+) -> None:
+    """Fetch and idempotently retain event/headline metadata, not article bodies."""
+    try:
+        start_date = date.fromisoformat(start)
+        end_date = date.fromisoformat(end)
+        connector = create_news_connector(get_settings())
+    except (ValueError, BrokerConfigurationError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
+    country_values = [value.strip() for value in countries.split(",") if value.strip()]
+    _authorize_direct(
+        "synchronize_news",
+        {
+            "start": start,
+            "end": end,
+            "countries": country_values,
+            "news_country": news_country,
+            "minimum_importance": minimum_importance,
+            "news_limit": news_limit,
+        },
+        mutating=True,
+        assume_yes=yes,
+    )
+    upgrade_database()
+
+    async def fetch():
+        try:
+            calendar = await connector.calendar(
+                start=start_date,
+                end=end_date,
+                countries=country_values,
+                minimum_importance=minimum_importance,
+            )
+            headlines = await connector.news(
+                country=news_country,
+                limit=news_limit,
+            )
+            return calendar, headlines
+        finally:
+            await connector.aclose()
+
+    calendar, headlines = asyncio.run(fetch())
+    with SessionLocal() as db:
+        calendar_count = store_calendar_events(db, tuple(calendar))
+        news_count = store_news_items(db, tuple(headlines))
+    _print_model(
+        {
+            "calendar_received": len(calendar),
+            "calendar_added": calendar_count,
+            "news_received": len(headlines),
+            "news_added": news_count,
+        }
+    )
+
+
 @sessions_app.command("show")
 def sessions_show(session: str) -> None:
     """Show the saved transcript for one session."""
+    upgrade_database()
     with SessionLocal() as db:
         conversation: ConversationSession | None = resolve_conversation(db, session)
         if conversation is None:
@@ -465,6 +990,7 @@ def review(
         mutating=True,
         assume_yes=yes,
     )
+    upgrade_database()
     with SessionLocal() as db:
         try:
             reflection = create_reflection(db, trade_id, request)
@@ -474,6 +1000,55 @@ def review(
         _print_model(ReflectionRead.model_validate(reflection))
 
 
+@app.command("manage")
+def manage_trade(
+    trade_id: uuid.UUID,
+    event_type: Annotated[str, typer.Option(prompt=True)],
+    reason: Annotated[str, typer.Option(prompt=True)],
+    occurred_at: Annotated[str, typer.Option(prompt=True)],
+    price: Annotated[str | None, typer.Option()] = None,
+    quantity_delta: Annotated[str | None, typer.Option()] = None,
+    position_quantity_after: Annotated[str | None, typer.Option()] = None,
+    realized_r: Annotated[str | None, typer.Option()] = None,
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+) -> None:
+    """Append a partial, runner, hedge consideration, or other management decision."""
+    try:
+        request = ManagementEventCreate(
+            event_type=event_type,
+            reason=reason,
+            occurred_at=occurred_at,
+            price=price,
+            quantity_delta=quantity_delta,
+            position_quantity_after=position_quantity_after,
+            realized_r_at_event=realized_r,
+        )
+    except ValidationError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
+    _authorize_direct(
+        "record_management_event",
+        {"trade_id": str(trade_id), **request.model_dump(mode="json")},
+        mutating=True,
+        assume_yes=yes,
+    )
+    upgrade_database()
+    with SessionLocal() as db:
+        try:
+            event = record_management_event(db, trade_id, request)
+        except LookupError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1) from exc
+        _print_model(
+            {
+                "id": event.id,
+                "trade_id": event.trade_id,
+                "event_type": event.event_type,
+                "occurred_at": event.occurred_at,
+            }
+        )
+
+
 @app.command()
 def chart(
     image: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
@@ -481,11 +1056,28 @@ def chart(
         str,
         typer.Option(help="Known context; never inferred from the image."),
     ] = "",
+    instrument: Annotated[str | None, typer.Option()] = None,
+    venue: Annotated[str | None, typer.Option()] = None,
+    timeframe: Annotated[str | None, typer.Option()] = None,
+    market_time: Annotated[
+        str | None,
+        typer.Option(help="Timezone-aware ISO market time; omit when unknown."),
+    ] = None,
+    trade_plan_id: Annotated[uuid.UUID | None, typer.Option()] = None,
 ) -> None:
     """Analyze a local chart screenshot."""
     _authorize_direct(
         "analyze_chart",
-        {"image_path": str(image), "context": context},
+        {
+            "image_path": str(image),
+            "context": context,
+            "instrument": instrument,
+            "venue": venue,
+            "timeframe": timeframe,
+            "market_time": market_time,
+            "trade_plan_id": str(trade_plan_id) if trade_plan_id else None,
+        },
+        mutating=True,
     )
     content_type, _ = mimetypes.guess_type(image)
     if content_type not in {"image/png", "image/jpeg", "image/webp"}:
@@ -495,12 +1087,54 @@ def chart(
     if len(image_bytes) > 10 * 1024 * 1024:
         console.print("[red]Image exceeds 10 MB.[/red]")
         raise typer.Exit(2)
+    observed_at = None
+    if market_time is not None:
+        try:
+            observed_at = datetime.fromisoformat(market_time.replace("Z", "+00:00"))
+        except ValueError as exc:
+            console.print("[red]--market-time must be ISO-8601[/red]")
+            raise typer.Exit(2) from exc
+        if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+            console.print("[red]--market-time must include a timezone[/red]")
+            raise typer.Exit(2)
+    settings = get_settings()
+    provider = create_model_provider(settings)
     try:
-        result = analyze_chart(image_bytes, content_type, context, get_settings())
+        result = analyze_chart(
+            image_bytes,
+            content_type,
+            context,
+            settings,
+            provider=provider,
+        )
     except RuntimeError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
-    _print_model(result)
+    upgrade_database()
+    with SessionLocal() as db:
+        evidence, run = record_chart_analysis(
+            db,
+            image_bytes=image_bytes,
+            content_type=content_type,
+            evidence_directory=settings.evidence_directory,
+            analysis=result,
+            provider=provider,
+            policy_hash=_runtime_policy().content_hash,
+            prompt=SYSTEM_PROMPT,
+            source="cli",
+            market_time=observed_at,
+            instrument=instrument,
+            venue=venue,
+            timeframe=timeframe,
+            trade_plan_id=trade_plan_id,
+        )
+    _print_model(
+        {
+            "analysis": result,
+            "evidence_id": evidence.id,
+            "analysis_run_id": run.id,
+        }
+    )
 
 
 @app.command("api")
@@ -510,6 +1144,13 @@ def api_server(
     reload: Annotated[bool, typer.Option(help="Reload after source changes.")] = False,
 ) -> None:
     """Run the optional HTTP and browser service."""
+    api_key = secret_value(get_settings().trading_agent_api_key)
+    if api_key is None or len(api_key) < 32:
+        console.print(
+            "[red]Set TRADING_AGENT_API_KEY to at least 32 random characters "
+            "before starting the API.[/red]"
+        )
+        raise typer.Exit(1)
     uvicorn.run("app.main:app", host=host, port=port, reload=reload)
 
 
