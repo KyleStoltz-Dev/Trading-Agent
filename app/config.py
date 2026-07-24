@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     anthropic_model: str = "claude-sonnet-5"
     app_env: str = "development"
+    database_auto_migrate: bool = True
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
