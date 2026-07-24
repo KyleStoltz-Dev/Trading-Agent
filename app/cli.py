@@ -14,7 +14,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from app.config import get_settings
-from app.db import Base, SessionLocal, engine
+from app.db import SessionLocal, engine, schema_revisions, upgrade_database
 from app.models import ConversationSession
 from app.policy import ExecutionHooks, PolicyEngine, ToolContext
 from app.providers import ProviderConfigurationError, create_model_provider
@@ -56,6 +56,8 @@ journal_app = typer.Typer(help="Create and inspect journal entries.")
 app.add_typer(journal_app, name="journal")
 sessions_app = typer.Typer(help="Inspect locally persisted agent conversations.")
 app.add_typer(sessions_app, name="sessions")
+database_app = typer.Typer(help="Inspect or migrate the PostgreSQL schema.")
+app.add_typer(database_app, name="db")
 console = Console()
 
 
@@ -157,7 +159,7 @@ def _save_plan(request: TradePlanCreate, assume_yes: bool) -> None:
         mutating=True,
         assume_yes=assume_yes,
     )
-    Base.metadata.create_all(bind=engine)
+    upgrade_database()
     with SessionLocal() as db:
         trade = create_trade_plan(db, request)
         _print_model(TradePlanRead.model_validate(trade))
@@ -192,7 +194,8 @@ def _run_chat(
         console.print("[red]Use either --session or --new/--name, not both.[/red]")
         raise typer.Exit(2)
 
-    Base.metadata.create_all(bind=engine)
+    if settings.database_auto_migrate:
+        upgrade_database()
     with SessionLocal() as db:
         conversation = (
             resolve_conversation(db, session_reference) if session_reference else None
@@ -382,7 +385,7 @@ def journal_list(
 ) -> None:
     """List recent journaled plans."""
     _authorize_direct("list_trade_plans", {"limit": limit})
-    Base.metadata.create_all(bind=engine)
+    upgrade_database()
     with SessionLocal() as db:
         trades = list_trade_plans(db, limit=limit)
         serialized = [
@@ -409,7 +412,7 @@ def sessions_list(
     limit: Annotated[int, typer.Option(min=1, max=100)] = 20,
 ) -> None:
     """List recent interactive sessions."""
-    Base.metadata.create_all(bind=engine)
+    upgrade_database()
     with SessionLocal() as db:
         conversations = list_conversations(db, limit)
         table = Table(title="Trading Agent sessions")
@@ -425,6 +428,22 @@ def sessions_list(
                 str(conversation.updated_at),
             )
         console.print(table)
+
+
+@database_app.command("upgrade")
+def database_upgrade() -> None:
+    """Apply all forward-only PostgreSQL migrations."""
+    upgrade_database()
+    current, head = schema_revisions()
+    console.print(f"[green]Database schema is current: {current or head}[/green]")
+
+
+@database_app.command("status")
+def database_status() -> None:
+    """Show the applied and expected schema revisions."""
+    current, head = schema_revisions()
+    status = "current" if current == head else "upgrade required"
+    _print_model({"status": status, "current": current, "head": head})
 
 
 @sessions_app.command("show")
