@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.db import Base, engine, get_db
+from app.db import get_db, upgrade_database
 from app.models import TradePlan, TradeReflection
 from app.policy import PolicyEngine, ToolContext
 from app.schemas import (
@@ -35,7 +35,8 @@ from app.services.risk import calculate_position_size
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     application.state.policy = PolicyEngine.load()
-    Base.metadata.create_all(bind=engine)
+    if get_settings().database_auto_migrate:
+        upgrade_database()
     yield
 
 

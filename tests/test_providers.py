@@ -28,8 +28,26 @@ class FakeMessages:
 
 
 def test_provider_auto_selection_uses_the_only_configured_key() -> None:
-    assert resolve_provider_name(Settings(openai_api_key="test")) == "openai"
-    assert resolve_provider_name(Settings(anthropic_api_key="test")) == "anthropic"
+    assert (
+        resolve_provider_name(
+            Settings(
+                model_provider="auto",
+                openai_api_key="test",
+                anthropic_api_key=None,
+            )
+        )
+        == "openai"
+    )
+    assert (
+        resolve_provider_name(
+            Settings(
+                model_provider="auto",
+                openai_api_key=None,
+                anthropic_api_key="test",
+            )
+        )
+        == "anthropic"
+    )
 
 
 def test_openai_adapter_returns_tool_output_to_responses_api() -> None:

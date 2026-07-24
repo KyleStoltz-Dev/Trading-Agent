@@ -6,7 +6,9 @@ execution. It does not autonomously place trades.
 
 ## What works in this MVP
 
-- PostgreSQL-backed trade plans and reflections.
+- Migration-backed PostgreSQL plans, executions, snapshots, evidence, and reviews.
+- Provider-neutral, read-only live-data contracts with OANDA and MT5 normalization examples.
+- Bounded in-memory quotes/candles; the database does not retain every tick.
 - Deterministic position-size and planned-R calculations.
 - Context-timeframe and trigger-timeframe separation.
 - Chart screenshot analysis through an optional OpenAI or Anthropic adapter.
@@ -92,6 +94,8 @@ trading-agent chart /absolute/path/to/chart.png
 trading-agent journal list
 trading-agent review TRADE_ID
 trading-agent sessions list
+trading-agent db status
+trading-agent db upgrade
 ```
 
 Sessions have predictable names. The default new-session name is the date, such as
@@ -119,6 +123,9 @@ model tool call, direct fallback command, or API service operation:
 The current policy forbids broker order placement, modification, cancellation, hedging, and
 position closing. Adding a future broker adapter does not grant the conversational agent
 access; the policy and execution boundary must be reviewed separately.
+
+The schema can audit a future order-preview and approval workflow, but the current
+connector interfaces remain read-only and expose no broker write method.
 
 The CLI calls Python services directly and does not require a local HTTP server. Run the
 optional API/browser process only when needed:
@@ -154,5 +161,5 @@ There is no broker order endpoint. Future broker integration begins with read-on
 positions and fills. Any later order workflow must be previewed and explicitly confirmed
 by the trader, with deterministic risk limits and an audit log.
 
-See [the starting playbook](docs/playbook-v0.md) and
+See [the data model](docs/data-model.md), [the starting playbook](docs/playbook-v0.md), and
 [architecture notes](docs/architecture.md).
