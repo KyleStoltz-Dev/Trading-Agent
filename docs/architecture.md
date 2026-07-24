@@ -15,6 +15,11 @@ The MVP is a human-in-the-loop journal and playbook service:
 - Alembic-managed, execution-centered PostgreSQL records.
 - Provider-neutral read-only broker and market-data contracts.
 - Bounded in-memory quote/candle state with explicit freshness checks.
+- A read-only OANDA implementation with transaction cursors and reconciliation.
+- Broker-contract-aware deterministic sizing and versioned instrument specifications.
+- Trading Economics calendar/news metadata ingestion.
+- Content-addressed chart evidence and auditable model-analysis runs.
+- Immutable playbook definitions and sample-aware edge segmentation.
 
 ## Trust boundaries
 
@@ -31,10 +36,11 @@ The MVP is a human-in-the-loop journal and playbook service:
 ## Adapter boundary
 
 - Market data: OANDA first, MT5 reference; continuous data remains in memory.
-- News/calendar: provider to be selected, with publication and event timestamps.
+- News/calendar: Trading Economics metadata with provider and retrieval timestamps.
 - Broker: read-only account, positions, and transaction/fill ingestion first.
 - Discord: slash commands and image uploads calling this API.
-- Storage: object storage for chart evidence; PostgreSQL stores metadata and hashes.
+- Storage: local private content-addressed files for chart evidence; PostgreSQL stores
+  metadata and hashes. Object storage is a future deployment adapter.
 
 The database contains order-intent and approval records so a later preview workflow can be
 audited. Those records do not grant execution authority. Connector protocols intentionally

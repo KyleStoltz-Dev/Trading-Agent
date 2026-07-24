@@ -74,10 +74,12 @@
     ],
     "mutating_tools": [
       "create_trade_plan",
-      "add_trade_reflection"
+      "add_trade_reflection",
+      "analyze_chart"
     ],
     "deterministic_tools": [
-      "calculate_position_size"
+      "calculate_position_size",
+      "calculate_broker_position_size"
     ],
     "max_tool_rounds": 5
   }

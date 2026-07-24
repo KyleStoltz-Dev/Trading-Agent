@@ -40,6 +40,41 @@ def test_live_quote_cache_rejects_stale_data() -> None:
         )
 
 
+def test_live_quote_cache_rejects_out_of_order_updates_and_tracks_source() -> None:
+    cache = LiveMarketCache()
+    current = Quote(
+        instrument="XAU_USD",
+        bid=Decimal("2399.50"),
+        ask=Decimal("2400.00"),
+        market_time=NOW,
+        retrieved_at=NOW,
+        source="oanda-v20",
+        venue="OANDA",
+    )
+    older = Quote(
+        instrument="XAU_USD",
+        bid=Decimal("2398.50"),
+        ask=Decimal("2399.00"),
+        market_time=NOW - timedelta(seconds=1),
+        retrieved_at=NOW + timedelta(seconds=1),
+        source="oanda-v20",
+        venue="OANDA",
+    )
+
+    assert cache.put_quote(current) is True
+    assert cache.put_quote(older) is False
+    status = cache.source_status("oanda-v20")
+
+    assert status.connected is True
+    assert status.rejected_out_of_order == 1
+    assert cache.quote(
+        "oanda-v20",
+        "XAU_USD",
+        max_age=timedelta(seconds=2),
+        now=NOW,
+    ) == current
+
+
 def test_live_candle_cache_replaces_partial_candle_and_stays_bounded() -> None:
     cache = LiveMarketCache(candle_capacity=2)
 

@@ -105,6 +105,60 @@ class InstrumentMapping(Base):
     instrument: Mapped[Instrument] = relationship()
 
 
+class InstrumentSpecification(Base):
+    __tablename__ = "instrument_specifications"
+    __table_args__ = (
+        UniqueConstraint(
+            "instrument_mapping_id",
+            "effective_from",
+            name="uq_instrument_specification_effective",
+        ),
+        CheckConstraint("tick_size > 0", name="ck_instrument_spec_tick_size"),
+        CheckConstraint(
+            "tick_value_per_quantity_unit > 0",
+            name="ck_instrument_spec_tick_value",
+        ),
+        CheckConstraint("contract_size > 0", name="ck_instrument_spec_contract_size"),
+        CheckConstraint("minimum_quantity > 0", name="ck_instrument_spec_minimum"),
+        CheckConstraint(
+            "maximum_quantity >= minimum_quantity",
+            name="ck_instrument_spec_maximum",
+        ),
+        CheckConstraint("quantity_step > 0", name="ck_instrument_spec_step"),
+        CheckConstraint(
+            "margin_rate IS NULL OR (margin_rate > 0 AND margin_rate <= 1)",
+            name="ck_instrument_spec_margin",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    instrument_mapping_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("instrument_mappings.id", ondelete="CASCADE"),
+        index=True,
+    )
+    account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("trading_accounts.id"), index=True
+    )
+    contract_size: Mapped[Decimal] = mapped_column(QUANTITY)
+    tick_size: Mapped[Decimal] = mapped_column(PRICE)
+    tick_value_per_quantity_unit: Mapped[Decimal] = mapped_column(MONEY)
+    minimum_quantity: Mapped[Decimal] = mapped_column(QUANTITY)
+    maximum_quantity: Mapped[Decimal] = mapped_column(QUANTITY)
+    quantity_step: Mapped[Decimal] = mapped_column(QUANTITY)
+    margin_rate: Mapped[Decimal | None] = mapped_column(Numeric(12, 8))
+    estimated_spread: Mapped[Decimal | None] = mapped_column(PRICE)
+    commission_per_quantity: Mapped[Decimal] = mapped_column(MONEY, default=Decimal("0"))
+    financing_per_quantity_day: Mapped[Decimal | None] = mapped_column(MONEY)
+    pnl_currency: Mapped[str] = mapped_column(String(12))
+    effective_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    effective_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source: Mapped[str] = mapped_column(String(80))
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class ConnectorCursor(Base):
     __tablename__ = "connector_cursors"
     __table_args__ = (
@@ -208,11 +262,15 @@ class TradePlan(Base):
     playbook_version_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("playbook_versions.id"), index=True
     )
+    instrument_specification_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("instrument_specifications.id"), index=True
+    )
     instrument: Mapped[str] = mapped_column(String(32), index=True)
     venue: Mapped[str | None] = mapped_column(String(64))
     direction: Mapped[str] = mapped_column(String(8))
     setup_name: Mapped[str] = mapped_column(String(120), index=True)
     regime: Mapped[str | None] = mapped_column(String(64), index=True)
+    session_name: Mapped[str | None] = mapped_column(String(40), index=True)
     context_timeframe: Mapped[str] = mapped_column(String(16))
     trigger_timeframe: Mapped[str] = mapped_column(String(16))
     entry: Mapped[Decimal] = mapped_column(PRICE)
@@ -222,6 +280,8 @@ class TradePlan(Base):
     risk_percent: Mapped[Decimal] = mapped_column(Numeric(8, 4))
     value_per_price_unit: Mapped[Decimal] = mapped_column(PRICE)
     risk_amount: Mapped[Decimal] = mapped_column(MONEY)
+    estimated_costs: Mapped[Decimal | None] = mapped_column(MONEY)
+    estimated_margin: Mapped[Decimal | None] = mapped_column(MONEY)
     quantity: Mapped[Decimal] = mapped_column(QUANTITY)
     planned_r: Mapped[Decimal] = mapped_column(Numeric(12, 4))
     thesis: Mapped[str] = mapped_column(Text)
@@ -230,6 +290,7 @@ class TradePlan(Base):
     interpretations: Mapped[list[str]] = mapped_column(JSONB, default=list)
     source: Mapped[str] = mapped_column(String(40), default="manual")
     source_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    minutes_to_high_impact_event: Mapped[int | None] = mapped_column(Integer)
     policy_hash: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(24), default="planned", index=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -286,6 +347,7 @@ class OrderIntent(Base):
 class OrderApproval(Base):
     __tablename__ = "order_approvals"
     __table_args__ = (
+        UniqueConstraint("order_intent_id", name="uq_order_approval_intent"),
         CheckConstraint("decision IN ('approved', 'rejected')", name="ck_order_approval_decision"),
     )
 
@@ -490,6 +552,57 @@ class MarketContext(Base):
     metrics: Mapped[dict] = mapped_column(JSONB, default=dict)
 
 
+class EconomicEvent(Base):
+    __tablename__ = "economic_events"
+    __table_args__ = (
+        UniqueConstraint("source", "source_event_id", name="uq_economic_event_source"),
+        CheckConstraint("importance BETWEEN 0 AND 3", name="ck_economic_event_importance"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    source: Mapped[str] = mapped_column(String(80), index=True)
+    source_event_id: Mapped[str] = mapped_column(String(160))
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    timing_estimated: Mapped[bool] = mapped_column(Boolean, default=False)
+    country: Mapped[str] = mapped_column(String(120), index=True)
+    currency: Mapped[str | None] = mapped_column(String(12), index=True)
+    category: Mapped[str | None] = mapped_column(String(160))
+    title: Mapped[str] = mapped_column(Text)
+    importance: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    actual: Mapped[str | None] = mapped_column(String(120))
+    forecast: Mapped[str | None] = mapped_column(String(120))
+    previous: Mapped[str | None] = mapped_column(String(120))
+    source_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    source_url: Mapped[str | None] = mapped_column(Text)
+
+
+class NewsItem(Base):
+    __tablename__ = "news_items"
+    __table_args__ = (
+        UniqueConstraint("source", "source_item_id", name="uq_news_item_source"),
+        CheckConstraint("importance BETWEEN 0 AND 3", name="ck_news_item_importance"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    source: Mapped[str] = mapped_column(String(80), index=True)
+    source_item_id: Mapped[str] = mapped_column(String(160))
+    title: Mapped[str] = mapped_column(Text)
+    summary: Mapped[str | None] = mapped_column(Text)
+    country: Mapped[str | None] = mapped_column(String(120), index=True)
+    category: Mapped[str | None] = mapped_column(String(160), index=True)
+    symbol: Mapped[str | None] = mapped_column(String(120), index=True)
+    importance: Mapped[int] = mapped_column(Integer, default=0)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    source_url: Mapped[str | None] = mapped_column(Text)
+    content_hash: Mapped[str] = mapped_column(String(64))
+
+
 class EvidenceItem(Base):
     __tablename__ = "evidence_items"
     __table_args__ = (
@@ -519,6 +632,43 @@ class EvidenceItem(Base):
     market_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     metadata_json: Mapped[dict] = mapped_column(JSONB, default=dict)
+
+
+class AnalysisRun(Base):
+    __tablename__ = "analysis_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "analysis_type IN ('chart', 'news', 'market', 'review')",
+            name="ck_analysis_run_type",
+        ),
+        CheckConstraint(
+            "status IN ('completed', 'failed', 'corrected')",
+            name="ck_analysis_run_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    evidence_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("evidence_items.id"), index=True
+    )
+    trade_plan_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("trade_plans.id"), index=True
+    )
+    analysis_type: Mapped[str] = mapped_column(String(24), index=True)
+    status: Mapped[str] = mapped_column(String(16))
+    provider: Mapped[str] = mapped_column(String(40))
+    model: Mapped[str] = mapped_column(String(120))
+    policy_hash: Mapped[str] = mapped_column(String(64))
+    prompt_hash: Mapped[str] = mapped_column(String(64))
+    input_hash: Mapped[str] = mapped_column(String(64))
+    output_hash: Mapped[str | None] = mapped_column(String(64))
+    output_json: Mapped[dict] = mapped_column(JSONB, default=dict)
+    error_type: Mapped[str | None] = mapped_column(String(120))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
 
 
 class Observation(Base):
@@ -569,6 +719,12 @@ class TradeReflection(Base):
     realized_r: Mapped[Decimal] = mapped_column(Numeric(12, 4))
     execution_grade: Mapped[str] = mapped_column(String(8))
     outcome_grade: Mapped[str | None] = mapped_column(String(16))
+    process_score: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+    outcome_score: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+    maximum_favorable_excursion_r: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    maximum_adverse_excursion_r: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    total_fees: Mapped[Decimal | None] = mapped_column(MONEY)
+    slippage_cost: Mapped[Decimal | None] = mapped_column(MONEY)
     rule_adherence: Mapped[list[dict]] = mapped_column(JSONB, default=list)
     emotion_before: Mapped[str | None] = mapped_column(Text)
     emotion_during: Mapped[str | None] = mapped_column(Text)

@@ -19,11 +19,12 @@ fill arrives, management changes, reconciliation runs, or a review is saved.
 
 | Concern | Tables | Why it is durable |
 | --- | --- | --- |
-| Identity | `instruments`, `instrument_mappings` | Maps `XAUUSD`, `XAU_USD`, and broker-specific symbols without corrupting analytics. |
+| Identity | `instruments`, `instrument_mappings`, `instrument_specifications` | Maps symbols and versions the broker contract, costs, margin, and sizing increments used by each plan. |
 | Accounts | `trading_accounts`, `broker_connections` | Identifies the venue and account while storing only a secret-store reference, never credentials. |
 | Sync | `connector_cursors` | Resumes transaction ingestion idempotently after restarts. |
 | Playbook | `playbooks`, `playbook_versions` | Freezes the exact rules used by a plan so later edits cannot rewrite history. |
-| Decision | `trade_plans`, `market_contexts`, `observations`, `evidence_items` | Separates timestamped facts from hypotheses and keeps evidence provenance and hashes. |
+| Decision | `trade_plans`, `market_contexts`, `observations`, `evidence_items`, `analysis_runs` | Separates facts from hypotheses and records content, policy, prompt, model, input, and output provenance. |
+| Events | `economic_events`, `news_items` | Retains provider IDs, source/retrieval timestamps, importance, values, and links without copying full articles. |
 | Lifecycle | `trades`, `trade_management_events` | Connects planning, broker records, fills, management decisions, and review for one position lifecycle. |
 | Future preview | `order_intents`, `order_approvals` | Records a policy-bound proposal and the trader's separate decision. No connector exposes submission methods yet. |
 | Execution | `execution_events`, `fills` | Stores normalized broker truth with external IDs, occurrence/ingestion times, and uniqueness constraints. |
@@ -47,6 +48,10 @@ SHA-256 hash, MIME type, source, market time, retrieval time, and safe metadata.
    key, policy hash, expiry, and separate approval record.
 7. The current connector protocols are read-only and contain no place, modify, cancel,
    close, or hedge method.
+8. Every broker-sized plan references the exact effective instrument specification used
+   for risk, cost, quantity, and margin arithmetic.
+9. Chart evidence is content-addressed. Re-analyzing the same image creates a new
+   `analysis_run` without duplicating the underlying evidence file or item.
 
 ## Initial providers
 
@@ -70,3 +75,7 @@ trading-agent db upgrade
 
 Production deployments can set `DATABASE_AUTO_MIGRATE=false` and run the upgrade command
 as an explicit release step.
+
+An unmanaged pre-Alembic schema is never stamped or overwritten automatically. See
+`docs/operations.md` for the backup, transactional adoption, and row-count verification
+workflow.

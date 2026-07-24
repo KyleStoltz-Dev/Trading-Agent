@@ -7,13 +7,19 @@ execution. It does not autonomously place trades.
 ## What works in this MVP
 
 - Migration-backed PostgreSQL plans, executions, snapshots, evidence, and reviews.
-- Provider-neutral, read-only live-data contracts with OANDA and MT5 normalization examples.
+- Provider-neutral, read-only live-data contracts, a working OANDA v20 adapter, and MT5
+  normalization examples.
 - Bounded in-memory quotes/candles; the database does not retain every tick.
-- Deterministic position-size and planned-R calculations.
+- Broker-contract-aware position sizing including spread, slippage, commission, quantity
+  increments, margin, currency conversion, and a configured maximum risk.
 - Context-timeframe and trigger-timeframe separation.
 - Chart screenshot analysis through an optional OpenAI or Anthropic adapter.
 - Explicit separation of visible facts, hypotheses, missing evidence, and questions.
-- A minimal browser interface and OpenAPI documentation.
+- Content-addressed chart evidence and provider/model/policy/prompt/input/output provenance.
+- Idempotent fill imports, transaction cursors, account/position snapshots, and reconciliation.
+- Immutable playbook versions, normalized rule evaluations, and sample-aware edge reports.
+- Trading Economics calendar/news metadata with source and retrieval timestamps.
+- A key-protected browser/API interface and OpenAPI documentation.
 
 ## Local setup
 
@@ -56,6 +62,15 @@ OPENAI_MODEL=gpt-5.6-sol
 `MODEL_PROVIDER=auto` works when exactly one provider key is configured. If both keys are
 present, select one explicitly.
 
+Generate a separate local API key; do not reuse a model or broker credential:
+
+```bash
+python -c 'import secrets; print(secrets.token_urlsafe(32))'
+```
+
+Save it as `TRADING_AGENT_API_KEY` in `.env`. The optional API will not start with a key
+shorter than 32 characters.
+
 Open:
 
 - App: http://localhost:8000
@@ -96,6 +111,14 @@ trading-agent review TRADE_ID
 trading-agent sessions list
 trading-agent db status
 trading-agent db upgrade
+trading-agent broker configure-oanda --help
+trading-agent broker quote XAU_USD
+trading-agent broker sync --help
+trading-agent instrument configure --help
+trading-agent instrument risk --help
+trading-agent playbook version --help
+trading-agent news sync --help
+trading-agent edge report --minimum-sample 30
 ```
 
 Sessions have predictable names. The default new-session name is the date, such as
@@ -137,6 +160,27 @@ trading-agent api --reload
 Use `trading-agent api` for the browser interface, API clients, and future Discord/webhook
 adapters.
 
+## Data flow
+
+Live quotes and candles remain in bounded process memory and must pass freshness/order
+checks. PostgreSQL receives only durable decision and audit data: plans, broker executions,
+fills, management events, snapshots, calendar/news metadata, evidence provenance, and
+reviews. This keeps the journal useful without turning PostgreSQL into a tick database.
+
+OANDA is currently the only complete live connector. It is read-only by construction. On a
+new connection, `broker sync` starts at the current transaction cursor unless you explicitly
+request a one-time historical start with `--from-transaction-id`.
+
+Load the measurable starting strategy as an immutable version:
+
+```bash
+trading-agent playbook version \
+  --name wyckoff-smc-fractal \
+  --file docs/playbook-schema-v1.json \
+  --hypothesis "Context plus lower-timeframe confirmation improves expectancy" \
+  --minimum-sample 30
+```
+
 ## Neon
 
 Create a Neon project and replace `DATABASE_URL` in `.env` with its SQLAlchemy psycopg URL:
@@ -162,4 +206,5 @@ positions and fills. Any later order workflow must be previewed and explicitly c
 by the trader, with deterministic risk limits and an audit log.
 
 See [the data model](docs/data-model.md), [the starting playbook](docs/playbook-v0.md), and
-[architecture notes](docs/architecture.md).
+[architecture notes](docs/architecture.md). Before connecting accounts, read
+[operations](docs/operations.md) and the [security model](docs/security.md).
