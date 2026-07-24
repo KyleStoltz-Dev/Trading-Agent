@@ -1,9 +1,5 @@
-import base64
-import json
-
-from openai import OpenAI
-
 from app.config import Settings
+from app.providers import ModelProvider, create_model_provider
 from app.schemas import ChartAnalysis
 
 SYSTEM_PROMPT = """
@@ -24,37 +20,14 @@ def analyze_chart(
     content_type: str,
     user_context: str,
     settings: Settings,
+    provider: ModelProvider | None = None,
 ) -> ChartAnalysis:
-    if not settings.openai_api_key:
-        raise RuntimeError("OPENAI_API_KEY is required for chart analysis")
-
-    encoded = base64.b64encode(image_bytes).decode("ascii")
-    client = OpenAI(api_key=settings.openai_api_key)
-    response = client.responses.create(
-        model=settings.openai_model,
-        reasoning={"effort": "medium"},
-        input=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": user_context},
-                    {
-                        "type": "input_image",
-                        "image_url": f"data:{content_type};base64,{encoded}",
-                        "detail": "original",
-                    },
-                ],
-            }
-        ],
+    model_provider = provider or create_model_provider(settings)
+    result = model_provider.analyze_chart(
+        image_bytes=image_bytes,
+        content_type=content_type,
+        user_context=user_context,
         instructions=SYSTEM_PROMPT,
-        text={
-            "format": {
-                "type": "json_schema",
-                "name": "chart_analysis",
-                "strict": True,
-                "schema": ChartAnalysis.model_json_schema(),
-            }
-        },
+        output_schema=ChartAnalysis.model_json_schema(),
     )
-    return ChartAnalysis.model_validate(json.loads(response.output_text))
-
+    return ChartAnalysis.model_validate(result)

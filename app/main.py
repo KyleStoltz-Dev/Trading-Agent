@@ -1,17 +1,16 @@
 import uuid
 from contextlib import asynccontextmanager
-from decimal import Decimal
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import Base, engine, get_db
 from app.models import TradePlan, TradeReflection
+from app.policy import PolicyEngine, ToolContext
 from app.schemas import (
     ChartAnalysis,
     PositionSizeRequest,
@@ -22,11 +21,20 @@ from app.schemas import (
     TradePlanRead,
 )
 from app.services.chart_analysis import analyze_chart
+from app.services.journal import (
+    ReflectionExistsError,
+    TradeNotFoundError,
+    create_reflection,
+    create_trade_plan,
+    get_trade_plan,
+    list_trade_plans,
+)
 from app.services.risk import calculate_position_size
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(application: FastAPI):
+    application.state.policy = PolicyEngine.load()
     Base.metadata.create_all(bind=engine)
     yield
 
@@ -43,80 +51,130 @@ ImageUpload = Annotated[UploadFile, File()]
 ChartContext = Annotated[str, Form()]
 
 
+def get_runtime_policy(request: Request) -> PolicyEngine:
+    return request.app.state.policy
+
+
+RuntimePolicyDependency = Annotated[PolicyEngine, Depends(get_runtime_policy)]
+
+
+def authorize_api_call(
+    policy: PolicyEngine,
+    *,
+    name: str,
+    arguments: dict,
+    mutating: bool = False,
+    deterministic: bool = False,
+) -> None:
+    """Apply the startup policy before an API operation reaches its service."""
+    policy.authorize(
+        ToolContext(
+            name=name,
+            arguments=arguments,
+            mutating=mutating,
+            deterministic=deterministic,
+        )
+    )
+
+
 @app.get("/", include_in_schema=False)
 def index() -> FileResponse:
     return FileResponse(Path(__file__).parent / "static" / "index.html")
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
+def health(policy: RuntimePolicyDependency) -> dict[str, str]:
+    policy.assert_unchanged()
     return {"status": "ok"}
 
 
 @app.post("/api/risk/position-size", response_model=PositionSizeResult)
-def position_size(request: PositionSizeRequest) -> PositionSizeResult:
+def position_size(
+    request: PositionSizeRequest, policy: RuntimePolicyDependency
+) -> PositionSizeResult:
+    authorize_api_call(
+        policy,
+        name="calculate_position_size",
+        arguments=request.model_dump(mode="json"),
+        deterministic=True,
+    )
     return calculate_position_size(request)
 
 
 @app.post("/api/trades", response_model=TradePlanRead, status_code=201)
-def create_trade(request: TradePlanCreate, db: DatabaseSession) -> TradePlan:
-    sizing = calculate_position_size(request)
-    trade = TradePlan(
-        **request.model_dump(exclude={"target"}),
-        target=request.target,
-        risk_amount=sizing.risk_amount,
-        quantity=sizing.quantity,
-        planned_r=sizing.planned_r,
+def create_trade(
+    request: TradePlanCreate,
+    db: DatabaseSession,
+    policy: RuntimePolicyDependency,
+) -> TradePlan:
+    authorize_api_call(
+        policy,
+        name="create_trade_plan",
+        arguments=request.model_dump(mode="json"),
+        mutating=True,
     )
-    db.add(trade)
-    db.commit()
-    db.refresh(trade)
-    return trade
+    return create_trade_plan(db, request)
 
 
 @app.get("/api/trades", response_model=list[TradePlanRead])
-def list_trades(db: DatabaseSession) -> list[TradePlan]:
-    return list(db.scalars(select(TradePlan).order_by(TradePlan.created_at.desc())))
+def list_trades(
+    db: DatabaseSession, policy: RuntimePolicyDependency
+) -> list[TradePlan]:
+    authorize_api_call(policy, name="list_trade_plans", arguments={})
+    return list_trade_plans(db)
 
 
 @app.get("/api/trades/{trade_id}", response_model=TradePlanRead)
-def get_trade(trade_id: uuid.UUID, db: DatabaseSession) -> TradePlan:
-    trade = db.get(TradePlan, trade_id)
-    if not trade:
-        raise HTTPException(status_code=404, detail="trade not found")
-    return trade
+def get_trade(
+    trade_id: uuid.UUID,
+    db: DatabaseSession,
+    policy: RuntimePolicyDependency,
+) -> TradePlan:
+    authorize_api_call(
+        policy,
+        name="get_trade_plan",
+        arguments={"trade_id": str(trade_id)},
+    )
+    try:
+        return get_trade_plan(db, trade_id)
+    except TradeNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.post("/api/trades/{trade_id}/reflection", response_model=ReflectionRead, status_code=201)
 def add_reflection(
-    trade_id: uuid.UUID, request: ReflectionCreate, db: DatabaseSession
+    trade_id: uuid.UUID,
+    request: ReflectionCreate,
+    db: DatabaseSession,
+    policy: RuntimePolicyDependency,
 ) -> TradeReflection:
-    trade = db.get(TradePlan, trade_id)
-    if not trade:
-        raise HTTPException(status_code=404, detail="trade not found")
-    if trade.reflection:
-        raise HTTPException(status_code=409, detail="reflection already exists")
-    if trade.risk_amount == 0:
-        raise HTTPException(status_code=422, detail="trade risk amount cannot be zero")
-
-    realized_r = (request.realized_pnl / trade.risk_amount).quantize(Decimal("0.0001"))
-    reflection = TradeReflection(
-        trade_id=trade.id,
-        realized_r=realized_r,
-        **request.model_dump(),
+    authorize_api_call(
+        policy,
+        name="add_trade_reflection",
+        arguments={"trade_id": str(trade_id), **request.model_dump(mode="json")},
+        mutating=True,
     )
-    trade.status = "reviewed"
-    db.add(reflection)
-    db.commit()
-    db.refresh(reflection)
-    return reflection
+    try:
+        return create_reflection(db, trade_id, request)
+    except TradeNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ReflectionExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.post("/api/charts/analyze", response_model=ChartAnalysis)
 async def chart_analysis(
     image: ImageUpload,
+    policy: RuntimePolicyDependency,
     context: ChartContext = "",
 ) -> ChartAnalysis:
+    authorize_api_call(
+        policy,
+        name="analyze_chart",
+        arguments={"content_type": image.content_type, "context": context},
+    )
     allowed_types = {"image/png", "image/jpeg", "image/webp"}
     if image.content_type not in allowed_types:
         raise HTTPException(status_code=415, detail="PNG, JPEG, or WebP required")
