@@ -8,6 +8,18 @@ trading-agent health --strict
 trading-agent
 ```
 
+For token-free local inference on macOS, install and start Ollama separately:
+
+```bash
+brew install ollama
+brew services start ollama
+ollama pull qwen3.5:9b
+```
+
+Set `MODEL_PROVIDER=ollama` and `OLLAMA_MODEL=qwen3.5:9b` in `.env`. The health command checks
+that Ollama is reachable and that the configured model is installed. If the service was not
+registered successfully, run `ollama serve` in a separate Terminal window for that session.
+
 The CLI talks directly to Python services; `trading-agent api` is optional. Startup loads
 and hashes the runtime rules, checks PostgreSQL and migration state, checks configured
 providers/connectors, and resumes the latest named conversation unless told otherwise.
@@ -20,7 +32,7 @@ research uses deep effort. In chat, use `/mode` to override this for the rest of
 session. The route and model are printed with every reply.
 
 All three routes fall back to the provider's base model. Set the matching
-`OPENAI_*_MODEL` or `ANTHROPIC_*_MODEL` values only when you intentionally want separate
+`OPENAI_*_MODEL`, `ANTHROPIC_*_MODEL`, or `OLLAMA_*_MODEL` values only when you intentionally want separate
 models. Risk and position sizing never use this router; they remain deterministic.
 
 ## Development handoff

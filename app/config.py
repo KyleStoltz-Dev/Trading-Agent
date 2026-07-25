@@ -11,7 +11,7 @@ class Settings(BaseSettings):
         default="postgresql+psycopg://trading:trading@localhost:5432/trading_agent",
         repr=False,
     )
-    model_provider: Literal["auto", "openai", "anthropic"] = "auto"
+    model_provider: Literal["auto", "openai", "anthropic", "ollama"] = "auto"
     openai_api_key: SecretStr | None = None
     openai_model: str = "gpt-5.6-sol"
     openai_economy_model: str | None = None
@@ -23,6 +23,15 @@ class Settings(BaseSettings):
     anthropic_economy_model: str | None = None
     anthropic_balanced_model: str | None = None
     anthropic_deep_model: str | None = None
+    ollama_base_url: str = "http://127.0.0.1:11434"
+    ollama_allow_remote: bool = False
+    ollama_model: str = "qwen3.5:9b"
+    ollama_economy_model: str | None = None
+    ollama_balanced_model: str | None = None
+    ollama_deep_model: str | None = None
+    ollama_context_length: int = Field(default=16384, ge=2048, le=262144)
+    ollama_keep_alive: str = "10m"
+    ollama_request_timeout_seconds: float = Field(default=300.0, gt=0, le=1800)
     agent_mode: Literal["auto", "economy", "balanced", "deep"] = "auto"
     app_env: str = "development"
     database_auto_migrate: bool = True

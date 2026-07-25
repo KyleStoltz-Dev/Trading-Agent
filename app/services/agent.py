@@ -387,6 +387,7 @@ class TradingAgent:
             self.provider.name,
             message,
             mode=mode,
+            fallback_model=self.provider.model,
         )
         return self.provider.complete(
             instructions=instructions,

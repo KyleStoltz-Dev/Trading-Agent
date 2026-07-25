@@ -3,6 +3,7 @@ from typing import Any
 from app.config import Settings
 from app.providers.anthropic_provider import AnthropicProvider
 from app.providers.base import ModelProvider, ProviderConfigurationError
+from app.providers.ollama_provider import OllamaProvider
 from app.providers.openai_provider import OpenAIProvider
 
 
@@ -22,7 +23,7 @@ def resolve_provider_name(settings: Settings) -> str:
         return available[0]
     if not available:
         raise ProviderConfigurationError(
-            "Configure OPENAI_API_KEY or ANTHROPIC_API_KEY, then select MODEL_PROVIDER"
+            "Configure a model API key, or set MODEL_PROVIDER=ollama for local inference"
         )
     raise ProviderConfigurationError(
         "Both provider keys are configured; set MODEL_PROVIDER=openai or anthropic"
@@ -41,4 +42,6 @@ def create_model_provider(settings: Settings, client: Any = None) -> ModelProvid
                 "ANTHROPIC_API_KEY is required for the Anthropic provider"
             )
         return AnthropicProvider(settings, client=client)
+    if provider_name == "ollama":
+        return OllamaProvider(settings, client=client)
     raise ProviderConfigurationError(f"Unsupported model provider: {provider_name}")

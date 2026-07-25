@@ -50,6 +50,7 @@ def route_model(
     provider: str,
     message: str,
     mode: AgentMode | None = None,
+    fallback_model: str | None = None,
 ) -> ModelRoute:
     selected_mode = mode or settings.agent_mode
     task_class = classify_task(message)
@@ -65,9 +66,13 @@ def route_model(
         resolved_mode = selected_mode
         reason = f"user-selected {selected_mode} mode"
 
-    prefix = "openai" if provider == "openai" else "anthropic"
-    fallback = getattr(settings, f"{prefix}_model")
-    model = getattr(settings, f"{prefix}_{resolved_mode}_model") or fallback
+    if provider in {"openai", "anthropic", "ollama"}:
+        fallback = getattr(settings, f"{provider}_model")
+        model = getattr(settings, f"{provider}_{resolved_mode}_model") or fallback
+    elif fallback_model:
+        model = fallback_model
+    else:
+        raise ValueError(f"Unsupported model provider for routing: {provider}")
     effort = {"economy": "low", "balanced": "medium", "deep": "high"}[resolved_mode]
     return ModelRoute(
         mode=resolved_mode,

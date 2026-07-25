@@ -11,6 +11,7 @@ from app.config import Settings, secret_value
 from app.db import inspect_schema
 from app.models import BrokerConnection
 from app.providers import ProviderConfigurationError, resolve_provider_name
+from app.providers.ollama_provider import OllamaProvider
 
 if TYPE_CHECKING:
     from app.policy import PolicyEngine
@@ -120,23 +121,49 @@ def check_health(
 
     try:
         provider_name = resolve_provider_name(settings)
-        model = (
-            settings.openai_model
-            if provider_name == "openai"
-            else settings.anthropic_model
-        )
-        package_available = importlib.util.find_spec(provider_name) is not None
-        checks.append(
-            HealthCheck(
-                "model_provider",
-                "ok" if package_available else "warning",
-                (
-                    f"{provider_name}/{model} is configured"
-                    if package_available
-                    else f"{provider_name}/{model} configured; install the optional adapter"
-                ),
+        if provider_name == "ollama":
+            provider = OllamaProvider(settings)
+            try:
+                installed = provider.installed_models()
+            finally:
+                provider.client.close()
+            if settings.ollama_model in installed:
+                checks.append(
+                    HealthCheck(
+                        "model_provider",
+                        "ok",
+                        f"ollama/{settings.ollama_model} is installed locally",
+                    )
+                )
+            else:
+                checks.append(
+                    HealthCheck(
+                        "model_provider",
+                        "warning",
+                        (
+                            f"ollama is running but {settings.ollama_model} is not installed; "
+                            f"run `ollama pull {settings.ollama_model}`"
+                        ),
+                    )
+                )
+        else:
+            model = (
+                settings.openai_model
+                if provider_name == "openai"
+                else settings.anthropic_model
             )
-        )
+            package_available = importlib.util.find_spec(provider_name) is not None
+            checks.append(
+                HealthCheck(
+                    "model_provider",
+                    "ok" if package_available else "warning",
+                    (
+                        f"{provider_name}/{model} is configured"
+                        if package_available
+                        else f"{provider_name}/{model} configured; install the optional adapter"
+                    ),
+                )
+            )
     except ProviderConfigurationError as exc:
         checks.append(
             HealthCheck(

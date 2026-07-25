@@ -13,7 +13,7 @@ execution. It does not autonomously place trades.
 - Broker-contract-aware position sizing including spread, slippage, commission, quantity
   increments, margin, currency conversion, and a configured maximum risk.
 - Context-timeframe and trigger-timeframe separation.
-- Chart screenshot analysis through an optional OpenAI or Anthropic adapter.
+- Chart screenshot analysis through an optional OpenAI, Anthropic, or local Ollama adapter.
 - Explicit separation of visible facts, hypotheses, missing evidence, and questions.
 - Content-addressed chart evidence and provider/model/policy/prompt/input/output provenance.
 - Idempotent fill imports, transaction cursors, account/position snapshots, and reconciliation.
@@ -25,8 +25,8 @@ execution. It does not autonomously place trades.
 
 ## Local setup
 
-Requirements: Python 3.12+, PostgreSQL, and an OpenAI or Anthropic API key for model-backed
-chat and chart analysis.
+Requirements: Python 3.12+ and PostgreSQL. Model-backed chat and chart analysis can use an
+OpenAI or Anthropic API key, or a token-free local Ollama model.
 
 ```bash
 cp .env.example .env
@@ -63,6 +63,31 @@ OPENAI_MODEL=gpt-5.6-sol
 
 `MODEL_PROVIDER=auto` works when exactly one provider key is configured. If both keys are
 present, select one explicitly.
+
+For local, token-free use on macOS:
+
+```bash
+brew install ollama
+brew services start ollama
+ollama pull qwen3.5:9b
+```
+
+Then set the following in `.env`:
+
+```text
+MODEL_PROVIDER=ollama
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_MODEL=qwen3.5:9b
+OLLAMA_ECONOMY_MODEL=qwen3.5:9b
+OLLAMA_BALANCED_MODEL=qwen3.5:9b
+OLLAMA_DEEP_MODEL=qwen3.5:9b
+OLLAMA_CONTEXT_LENGTH=16384
+```
+
+Keep only one active `MODEL_PROVIDER` line. Ollama is restricted to the local machine by
+default; using a remote host requires the explicit `OLLAMA_ALLOW_REMOTE=true` opt-in. On a
+48 GB Apple Silicon Mac, start with the 9B model and measure responsiveness before trying a
+larger model.
 
 The default model remains the fallback for every route. Optionally give each effort profile
 a different model:
@@ -111,7 +136,8 @@ confirmation. There are no broker execution tools.
 
 Conversation turns are stored in PostgreSQL so a session can be resumed. Relevant recent
 turns and requested journal/tool results are sent to the selected provider. OpenAI requests
-use `store=false`; Anthropic uses the stateless Messages API. Do not enter broker credentials
+use `store=false`; Anthropic uses the stateless Messages API; local Ollama requests remain on
+the configured Ollama host. Do not enter broker credentials
 or secrets into the conversation.
 
 Every capability also remains available as an individual command:

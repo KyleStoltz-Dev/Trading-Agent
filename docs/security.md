@@ -45,6 +45,11 @@ placement, modification, cancellation, closing, or hedging methods.
 8. Review `trading-agent develop diff SESSION_ID` before locally committing a generated
    change.
 
+Local Ollama is limited to loopback by default. A non-local `OLLAMA_BASE_URL` is rejected unless
+`OLLAMA_ALLOW_REMOTE=true` is explicitly configured, because remote inference sends prompts,
+chart images, conversation context, and requested tool results to that host. Credentials,
+queries, and fragments are not accepted in the Ollama base URL.
+
 ## Automated checks
 
 CI runs Ruff, security-focused Ruff rules, PostgreSQL migrations, the full test suite,
