@@ -26,6 +26,7 @@ def test_execution_centered_tables_are_declared() -> None:
         "playbook_versions",
         "playbooks",
         "position_snapshots",
+        "pretrade_assessments",
         "rule_evaluations",
         "trade_plans",
         "trade_reflections",
@@ -46,6 +47,10 @@ def test_execution_records_have_provenance_and_idempotency_fields() -> None:
     management_columns = set(
         Base.metadata.tables["trade_management_events"].columns.keys()
     )
+    conversation_turn_columns = set(
+        Base.metadata.tables["conversation_turns"].columns.keys()
+    )
+    mindset_columns = set(Base.metadata.tables["mindset_checkins"].columns.keys())
 
     assert {
         "external_event_id",
@@ -62,6 +67,8 @@ def test_execution_records_have_provenance_and_idempotency_fields() -> None:
         "realized_r_at_event",
         "reason",
     } <= management_columns
+    assert "playbook_version_id" in conversation_turn_columns
+    assert "playbook_version_id" in mindset_columns
 
 
 def test_migration_history_has_one_head() -> None:

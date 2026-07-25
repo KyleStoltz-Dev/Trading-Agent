@@ -1,8 +1,9 @@
+import re
 import uuid
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -19,6 +20,7 @@ from app.services.catalog import (
     active_instrument_specification,
     get_or_create_instrument,
 )
+from app.services.event_relevance import instrument_event_currencies
 from app.services.risk import calculate_broker_position_size, calculate_position_size
 
 
@@ -30,6 +32,46 @@ class ReflectionExistsError(ValueError):
     pass
 
 
+def _reference_part(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+
+
+def _session_reference(value: str | None) -> str:
+    words = re.findall(r"[a-z0-9]+", (value or "all").lower())
+    if not words:
+        return "all"
+    if len(words) > 1:
+        return "".join(word[0] for word in words)
+    return words[0][:12]
+
+
+def next_trade_reference(db: Session, request: TradePlanCreate) -> str:
+    occurred_at = request.market_time or datetime.now(UTC)
+    prefix = "-".join(
+        (
+            _reference_part(request.instrument),
+            occurred_at.strftime("%Y%m%d"),
+            _session_reference(request.session_name),
+            request.direction,
+        )
+    )
+    # The transaction-scoped PostgreSQL advisory lock serializes allocation for one
+    # human-readable prefix without blocking unrelated instruments/sessions.
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:prefix, 0))"),
+        {"prefix": prefix},
+    )
+    references = db.scalars(
+        select(TradePlan.reference).where(TradePlan.reference.like(f"{prefix}-%"))
+    )
+    suffixes = [
+        int(reference.rsplit("-", 1)[-1])
+        for reference in references
+        if reference.rsplit("-", 1)[-1].isdigit()
+    ]
+    return f"{prefix}-{max(suffixes, default=0) + 1}"
+
+
 def create_trade_plan(
     db: Session,
     request: TradePlanCreate,
@@ -37,6 +79,8 @@ def create_trade_plan(
     policy_hash: str | None = None,
     source: str = "manual",
     maximum_risk_percent: Decimal = Decimal("1"),
+    playbook_version_id: uuid.UUID | None = None,
+    commit: bool = True,
 ) -> TradePlan:
     if request.risk_percent > maximum_risk_percent:
         raise ValueError("requested risk exceeds the configured maximum")
@@ -76,18 +120,27 @@ def create_trade_plan(
         quantity = sizing.quantity
         planned_r = sizing.planned_r
     instrument = get_or_create_instrument(db, request.instrument)
-    playbook_version = db.scalar(
-        select(PlaybookVersion)
-        .join(Playbook)
-        .where(Playbook.name == request.setup_name)
-        .order_by(PlaybookVersion.version.desc())
-    )
+    if playbook_version_id is not None:
+        playbook_version = db.get(PlaybookVersion, playbook_version_id)
+        if playbook_version is None:
+            raise ValueError("active strategy version no longer exists")
+        playbook = db.get(Playbook, playbook_version.playbook_id)
+        if playbook is None or playbook.name != request.setup_name:
+            raise ValueError(
+                "trade setup_name must match the exact strategy active in this session"
+            )
+    else:
+        # Unscoped callers remain explicitly unscoped. Never attach a mutable
+        # "latest" strategy version behind the caller's back.
+        playbook_version = None
     minutes_to_event = None
     if request.market_time is not None:
+        relevant_currencies = instrument_event_currencies(request.instrument)
         event = db.scalar(
             select(EconomicEvent)
             .where(
                 EconomicEvent.importance == 3,
+                func.upper(EconomicEvent.currency).in_(relevant_currencies),
                 EconomicEvent.scheduled_at
                 >= request.market_time - timedelta(hours=24),
                 EconomicEvent.scheduled_at
@@ -107,6 +160,7 @@ def create_trade_plan(
                 (event.scheduled_at - request.market_time).total_seconds() / 60
             )
     trade = TradePlan(
+        reference=next_trade_reference(db, request),
         **request.model_dump(
             exclude={
                 "target",
@@ -154,31 +208,66 @@ def create_trade_plan(
             for value in request.interpretations
         ]
     )
-    db.commit()
-    db.refresh(trade)
+    if commit:
+        db.commit()
+        db.refresh(trade)
     return trade
 
 
-def list_trade_plans(db: Session, limit: int | None = None) -> list[TradePlan]:
+def list_trade_plans(
+    db: Session,
+    limit: int | None = None,
+    *,
+    playbook_version_id: uuid.UUID | None = None,
+) -> list[TradePlan]:
     statement = select(TradePlan).order_by(TradePlan.created_at.desc())
+    if playbook_version_id is not None:
+        statement = statement.where(
+            TradePlan.playbook_version_id == playbook_version_id
+        )
     if limit is not None:
         statement = statement.limit(limit)
     return list(db.scalars(statement))
 
 
-def get_trade_plan(db: Session, trade_id: uuid.UUID) -> TradePlan:
-    trade = db.get(TradePlan, trade_id)
-    if not trade:
-        raise TradeNotFoundError("trade not found")
+def get_trade_plan(
+    db: Session,
+    trade_reference: str | uuid.UUID,
+    *,
+    playbook_version_id: uuid.UUID | None = None,
+) -> TradePlan:
+    try:
+        trade_id = (
+            trade_reference
+            if isinstance(trade_reference, uuid.UUID)
+            else uuid.UUID(trade_reference)
+        )
+    except ValueError:
+        trade = db.scalar(
+            select(TradePlan).where(TradePlan.reference == str(trade_reference).lower())
+        )
+    else:
+        trade = db.get(TradePlan, trade_id)
+    if not trade or (
+        playbook_version_id is not None
+        and trade.playbook_version_id != playbook_version_id
+    ):
+        raise TradeNotFoundError(f"trade plan not found: {trade_reference}")
     return trade
 
 
 def create_reflection(
     db: Session,
-    trade_id: uuid.UUID,
+    trade_id: str | uuid.UUID,
     request: ReflectionCreate,
+    *,
+    playbook_version_id: uuid.UUID | None = None,
 ) -> TradeReflection:
-    trade = get_trade_plan(db, trade_id)
+    trade = get_trade_plan(
+        db,
+        trade_id,
+        playbook_version_id=playbook_version_id,
+    )
     if trade.reflection:
         raise ReflectionExistsError("reflection already exists")
     if trade.risk_amount == 0:

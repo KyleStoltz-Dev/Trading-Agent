@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import select
 
 from app.models import (
+    EconomicEvent,
     InstrumentMapping,
     Observation,
     RuleEvaluation,
@@ -16,6 +17,7 @@ from app.schemas import (
     BrokerPositionSizeRequest,
     InstrumentSpecificationCreate,
     ManagementEventCreate,
+    MindsetCheckInCreate,
     ReflectionCreate,
     TradePlanCreate,
 )
@@ -23,6 +25,7 @@ from app.services.analytics import build_edge_report
 from app.services.catalog import (
     active_instrument_specification,
     configure_instrument_specification,
+    create_playbook_version,
 )
 from app.services.execution_ledger import (
     InvalidIntentTransition,
@@ -31,7 +34,14 @@ from app.services.execution_ledger import (
     propose_order_intent,
     record_management_event,
 )
-from app.services.journal import create_reflection, create_trade_plan
+from app.services.journal import (
+    TradeNotFoundError,
+    create_reflection,
+    create_trade_plan,
+    get_trade_plan,
+    list_trade_plans,
+)
+from app.services.mindset import create_mindset_check_in, list_mindset_check_ins
 from app.services.risk import calculate_broker_position_size
 
 
@@ -85,6 +95,22 @@ def _plan_request() -> TradePlanCreate:
     )
 
 
+def test_mindset_schema_enforces_bounded_non_diagnostic_inputs() -> None:
+    with pytest.raises(ValueError):
+        MindsetCheckInCreate(
+            phase="pre_trade",
+            readiness=6,
+            accepted_risk=True,
+        )
+    with pytest.raises(ValueError, match="40 characters"):
+        MindsetCheckInCreate(
+            phase="pre_trade",
+            readiness=3,
+            accepted_risk=False,
+            emotion_tags=["x" * 41],
+        )
+
+
 def test_broker_contract_drives_plan_sizing_and_normalized_observations(db_session) -> None:
     configure_instrument_specification(db_session, _specification_request())
     specification = active_instrument_specification(
@@ -121,8 +147,220 @@ def test_broker_contract_drives_plan_sizing_and_normalized_observations(db_sessi
     assert sizing.estimated_loss_at_stop == Decimal("90.00")
     assert sizing.estimated_costs == Decimal("4.50")
     assert plan.instrument_specification_id == specification.id
+    assert plan.reference.startswith("xauusd-20260723-ny-long-")
+    assert get_trade_plan(db_session, plan.reference).id == plan.id
     assert plan.risk_amount == Decimal("94.5000")
     assert {item.kind for item in observations} == {"fact", "hypothesis"}
+
+
+def test_trade_plan_event_proximity_ignores_unrelated_currencies(db_session) -> None:
+    configure_instrument_specification(db_session, _specification_request())
+    request = _plan_request()
+    market_time = request.market_time
+    db_session.add_all(
+        [
+            EconomicEvent(
+                source="test",
+                source_event_id=f"jpy-{uuid.uuid4()}",
+                scheduled_at=market_time + timedelta(minutes=5),
+                country="Japan",
+                currency="JPY",
+                title="Japan event",
+                importance=3,
+                retrieved_at=market_time,
+            ),
+            EconomicEvent(
+                source="test",
+                source_event_id=f"usd-{uuid.uuid4()}",
+                scheduled_at=market_time + timedelta(minutes=60),
+                country="United States",
+                currency="usd",
+                title="US event",
+                importance=3,
+                retrieved_at=market_time,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    plan = create_trade_plan(db_session, request, source="test")
+
+    assert plan.minutes_to_high_impact_event == 60
+
+
+def test_mindset_check_in_resolves_human_trade_reference_and_filters(db_session) -> None:
+    configure_instrument_specification(db_session, _specification_request())
+    request = _plan_request()
+    version = create_playbook_version(
+        db_session,
+        name=request.setup_name,
+        definition={"requirements": ["Trade follows the defined setup."]},
+    )
+    plan = create_trade_plan(
+        db_session,
+        request,
+        source="test",
+        playbook_version_id=version.id,
+    )
+
+    created = create_mindset_check_in(
+        db_session,
+        MindsetCheckInCreate(
+            phase="pre_trade",
+            readiness=4,
+            accepted_risk=True,
+            emotion_tags=[" Focused ", "focused", "Patient"],
+            note="The stop is predefined and the loss is acceptable.",
+            trade_reference=plan.reference,
+        ),
+        playbook_version_id=version.id,
+    )
+    results = list_mindset_check_ins(
+        db_session,
+        playbook_version_id=version.id,
+        limit=5,
+        phase="pre_trade",
+    )
+
+    assert created.trade_plan_id == plan.id
+    assert created.trade_reference == plan.reference
+    assert created.emotion_tags == ["focused", "patient"]
+    assert results[0] == created
+
+
+def test_mindset_check_in_fails_closed_for_unknown_trade(db_session) -> None:
+    version = create_playbook_version(
+        db_session,
+        name=f"mindset-{uuid.uuid4()}",
+        definition={"requirements": ["Trade follows the defined setup."]},
+    )
+    with pytest.raises(TradeNotFoundError, match="trade plan not found"):
+        create_mindset_check_in(
+            db_session,
+            MindsetCheckInCreate(
+                phase="post_trade",
+                readiness=2,
+                accepted_risk=False,
+                trade_reference="missing-trade",
+            ),
+            playbook_version_id=version.id,
+        )
+
+
+def test_mindset_check_ins_cannot_cross_strategy_versions(db_session) -> None:
+    configure_instrument_specification(db_session, _specification_request())
+    strategy_a = f"strategy-a-{uuid.uuid4()}"
+    strategy_b = f"strategy-b-{uuid.uuid4()}"
+    version_a = create_playbook_version(
+        db_session,
+        name=strategy_a,
+        definition={"requirements": ["A rule."]},
+    )
+    version_b = create_playbook_version(
+        db_session,
+        name=strategy_b,
+        definition={"requirements": ["B rule."]},
+    )
+    plan_a = create_trade_plan(
+        db_session,
+        _plan_request().model_copy(update={"setup_name": strategy_a}),
+        playbook_version_id=version_a.id,
+    )
+    check_in_a = create_mindset_check_in(
+        db_session,
+        MindsetCheckInCreate(
+            phase="pre_trade",
+            readiness=4,
+            accepted_risk=True,
+            trade_reference=plan_a.reference,
+        ),
+        playbook_version_id=version_a.id,
+    )
+
+    assert list_mindset_check_ins(
+        db_session,
+        playbook_version_id=version_a.id,
+    ) == [check_in_a]
+    assert list_mindset_check_ins(
+        db_session,
+        playbook_version_id=version_b.id,
+    ) == []
+    with pytest.raises(TradeNotFoundError):
+        create_mindset_check_in(
+            db_session,
+            MindsetCheckInCreate(
+                phase="during_trade",
+                readiness=3,
+                accepted_risk=True,
+                trade_reference=plan_a.reference,
+            ),
+            playbook_version_id=version_b.id,
+        )
+
+
+def test_strategy_scoped_journal_pins_the_exact_active_version(db_session) -> None:
+    configure_instrument_specification(db_session, _specification_request())
+    name = f"wyckoff-pure-{uuid.uuid4().hex[:10]}"
+    version_one = create_playbook_version(
+        db_session,
+        name=name,
+        definition={"trigger": "spring"},
+    )
+    version_two = create_playbook_version(
+        db_session,
+        name=name,
+        definition={"trigger": "spring and reclaim"},
+    )
+    request = _plan_request().model_copy(update={"setup_name": name})
+
+    plan = create_trade_plan(
+        db_session,
+        request,
+        playbook_version_id=version_one.id,
+    )
+
+    assert plan.playbook_version_id == version_one.id
+    assert plan.playbook_version_id != version_two.id
+    assert list_trade_plans(
+        db_session,
+        playbook_version_id=version_one.id,
+    ) == [plan]
+    with pytest.raises(TradeNotFoundError):
+        get_trade_plan(
+            db_session,
+            plan.reference,
+            playbook_version_id=version_two.id,
+        )
+    with pytest.raises(ValueError, match="active"):
+        create_trade_plan(
+            db_session,
+            request.model_copy(update={"setup_name": "different-strategy"}),
+            playbook_version_id=version_one.id,
+        )
+
+
+def test_unscoped_plan_does_not_silently_roll_forward_to_latest_strategy(
+    db_session,
+) -> None:
+    configure_instrument_specification(db_session, _specification_request())
+    name = f"no-silent-roll-forward-{uuid.uuid4().hex[:10]}"
+    create_playbook_version(
+        db_session,
+        name=name,
+        definition={"trigger": "version one"},
+    )
+    create_playbook_version(
+        db_session,
+        name=name,
+        definition={"trigger": "version two"},
+    )
+
+    plan = create_trade_plan(
+        db_session,
+        _plan_request().model_copy(update={"setup_name": name}),
+    )
+
+    assert plan.playbook_version_id is None
 
 
 def test_review_normalizes_rules_and_edge_report_keeps_process_separate(db_session) -> None:

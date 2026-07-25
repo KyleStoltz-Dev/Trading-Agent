@@ -12,6 +12,12 @@ from app.db import inspect_schema
 from app.models import BrokerConnection
 from app.providers import ProviderConfigurationError, resolve_provider_name
 from app.providers.ollama_provider import OllamaProvider
+from app.services.web_fetch import (
+    WebFetchError,
+    allowed_domain_paths,
+    allowed_domains,
+)
+from app.system_resources import GIB, assess_model_fit, resource_snapshot
 
 if TYPE_CHECKING:
     from app.policy import PolicyEngine
@@ -55,6 +61,37 @@ def check_health(
             detail=f"environment={settings.app_env}; provider={settings.model_provider}",
         )
     ]
+    try:
+        resources = resource_snapshot()
+    except (OSError, RuntimeError) as exc:
+        checks.append(
+            HealthCheck(
+                "system_resources",
+                "warning",
+                f"cross-platform resource telemetry unavailable: {type(exc).__name__}",
+            )
+        )
+        resources = None
+    else:
+        swap = (
+            f"{resources.swap_percent:.1f}%"
+            if resources.swap_percent is not None
+            else "unknown"
+        )
+        checks.append(
+            HealthCheck(
+                "system_resources",
+                "ok",
+                (
+                    f"{resources.platform}; "
+                    f"{resources.available_memory_bytes / GIB:.1f} GiB available / "
+                    f"{resources.total_memory_bytes / GIB:.1f} GiB total; "
+                    f"memory={resources.memory_percent:.1f}%; "
+                    f"swap={swap}; "
+                    f"disk={resources.disk_free_bytes / GIB:.1f} GiB free"
+                ),
+            )
+        )
     if settings.trading_agent_api_key is None:
         checks.append(
             HealthCheck(
@@ -75,7 +112,23 @@ def check_health(
         checks.append(HealthCheck("api_security", "ok", "API key is configured"))
 
     oanda_values = (settings.oanda_api_token, settings.oanda_account_id)
-    if all(oanda_values):
+    if any(oanda_values) and not all(oanda_values):
+        checks.append(
+            HealthCheck(
+                "oanda",
+                "error",
+                "OANDA token and account id must be configured together",
+            )
+        )
+    elif settings.broker_provider == "none":
+        checks.append(
+            HealthCheck(
+                "broker",
+                "ok",
+                "broker connector intentionally disabled",
+            )
+        )
+    elif all(oanda_values):
         checks.append(
             HealthCheck(
                 "oanda",
@@ -87,24 +140,24 @@ def check_health(
                 ),
             )
         )
-    elif any(oanda_values):
-        checks.append(
-            HealthCheck(
-                "oanda",
-                "error",
-                "OANDA token and account id must be configured together",
-            )
-        )
     else:
         checks.append(
             HealthCheck(
                 "oanda",
                 "warning",
-                "OANDA read-only data is not configured",
+                "OANDA is selected but its read-only token and account id are not configured",
             )
         )
 
-    if settings.trading_economics_api_key:
+    if settings.news_provider == "none":
+        checks.append(
+            HealthCheck(
+                "news",
+                "ok",
+                "news connector intentionally disabled",
+            )
+        )
+    elif settings.trading_economics_api_key:
         checks.append(
             HealthCheck(
                 "news",
@@ -117,7 +170,73 @@ def check_health(
             HealthCheck(
                 "news",
                 "warning",
-                "economic calendar and news sync are not configured",
+                "Trading Economics is selected but its API key is not configured",
+            )
+        )
+
+    if settings.web_fetch_enabled:
+        try:
+            domains = allowed_domains(settings.web_fetch_allowed_domains)
+            if not domains:
+                raise WebFetchError("at least one documented domain is required")
+            path_policies = allowed_domain_paths(
+                settings.web_fetch_allowed_paths
+            )
+            missing_paths = domains - path_policies.keys()
+            if missing_paths:
+                raise WebFetchError(
+                    "documented path policy missing for: "
+                    + ", ".join(sorted(missing_paths))
+                )
+        except WebFetchError as exc:
+            checks.append(
+                HealthCheck(
+                    "allowlisted_web",
+                    "error",
+                    f"invalid WEB_FETCH_ALLOWED_DOMAINS: {exc}",
+                )
+            )
+        else:
+            checks.append(
+                HealthCheck(
+                    "allowlisted_web",
+                    "ok",
+                    f"confirmed read-only web fetch enabled for {len(domains)} "
+                    "domains with documented path constraints",
+                )
+            )
+    else:
+        checks.append(
+            HealthCheck(
+                "allowlisted_web",
+                "warning",
+                "read-only allowlisted web fetch is disabled",
+            )
+        )
+
+    if settings.web_search_provider == "brave":
+        if secret_value(settings.brave_search_api_key):
+            checks.append(
+                HealthCheck(
+                    "web_search",
+                    "ok",
+                    "tier-3 Brave Search is configured",
+                )
+            )
+        else:
+            checks.append(
+                HealthCheck(
+                    "web_search",
+                    "error",
+                    "WEB_SEARCH_PROVIDER=brave requires BRAVE_SEARCH_API_KEY",
+                )
+            )
+    else:
+        checks.append(
+            HealthCheck(
+                "web_search",
+                "warning",
+                "tier-3 broad web search is disabled",
             )
         )
 
@@ -126,7 +245,9 @@ def check_health(
         if provider_name == "ollama":
             provider = OllamaProvider(settings)
             try:
-                installed = provider.installed_models()
+                model_sizes = provider.installed_model_sizes()
+                installed = frozenset(model_sizes)
+                loaded = provider.loaded_models()
                 if settings.ollama_model in installed and model_smoke_test:
                     provider.smoke_test()
             finally:
@@ -145,6 +266,79 @@ def check_health(
                             "model_inference",
                             "ok",
                             "local model generated a response",
+                        )
+                    )
+                configured_profiles = {
+                    settings.ollama_economy_model or settings.ollama_model,
+                    settings.ollama_balanced_model or settings.ollama_model,
+                    settings.ollama_deep_model or settings.ollama_model,
+                }
+                missing_profiles = sorted(configured_profiles - installed)
+                checks.append(
+                    HealthCheck(
+                        "model_profiles",
+                        "warning" if missing_profiles else "ok",
+                        (
+                            "configured Ollama models not installed: "
+                            + ", ".join(missing_profiles)
+                            if missing_profiles
+                            else "all configured Ollama routing profiles are installed"
+                        ),
+                    )
+                )
+                if settings.resource_aware_model_routing and resources is not None:
+                    assessments = [
+                        assess_model_fit(
+                            model=model,
+                            model_size_bytes=model_sizes[model],
+                            context_length=settings.ollama_context_length,
+                            memory_reserve_gb=settings.model_memory_reserve_gb,
+                            memory_block_percent=settings.model_memory_block_percent,
+                            swap_block_percent=settings.model_swap_block_percent,
+                            currently_loaded=model in loaded,
+                            snapshot=resources,
+                        )
+                        for model in configured_profiles
+                        if model_sizes.get(model, 0) > 0
+                    ]
+                    blocked = [
+                        assessment.model
+                        for assessment in assessments
+                        if assessment.status == "block"
+                    ]
+                    cautious = [
+                        assessment.model
+                        for assessment in assessments
+                        if assessment.status == "warning"
+                    ]
+                    status: CheckStatus = (
+                        "warning" if blocked or cautious else "ok"
+                    )
+                    if blocked:
+                        detail = (
+                            "currently blocked by memory/swap pressure: "
+                            + ", ".join(sorted(blocked))
+                            + "; automatic routing will use a safer configured model"
+                        )
+                    elif cautious:
+                        detail = (
+                            "currently near preferred memory reserve: "
+                            + ", ".join(sorted(cautious))
+                        )
+                    else:
+                        detail = (
+                            "all installed configured profiles fit current pressure "
+                            "with the configured reserve"
+                        )
+                    checks.append(
+                        HealthCheck("model_capacity", status, detail)
+                    )
+                elif not settings.resource_aware_model_routing:
+                    checks.append(
+                        HealthCheck(
+                            "model_capacity",
+                            "warning",
+                            "resource-aware local-model routing is disabled",
                         )
                     )
             else:

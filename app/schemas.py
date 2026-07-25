@@ -137,6 +137,8 @@ class TradePlanRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
+    reference: str
+    playbook_version_id: uuid.UUID | None
     instrument: str
     venue: str | None
     direction: str
@@ -189,6 +191,45 @@ class ReflectionRead(ReflectionCreate):
     id: uuid.UUID
     trade_id: uuid.UUID
     realized_r: Decimal
+    created_at: datetime
+
+
+MindsetPhase = Literal["pre_session", "pre_trade", "during_trade", "post_trade"]
+
+
+class MindsetCheckInCreate(BaseModel):
+    phase: MindsetPhase
+    readiness: int = Field(ge=1, le=5)
+    accepted_risk: bool
+    emotion_tags: list[str] = Field(default_factory=list, max_length=20)
+    note: str | None = Field(default=None, max_length=2_000)
+    trade_reference: str | None = Field(default=None, min_length=1, max_length=120)
+
+    @model_validator(mode="after")
+    def normalize_tags(self) -> "MindsetCheckInCreate":
+        normalized = list(
+            dict.fromkeys(tag.strip().lower() for tag in self.emotion_tags if tag.strip())
+        )
+        if any(len(tag) > 40 for tag in normalized):
+            raise ValueError("emotion tags must be at most 40 characters")
+        self.emotion_tags = normalized
+        if self.note is not None:
+            self.note = self.note.strip() or None
+        if self.trade_reference is not None:
+            self.trade_reference = self.trade_reference.strip()
+        return self
+
+
+class MindsetCheckInRead(BaseModel):
+    id: uuid.UUID
+    playbook_version_id: uuid.UUID | None
+    trade_plan_id: uuid.UUID | None
+    trade_reference: str | None
+    phase: MindsetPhase
+    readiness: int
+    accepted_risk: bool
+    emotion_tags: list[str]
+    note: str | None
     created_at: datetime
 
 
@@ -255,3 +296,125 @@ class PlaybookCheck(BaseModel):
     check: str
     status: Literal["met", "not_met", "unclear"]
     evidence: list[str]
+
+
+class TraderProfileUpsert(BaseModel):
+    display_name: str = Field(min_length=1, max_length=120)
+    timezone: str = Field(min_length=1, max_length=80)
+    experience_level: str | None = Field(default=None, max_length=40)
+    trading_style: str = Field(default="", max_length=10_000)
+    markets: list[str] = Field(default_factory=list, max_length=100)
+    sessions: list[str] = Field(default_factory=list, max_length=30)
+    goals: list[str] = Field(default_factory=list, max_length=100)
+    risk_preferences: dict = Field(default_factory=dict)
+    onboarding_complete: bool = True
+
+
+class TraderProfileRead(TraderProfileUpsert):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    profile_key: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class StrategySummary(BaseModel):
+    playbook_id: uuid.UUID
+    playbook_version_id: uuid.UUID
+    name: str
+    description: str
+    version: int
+    content_hash: str
+    sample_requirement: int | None
+    knowledge_items: int = 0
+
+
+class KnowledgeItemRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    playbook_version_id: uuid.UUID
+    kind: str
+    source_reference: str | None
+    author: str | None
+    occurred_at: datetime | None
+    content: str
+    content_hash: str
+    excluded: bool
+    created_at: datetime
+
+
+class KnowledgeImportResult(BaseModel):
+    import_id: uuid.UUID
+    strategy: str
+    strategy_version: int
+    source_name: str
+    source_type: str
+    imported: int
+    skipped: int
+
+
+class StrategyExperimentCreate(BaseModel):
+    strategy: str = Field(min_length=1, max_length=120)
+    name: str = Field(min_length=1, max_length=160)
+    mode: Literal["backtest", "forward_test"]
+    hypothesis: str = Field(min_length=1)
+    instrument: str | None = Field(default=None, max_length=40)
+    timeframe: str | None = Field(default=None, max_length=16)
+    data_start: datetime | None = None
+    data_end: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_dates(self) -> "StrategyExperimentCreate":
+        for value in (self.data_start, self.data_end):
+            if value is not None and (
+                value.tzinfo is None or value.utcoffset() is None
+            ):
+                raise ValueError("experiment dates must be timezone-aware")
+        if (
+            self.data_start is not None
+            and self.data_end is not None
+            and self.data_start > self.data_end
+        ):
+            raise ValueError("data_start must not be after data_end")
+        return self
+
+
+class StrategyExperimentRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    playbook_version_id: uuid.UUID
+    name: str
+    mode: str
+    status: str
+    hypothesis: str
+    instrument: str | None
+    timeframe: str | None
+    data_start: datetime | None
+    data_end: datetime | None
+    rules_hash: str
+    created_at: datetime
+    completed_at: datetime | None
+
+
+class StrategyTestSampleCreate(BaseModel):
+    occurred_at: datetime
+    instrument: str = Field(min_length=1, max_length=40)
+    setup_key: str = Field(min_length=1, max_length=120)
+    classification: Literal["eligible", "excluded", "unclear"]
+    exclusion_reason: str | None = None
+    outcome_r: Decimal | None = None
+    process_score: Decimal | None = Field(default=None, ge=0, le=100)
+    feature_snapshot: dict = Field(default_factory=dict)
+    notes: str = ""
+    source_reference: str | None = None
+
+    @model_validator(mode="after")
+    def validate_sample(self) -> "StrategyTestSampleCreate":
+        if self.occurred_at.tzinfo is None or self.occurred_at.utcoffset() is None:
+            raise ValueError("occurred_at must be timezone-aware")
+        if self.classification == "excluded" and not self.exclusion_reason:
+            raise ValueError("excluded samples require an exclusion_reason")
+        return self

@@ -42,6 +42,15 @@ def test_harness_loads_only_entrypoint_for_unrelated_request() -> None:
     assert context.paths == ("HARNESS.md",)
 
 
+def test_active_strategy_can_exclude_generic_market_methodologies() -> None:
+    context = select_harness_context(
+        "Compare a Wyckoff spring with an ICT fair value gap.",
+        excluded_prefixes=("market-models/",),
+    )
+
+    assert all(not path.startswith("market-models/") for path in context.paths)
+
+
 def test_harness_rejects_oversized_resource(tmp_path: Path) -> None:
     (tmp_path / "HARNESS.md").write_text(
         "---\nname: Test\ndescription: Test\n---\nRoot",

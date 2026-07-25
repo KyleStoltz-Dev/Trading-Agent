@@ -1,0 +1,66 @@
+{
+  "methodology": "wyckoff",
+  "objective": "Trade only explicitly defined Wyckoff range events with contextual confirmation.",
+  "context": {
+    "required": [
+      "Identify the trading range boundaries and current phase.",
+      "Mark prior support, resistance, and observable tests.",
+      "State whether evidence supports accumulation, distribution, or uncertainty."
+    ]
+  },
+  "setups": [
+    {
+      "key": "spring_reclaim",
+      "requirements": [
+        "Price trades below defined range support.",
+        "Price closes back inside the range.",
+        "A subsequent test shows reduced downside progress or rejection.",
+        "Entry, stop, target, and invalidation are defined before entry."
+      ],
+      "exclusions": [
+        "No previously defined trading range.",
+        "No close back inside support.",
+        "High-impact event is inside the configured pre-trade window.",
+        "Required reward-to-risk or risk limit is not met."
+      ]
+    },
+    {
+      "key": "upthrust_after_distribution",
+      "requirements": [
+        "Price trades above defined range resistance.",
+        "Price closes back inside the range.",
+        "Supply evidence appears on a later test.",
+        "Entry, stop, target, and invalidation are defined before entry."
+      ],
+      "exclusions": [
+        "No previously defined trading range.",
+        "No close back inside resistance.",
+        "High-impact event is inside the configured pre-trade window.",
+        "Required reward-to-risk or risk limit is not met."
+      ]
+    }
+  ],
+  "allowed_vocabulary": [
+    "accumulation",
+    "distribution",
+    "spring",
+    "upthrust",
+    "test",
+    "sign of strength",
+    "sign of weakness",
+    "last point of support",
+    "last point of supply"
+  ],
+  "forbidden_cross_strategy_concepts": [
+    "order block",
+    "fair value gap",
+    "breaker",
+    "optimal trade entry",
+    "ICT kill zone"
+  ],
+  "risk": {
+    "maximum_risk_percent": 1.0,
+    "minimum_planned_r": 3.0,
+    "human_confirms_every_trade": true
+  }
+}

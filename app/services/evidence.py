@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import stat
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,14 +33,29 @@ def store_evidence_file(
     if extension is None:
         raise ValueError("unsupported evidence content type")
     digest = _sha256(data)
-    root = directory.expanduser().resolve()
+    root = directory.expanduser().absolute()
+    if root.is_symlink():
+        raise ValueError("evidence directory cannot be a symlink")
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    root.chmod(0o700)
     target_directory = root / digest[:2]
-    target_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if target_directory.is_symlink():
+        raise ValueError("evidence digest directory cannot be a symlink")
+    target_directory.mkdir(exist_ok=True, mode=0o700)
+    target_directory.chmod(0o700)
     target = target_directory / f"{digest}{extension}"
-    if not target.exists():
+    if target.is_symlink():
+        raise ValueError("evidence target cannot be a symlink")
+    if target.exists():
+        target_stat = target.stat()
+        if not stat.S_ISREG(target_stat.st_mode) or _sha256(target.read_bytes()) != digest:
+            raise ValueError("existing evidence target failed integrity verification")
+        target.chmod(0o600)
+    else:
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(
             target,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | no_follow,
             0o600,
         )
         try:

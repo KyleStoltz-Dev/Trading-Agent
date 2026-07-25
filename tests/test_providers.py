@@ -10,6 +10,7 @@ from app.providers.base import ProviderConfigurationError
 from app.providers.factory import create_model_provider, resolve_provider_name
 from app.providers.ollama_provider import OllamaProvider
 from app.providers.openai_provider import OpenAIProvider
+from app.system_resources import GIB, ResourceSnapshot
 
 
 class FakeResponses:
@@ -64,8 +65,24 @@ def test_openai_adapter_returns_tool_output_to_responses_api() -> None:
     )
     responses = FakeResponses(
         [
-            SimpleNamespace(output=[tool_call], output_text=""),
-            SimpleNamespace(output=[], output_text="done"),
+            SimpleNamespace(
+                output=[tool_call],
+                output_text="",
+                usage=SimpleNamespace(
+                    input_tokens=100,
+                    output_tokens=10,
+                    input_tokens_details=SimpleNamespace(cached_tokens=20),
+                ),
+            ),
+            SimpleNamespace(
+                output=[],
+                output_text="done",
+                usage=SimpleNamespace(
+                    input_tokens=50,
+                    output_tokens=20,
+                    input_tokens_details=SimpleNamespace(cached_tokens=10),
+                ),
+            ),
         ]
     )
     provider = OpenAIProvider(
@@ -88,12 +105,81 @@ def test_openai_adapter_returns_tool_output_to_responses_api() -> None:
     assert responses.calls[0]["model"] == "economy-model"
     assert responses.calls[0]["reasoning"]["effort"] == "low"
     assert responses.calls[0]["store"] is False
+    assert provider.last_usage.input_tokens == 150
+    assert provider.last_usage.output_tokens == 30
+    assert provider.last_usage.cached_input_tokens == 30
     output = next(
         item
         for item in responses.calls[1]["input"]
         if isinstance(item, dict) and item.get("type") == "function_call_output"
     )
     assert json.loads(output["output"]) == {"ok": True}
+
+
+def test_nested_chart_analysis_is_included_in_total_usage() -> None:
+    tool_call = SimpleNamespace(
+        type="function_call",
+        name="analyze_chart",
+        call_id="chart-1",
+        arguments="{}",
+    )
+    def usage(input_tokens, output_tokens):
+        return SimpleNamespace(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            input_tokens_details=SimpleNamespace(cached_tokens=0),
+        )
+    responses = FakeResponses(
+        [
+            SimpleNamespace(output=[tool_call], output_text="", usage=usage(100, 10)),
+            SimpleNamespace(
+                output=[],
+                output_text='{"visible_facts":[]}',
+                usage=usage(200, 20),
+            ),
+            SimpleNamespace(output=[], output_text="done", usage=usage(50, 5)),
+        ]
+    )
+    provider = OpenAIProvider(
+        Settings(openai_api_key="test"),
+        client=SimpleNamespace(responses=responses),
+    )
+
+    def execute_tool(name, arguments):
+        del name, arguments
+        return json.dumps(
+            provider.analyze_chart(
+                image_bytes=b"image",
+                content_type="image/png",
+                user_context="review",
+                instructions="facts only",
+                output_schema={
+                    "type": "object",
+                    "properties": {
+                        "visible_facts": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        }
+                    },
+                    "required": ["visible_facts"],
+                },
+            )
+        )
+
+    assert (
+        provider.complete(
+            instructions="rules",
+            message="analyze",
+            history=[],
+            tools=[],
+            execute_tool=execute_tool,
+            max_tool_rounds=2,
+        )
+        == "done"
+    )
+    assert provider.last_usage.input_tokens == 350
+    assert provider.last_usage.output_tokens == 35
+    assert responses.calls[1]["store"] is False
 
 
 def test_anthropic_adapter_returns_tool_result_immediately_after_tool_use() -> None:
@@ -112,8 +198,24 @@ def test_anthropic_adapter_returns_tool_result_immediately_after_tool_use() -> N
     text = SimpleNamespace(type="text", text="done")
     messages = FakeMessages(
         [
-            SimpleNamespace(content=[tool_call]),
-            SimpleNamespace(content=[text]),
+            SimpleNamespace(
+                content=[tool_call],
+                usage=SimpleNamespace(
+                    input_tokens=100,
+                    output_tokens=10,
+                    cache_read_input_tokens=20,
+                    cache_creation_input_tokens=5,
+                ),
+            ),
+            SimpleNamespace(
+                content=[text],
+                usage=SimpleNamespace(
+                    input_tokens=50,
+                    output_tokens=20,
+                    cache_read_input_tokens=0,
+                    cache_creation_input_tokens=0,
+                ),
+            ),
         ]
     )
     provider = AnthropicProvider(
@@ -136,6 +238,9 @@ def test_anthropic_adapter_returns_tool_result_immediately_after_tool_use() -> N
     assert continuation[-1]["role"] == "user"
     assert continuation[-1]["content"][0]["type"] == "tool_result"
     assert continuation[-1]["content"][0]["tool_use_id"] == "tool-1"
+    assert provider.last_usage.input_tokens == 175
+    assert provider.last_usage.output_tokens == 30
+    assert provider.last_usage.cached_input_tokens == 20
 
 
 def test_ollama_adapter_runs_tools_and_returns_the_follow_up_text() -> None:
@@ -159,19 +264,32 @@ def test_ollama_adapter_runs_tools_and_returns_the_follow_up_text() -> None:
                                 }
                             }
                         ],
-                    }
+                    },
+                    "prompt_eval_count": 20,
+                    "eval_count": 5,
                 },
             )
         return httpx.Response(
             200,
-            json={"message": {"role": "assistant", "content": "done"}},
+            json={
+                "message": {"role": "assistant", "content": "done"},
+                "prompt_eval_count": 10,
+                "eval_count": 7,
+                "total_duration": 2_000_000_000,
+                "load_duration": 500_000_000,
+                "prompt_eval_duration": 1_000_000_000,
+                "eval_duration": 1_000_000_000,
+            },
         )
 
     client = httpx.Client(
         base_url="http://127.0.0.1:11434",
         transport=httpx.MockTransport(handler),
     )
-    provider = OllamaProvider(Settings(model_provider="ollama"), client=client)
+    provider = OllamaProvider(
+        Settings(model_provider="ollama", resource_aware_model_routing=False),
+        client=client,
+    )
     result = provider.complete(
         instructions="rules",
         message="calculate",
@@ -199,6 +317,158 @@ def test_ollama_adapter_runs_tools_and_returns_the_follow_up_text() -> None:
         "tool_name": "calculate_position_size",
         "content": '{"ok": true}',
     }
+    assert provider.last_usage.input_tokens == 30
+    assert provider.last_usage.output_tokens == 12
+    assert provider.last_performance["output_tokens_per_second"] == 7
+    assert provider.last_performance["load_seconds"] == 0.5
+    client.close()
+
+
+def test_ollama_can_unload_a_model_before_switching() -> None:
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"done": True})
+
+    client = httpx.Client(
+        base_url="http://127.0.0.1:11434",
+        transport=httpx.MockTransport(handler),
+    )
+    provider = OllamaProvider(
+        Settings(model_provider="ollama", resource_aware_model_routing=False),
+        client=client,
+    )
+
+    provider.unload_model("qwen3.5:9b")
+
+    assert captured == {
+        "model": "qwen3.5:9b",
+        "stream": False,
+        "keep_alive": 0,
+    }
+    client.close()
+
+
+def test_ollama_reports_installed_sizes_and_loaded_models() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {"name": "qwen3.5:9b", "size": 6_600_000_000},
+                        {"name": "qwen3.5:35b-a3b", "size": 24_000_000_000},
+                    ]
+                },
+            )
+        if request.url.path == "/api/ps":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": "qwen3.5:9b"}]},
+            )
+        return httpx.Response(404)
+
+    client = httpx.Client(
+        base_url="http://127.0.0.1:11434",
+        transport=httpx.MockTransport(handler),
+    )
+    provider = OllamaProvider(
+        Settings(model_provider="ollama", resource_aware_model_routing=False),
+        client=client,
+    )
+
+    assert provider.installed_model_sizes() == {
+        "qwen3.5:9b": 6_600_000_000,
+        "qwen3.5:35b-a3b": 24_000_000_000,
+    }
+    assert provider.loaded_models() == frozenset({"qwen3.5:9b"})
+    client.close()
+
+
+def test_ollama_provider_blocks_unsafe_inference_at_the_shared_boundary(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    chat_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal chat_calls
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={"models": [{"name": "qwen3.5:35b-a3b", "size": 24 * GIB}]},
+            )
+        if request.url.path == "/api/ps":
+            return httpx.Response(200, json={"models": []})
+        if request.url.path == "/api/chat":
+            chat_calls += 1
+            return httpx.Response(
+                200,
+                json={"message": {"role": "assistant", "content": "READY"}},
+            )
+        return httpx.Response(404)
+
+    monkeypatch.setattr(
+        "app.providers.ollama_provider.resource_snapshot",
+        lambda: ResourceSnapshot(
+            platform="TestOS",
+            total_memory_bytes=16 * GIB,
+            available_memory_bytes=12 * GIB,
+            memory_percent=25,
+            swap_total_bytes=None,
+            swap_used_bytes=None,
+            swap_percent=None,
+            disk_free_bytes=100 * GIB,
+        ),
+    )
+    client = httpx.Client(
+        base_url="http://127.0.0.1:11434",
+        transport=httpx.MockTransport(handler),
+    )
+    provider = OllamaProvider(
+        Settings(
+            model_provider="ollama",
+            ollama_model="qwen3.5:35b-a3b",
+            ollama_runtime_lock_path=tmp_path / "ollama.lock",
+        ),
+        client=client,
+    )
+
+    with pytest.raises(RuntimeError, match="resource guard"):
+        provider.smoke_test()
+
+    assert chat_calls == 0
+    client.close()
+
+
+def test_remote_ollama_does_not_use_client_resource_telemetry_or_unload() -> None:
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return httpx.Response(
+            200,
+            json={"message": {"role": "assistant", "content": "READY"}},
+        )
+
+    client = httpx.Client(
+        base_url="https://ollama.example",
+        transport=httpx.MockTransport(handler),
+    )
+    provider = OllamaProvider(
+        Settings(
+            model_provider="ollama",
+            ollama_base_url="https://ollama.example",
+            ollama_allow_remote=True,
+        ),
+        client=client,
+    )
+
+    assert provider.smoke_test() == "READY"
+    assert requests == ["/api/chat"]
+    with pytest.raises(ProviderConfigurationError, match="MANAGE_REMOTE"):
+        provider.unload_model("qwen3.5:9b")
     client.close()
 
 
@@ -226,7 +496,10 @@ def test_ollama_chart_analysis_uses_images_and_json_schema() -> None:
         base_url="http://127.0.0.1:11434",
         transport=httpx.MockTransport(handler),
     )
-    provider = OllamaProvider(Settings(model_provider="ollama"), client=client)
+    provider = OllamaProvider(
+        Settings(model_provider="ollama", resource_aware_model_routing=False),
+        client=client,
+    )
 
     result = provider.analyze_chart(
         image_bytes=b"image",
@@ -257,7 +530,10 @@ def test_ollama_smoke_test_generates_a_small_response() -> None:
         base_url="http://127.0.0.1:11434",
         transport=httpx.MockTransport(handler),
     )
-    provider = OllamaProvider(Settings(model_provider="ollama"), client=client)
+    provider = OllamaProvider(
+        Settings(model_provider="ollama", resource_aware_model_routing=False),
+        client=client,
+    )
 
     assert provider.smoke_test() == "READY"
     assert captured["think"] is False
@@ -331,7 +607,10 @@ def test_ollama_handles_invalid_tool_arguments_without_running_the_tool() -> Non
         base_url="http://127.0.0.1:11434",
         transport=httpx.MockTransport(handler),
     )
-    provider = OllamaProvider(Settings(model_provider="ollama"), client=client)
+    provider = OllamaProvider(
+        Settings(model_provider="ollama", resource_aware_model_routing=False),
+        client=client,
+    )
     result = provider.complete(
         instructions="rules",
         message="calculate",

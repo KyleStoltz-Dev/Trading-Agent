@@ -160,12 +160,13 @@ def adopt_legacy_database(backup_path: Path, database_url: str | None = None) ->
             connection.execute(
                 text(
                     "INSERT INTO public.trade_plans "
-                    "(id, instrument, venue, direction, setup_name, regime, "
+                    "(id, reference, instrument, venue, direction, setup_name, regime, "
                     "context_timeframe, trigger_timeframe, entry, stop, target, "
                     "account_equity, risk_percent, value_per_price_unit, risk_amount, "
                     "quantity, planned_r, thesis, invalidation, observations, "
                     "interpretations, source, status, created_at) "
-                    "SELECT id, instrument, venue, direction, setup_name, regime, "
+                    "SELECT id, 'legacy-' || replace(id::text, '-', ''), "
+                    "instrument, venue, direction, setup_name, regime, "
                     "context_timeframe, trigger_timeframe, entry, stop, target, "
                     "account_equity, risk_percent, value_per_price_unit, risk_amount, "
                     "quantity, planned_r, thesis, invalidation, observations, "

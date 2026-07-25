@@ -51,6 +51,7 @@ def route_model(
     message: str,
     mode: AgentMode | None = None,
     fallback_model: str | None = None,
+    model_override: str | None = None,
 ) -> ModelRoute:
     selected_mode = mode or settings.agent_mode
     task_class = classify_task(message)
@@ -66,7 +67,10 @@ def route_model(
         resolved_mode = selected_mode
         reason = f"user-selected {selected_mode} mode"
 
-    if provider in {"openai", "anthropic", "ollama"}:
+    if model_override:
+        model = model_override
+        reason = f"session model override ({resolved_mode} effort)"
+    elif provider in {"openai", "anthropic", "ollama"}:
         fallback = getattr(settings, f"{provider}_model")
         model = getattr(settings, f"{provider}_{resolved_mode}_model") or fallback
     elif fallback_model:

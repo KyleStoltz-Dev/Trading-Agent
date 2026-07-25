@@ -1,3 +1,4 @@
+import uuid
 from collections import defaultdict
 from decimal import Decimal
 
@@ -28,12 +29,21 @@ def _news_bucket(minutes: int | None) -> str:
     return f"{direction}_over_4h"
 
 
-def build_edge_report(db: Session, minimum_sample: int = 30) -> EdgeReport:
-    rows = db.execute(
+def build_edge_report(
+    db: Session,
+    minimum_sample: int = 30,
+    playbook_version_id: uuid.UUID | None = None,
+) -> EdgeReport:
+    statement = (
         select(TradePlan, TradeReflection)
         .join(TradeReflection, TradeReflection.trade_id == TradePlan.id)
         .order_by(TradePlan.created_at)
-    ).all()
+    )
+    if playbook_version_id is not None:
+        statement = statement.where(
+            TradePlan.playbook_version_id == playbook_version_id
+        )
+    rows = db.execute(statement).all()
     grouped: dict[tuple, list[TradeReflection]] = defaultdict(list)
     for plan, reflection in rows:
         key = (

@@ -4,7 +4,26 @@ import json
 from typing import Any
 
 from app.config import Settings, secret_value
-from app.providers.base import ProviderConfigurationError, ToolExecutor, safe_tool_error
+from app.costs import TokenUsage
+from app.providers.base import (
+    ProviderConfigurationError,
+    ToolExecutor,
+    record_analysis_usage,
+    safe_tool_error,
+    track_completion_usage,
+)
+
+
+def _openai_usage(response: Any) -> TokenUsage:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return TokenUsage()
+    details = getattr(usage, "input_tokens_details", None)
+    return TokenUsage(
+        input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
+        output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
+        cached_input_tokens=int(getattr(details, "cached_tokens", 0) or 0),
+    )
 
 
 class OpenAIProvider:
@@ -12,6 +31,7 @@ class OpenAIProvider:
 
     def __init__(self, settings: Settings, client: Any = None) -> None:
         self.model = settings.openai_model
+        self.last_usage = TokenUsage()
         self.safety_identifier = settings.openai_safety_identifier
         if client is None:
             try:
@@ -23,6 +43,7 @@ class OpenAIProvider:
             client = openai.OpenAI(api_key=secret_value(settings.openai_api_key))
         self.client = client
 
+    @track_completion_usage
     def complete(
         self,
         *,
@@ -46,6 +67,7 @@ class OpenAIProvider:
                 safety_identifier=self.safety_identifier,
                 store=False,
             )
+            self.last_usage += _openai_usage(response)
             tool_calls = [item for item in response.output if item.type == "function_call"]
             if not tool_calls:
                 return response.output_text
@@ -108,5 +130,7 @@ class OpenAIProvider:
                     "schema": output_schema,
                 }
             },
+            store=False,
         )
+        record_analysis_usage(self, _openai_usage(response))
         return json.loads(response.output_text)

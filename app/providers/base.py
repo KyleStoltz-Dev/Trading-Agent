@@ -1,7 +1,30 @@
 from collections.abc import Callable
+from functools import wraps
 from typing import Any, Protocol
 
+from app.costs import TokenUsage
+
 ToolExecutor = Callable[[str, dict[str, Any]], str]
+
+
+def track_completion_usage(method):
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        self.last_usage = TokenUsage()
+        self._completion_usage_active = True
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._completion_usage_active = False
+
+    return wrapper
+
+
+def record_analysis_usage(provider: Any, usage: TokenUsage) -> None:
+    if getattr(provider, "_completion_usage_active", False):
+        provider.last_usage += usage
+    else:
+        provider.last_usage = usage
 
 
 class ProviderConfigurationError(RuntimeError):
@@ -17,6 +40,7 @@ def safe_tool_error(exc: Exception) -> str:
 class ModelProvider(Protocol):
     name: str
     model: str
+    last_usage: TokenUsage
 
     def complete(
         self,

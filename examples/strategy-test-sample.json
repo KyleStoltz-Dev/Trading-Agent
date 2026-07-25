@@ -1,0 +1,17 @@
+{
+  "occurred_at": "2026-07-25T09:30:00-04:00",
+  "instrument": "XAU_USD",
+  "setup_key": "spring_reclaim",
+  "classification": "eligible",
+  "exclusion_reason": null,
+  "outcome_r": "2.5",
+  "process_score": "90",
+  "feature_snapshot": {
+    "atr": 12.4,
+    "displacement_ratio": 2.3,
+    "imbalance_count": 1,
+    "sweep_rejection_atr": 0.4
+  },
+  "notes": "Example replay observation; replace with measured source data.",
+  "source_reference": "example://xauusd-replay"
+}
