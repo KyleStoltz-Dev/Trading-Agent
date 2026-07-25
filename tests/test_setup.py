@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -35,7 +36,8 @@ def test_setup_normalizes_duplicate_provider_without_touching_secrets(
     assert "MODEL_PROVIDER=ollama" in content
     assert "OPENAI_API_KEY=keep-this-value" in content
     assert "OLLAMA_MODEL=qwen3.5:9b" in content
-    assert env_file.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert env_file.stat().st_mode & 0o777 == 0o600
 
 
 def test_setup_refuses_to_write_secret_settings(tmp_path: Path) -> None:
@@ -106,6 +108,7 @@ def test_ollama_pull_requires_explicit_size_for_ambiguous_tag(monkeypatch) -> No
     assert "--expected-size-gb" in detail
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX launcher uses a symlink")
 def test_launcher_refuses_to_replace_regular_file(
     tmp_path: Path,
     monkeypatch,
@@ -123,6 +126,7 @@ def test_launcher_refuses_to_replace_regular_file(
         install_user_launcher(target)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX launcher uses a symlink")
 def test_launcher_creates_absolute_symlink(tmp_path: Path, monkeypatch) -> None:
     target = tmp_path / "venv" / "bin" / "trade"
     target.parent.mkdir(parents=True)
