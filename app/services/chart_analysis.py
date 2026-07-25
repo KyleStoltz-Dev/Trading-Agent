@@ -21,6 +21,8 @@ def analyze_chart(
     user_context: str,
     settings: Settings,
     provider: ModelProvider | None = None,
+    model: str | None = None,
+    reasoning_effort: str = "medium",
 ) -> ChartAnalysis:
     model_provider = provider or create_model_provider(settings)
     result = model_provider.analyze_chart(
@@ -29,5 +31,7 @@ def analyze_chart(
         user_context=user_context,
         instructions=SYSTEM_PROMPT,
         output_schema=ChartAnalysis.model_json_schema(),
+        model=model,
+        reasoning_effort=reasoning_effort,
     )
     return ChartAnalysis.model_validate(result)

@@ -52,13 +52,15 @@ class AnthropicProvider:
         tools: list[dict[str, Any]],
         execute_tool: ToolExecutor,
         max_tool_rounds: int,
+        model: str | None = None,
+        reasoning_effort: str = "medium",
     ) -> str:
         messages: list[dict[str, Any]] = [*history, {"role": "user", "content": message}]
         provider_tools = _anthropic_tools(tools)
 
         for _ in range(max_tool_rounds):
             response = self.client.messages.create(
-                model=self.model,
+                model=model or self.model,
                 max_tokens=4096,
                 system=instructions,
                 messages=messages,
@@ -103,11 +105,13 @@ class AnthropicProvider:
         user_context: str,
         instructions: str,
         output_schema: dict[str, Any],
+        model: str | None = None,
+        reasoning_effort: str = "medium",
     ) -> dict[str, Any]:
         encoded = base64.b64encode(image_bytes).decode("ascii")
         tool_name = "return_chart_analysis"
         response = self.client.messages.create(
-            model=self.model,
+            model=model or self.model,
             max_tokens=4096,
             system=instructions,
             messages=[

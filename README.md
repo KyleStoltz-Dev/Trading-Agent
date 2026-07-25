@@ -20,6 +20,8 @@ execution. It does not autonomously place trades.
 - Immutable playbook versions, normalized rule evaluations, and sample-aware edge reports.
 - Trading Economics calendar/news metadata with source and retrieval timestamps.
 - A key-protected browser/API interface and OpenAPI documentation.
+- Automatic economy/balanced/deep model routing with an in-session override.
+- A confirmed development handoff that can change and test the agent in an isolated branch.
 
 ## Local setup
 
@@ -61,6 +63,20 @@ OPENAI_MODEL=gpt-5.6-sol
 
 `MODEL_PROVIDER=auto` works when exactly one provider key is configured. If both keys are
 present, select one explicitly.
+
+The default model remains the fallback for every route. Optionally give each effort profile
+a different model:
+
+```text
+AGENT_MODE=auto
+OPENAI_ECONOMY_MODEL=
+OPENAI_BALANCED_MODEL=
+OPENAI_DEEP_MODEL=
+```
+
+Blank profile values reuse `OPENAI_MODEL` (or `ANTHROPIC_MODEL`). Economy handles routine
+logging and summaries, balanced handles normal analysis, and deep handles broad research,
+backtesting, full-history analysis, and conflicting-rule work.
 
 Generate a separate local API key; do not reuse a model or broker credential:
 
@@ -119,6 +135,7 @@ trading-agent instrument risk --help
 trading-agent playbook version --help
 trading-agent news sync --help
 trading-agent edge report --minimum-sample 30
+trading-agent develop --help
 ```
 
 Sessions have predictable names. The default new-session name is the date, such as
@@ -131,6 +148,54 @@ trading-agent --session gold-ny-review
 
 UUIDs remain available internally and can still be passed to `--session`, but are no longer
 the primary interface.
+
+### Develop the agent while using it
+
+Use `/mode auto|economy|balanced|deep` to override routing for the current session. The
+selected route is displayed with every reply.
+
+When a clear software request appears in normal conversation—such as “change the agent so
+it shows the active setup”—the CLI reiterates the requested change and asks once whether the
+scope is correct. Confirmation starts the installed Codex CLI in a separate Git worktree.
+Trading or strategy language alone does not trigger development mode. The explicit fallback
+is:
+
+```text
+/develop add a command that compares two playbook versions
+```
+
+The coding run edits and tests after that one scope confirmation. It does not receive
+`.env`, broker, database, OpenAI API, or Anthropic API credentials, and it cannot push,
+merge, deploy, restart the running process, or add autonomous order execution.
+
+Install and sign in to Codex separately, then set the repository path when the agent may be
+started from another directory:
+
+```bash
+codex login
+trading-agent health
+```
+
+```text
+DEVELOPMENT_REPOSITORY=/absolute/path/to/Trading-Agent
+```
+
+Codex CLI can reuse a ChatGPT sign-in for this local coding workflow; trading chat and chart
+analysis still use their separately configured API provider. Results stay on an isolated
+local branch:
+
+```bash
+trading-agent develop start "add a session recap command"
+trading-agent develop status SESSION_ID
+trading-agent develop diff SESSION_ID
+trading-agent develop approve SESSION_ID --yes
+```
+
+`approve` commits only on the isolated local branch. It never pushes or merges.
+For a one-confirmation personal workflow, set
+`DEVELOPMENT_APPROVAL_FLOW=scope_only`; validated changes are then committed to the
+isolated branch automatically. The safer default, `scope_and_diff`, waits for the explicit
+`develop approve` command.
 
 ## Runtime policy and hooks
 

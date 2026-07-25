@@ -16,6 +16,7 @@ from app.config import Settings
 from app.connectors import create_news_connector, create_oanda_connector
 from app.policy import ExecutionHooks, PolicyEngine, policy_wrapped_executor
 from app.providers import ModelProvider, create_model_provider
+from app.routing import AgentMode, ModelRoute, route_model
 from app.schemas import (
     BrokerPositionSizeRequest,
     PositionSizeRequest,
@@ -367,13 +368,25 @@ class TradingAgent:
         self.policy = policy or PolicyEngine.load()
         self.policy.validate_tool_surface(TOOLS, TOOL_METADATA)
         self.hooks = ExecutionHooks(self.policy, confirm_mutation)
+        self.last_route: ModelRoute | None = None
 
-    def respond(self, message: str, history: list[dict[str, str]] | None = None) -> str:
+    def respond(
+        self,
+        message: str,
+        history: list[dict[str, str]] | None = None,
+        mode: AgentMode | None = None,
+    ) -> str:
         instructions = f"{AGENT_INSTRUCTIONS}\n\n{self.policy.instructions}"
         execute_tool = policy_wrapped_executor(
             self._execute_tool,
             self.hooks,
             TOOL_METADATA,
+        )
+        self.last_route = route_model(
+            self.settings,
+            self.provider.name,
+            message,
+            mode=mode,
         )
         return self.provider.complete(
             instructions=instructions,
@@ -382,6 +395,8 @@ class TradingAgent:
             tools=TOOLS,
             execute_tool=execute_tool,
             max_tool_rounds=self.policy.policy.tool_policy.max_tool_rounds,
+            model=self.last_route.model,
+            reasoning_effort=self.last_route.reasoning_effort,
         )
 
     def _execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
@@ -456,6 +471,10 @@ class TradingAgent:
                 user_context=arguments["context"],
                 settings=self.settings,
                 provider=self.provider,
+                model=self.last_route.model if self.last_route else None,
+                reasoning_effort=(
+                    self.last_route.reasoning_effort if self.last_route else "medium"
+                ),
             )
             record_chart_analysis(
                 self.db,
@@ -464,6 +483,7 @@ class TradingAgent:
                 evidence_directory=self.settings.evidence_directory,
                 analysis=result,
                 provider=self.provider,
+                model=self.last_route.model if self.last_route else None,
                 policy_hash=self.policy.content_hash,
                 prompt=SYSTEM_PROMPT,
                 source="agent",

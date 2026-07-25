@@ -63,6 +63,8 @@ def test_agent_executes_risk_tool_and_loads_runtime_policy() -> None:
     assert result == "Risk is $100 and planned R is 4."
     assert "Runtime policy 1.0.0" in provider.instructions
     assert "human_controls_orders" in provider.instructions
+    assert agent.last_route is not None
+    assert agent.last_route.mode == "balanced"
 
 
 def test_agent_does_not_apply_declined_mutation() -> None:

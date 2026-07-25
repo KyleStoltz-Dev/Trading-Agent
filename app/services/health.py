@@ -1,4 +1,5 @@
 import importlib.util
+import shutil
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -144,6 +145,36 @@ def check_health(
                 f"{exc}; chat and chart analysis are unavailable",
             )
         )
+
+    if settings.development_enabled:
+        codex = shutil.which("codex")
+        repository = settings.development_repository.expanduser().resolve()
+        if codex is None:
+            checks.append(
+                HealthCheck(
+                    "development",
+                    "warning",
+                    "development handoff enabled but Codex CLI is not on PATH",
+                )
+            )
+        elif not (repository / ".git").exists():
+            checks.append(
+                HealthCheck(
+                    "development",
+                    "warning",
+                    f"development repository is not a Git worktree: {repository}",
+                )
+            )
+        else:
+            checks.append(
+                HealthCheck(
+                    "development",
+                    "ok",
+                    f"Codex CLI available; isolated repository={repository}",
+                )
+            )
+    else:
+        checks.append(HealthCheck("development", "warning", "development handoff disabled"))
 
     try:
         from app.policy import PolicyEngine

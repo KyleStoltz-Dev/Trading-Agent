@@ -75,9 +75,13 @@ def test_openai_adapter_returns_tool_output_to_responses_api() -> None:
         tools=[],
         execute_tool=lambda name, arguments: json.dumps({"ok": True}),
         max_tool_rounds=2,
+        model="economy-model",
+        reasoning_effort="low",
     )
 
     assert result == "done"
+    assert responses.calls[0]["model"] == "economy-model"
+    assert responses.calls[0]["reasoning"]["effort"] == "low"
     assert responses.calls[0]["store"] is False
     output = next(
         item

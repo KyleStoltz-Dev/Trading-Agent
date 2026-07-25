@@ -12,6 +12,48 @@ The CLI talks directly to Python services; `trading-agent api` is optional. Star
 and hashes the runtime rules, checks PostgreSQL and migration state, checks configured
 providers/connectors, and resumes the latest named conversation unless told otherwise.
 
+## Model routing
+
+`AGENT_MODE=auto` classifies each message locally before any provider request. Routine
+journal operations use economy effort, normal analysis uses balanced effort, and broad
+research uses deep effort. In chat, use `/mode` to override this for the rest of that
+session. The route and model are printed with every reply.
+
+All three routes fall back to the provider's base model. Set the matching
+`OPENAI_*_MODEL` or `ANTHROPIC_*_MODEL` values only when you intentionally want separate
+models. Risk and position sizing never use this router; they remain deterministic.
+
+## Development handoff
+
+Set `DEVELOPMENT_REPOSITORY` to the absolute clone path when the agent may start outside
+the repository. Confirm Codex is installed and signed in:
+
+```bash
+codex --version
+codex login status
+trading-agent health
+```
+
+In interactive chat, state a clear software change or use `/develop`. After the scope
+confirmation, the command may run for several minutes. It records a local session under
+`.data/development`, creates an `agent/dev-*` branch in a separate worktree, runs Codex
+non-interactively with workspace-only writes, then runs Ruff and pytest.
+
+Inspect and commit the result:
+
+```bash
+trading-agent develop status SESSION_ID
+trading-agent develop diff SESSION_ID
+trading-agent develop approve SESSION_ID --yes
+```
+
+Approval reruns validation and commits only to the isolated branch. Push, pull-request,
+merge, deployment, and process restart are deliberately separate operations.
+
+`DEVELOPMENT_APPROVAL_FLOW=scope_only` removes the second commit approval: the initial
+reiterated-scope confirmation authorizes Codex to edit, validate, and commit on the isolated
+branch. `scope_and_diff` is the default for shared installations.
+
 ## Database
 
 Inspect and upgrade:
