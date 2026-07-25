@@ -11,6 +11,7 @@ from app.config import Settings, secret_value
 from app.db import inspect_schema
 from app.models import BrokerConnection
 from app.providers import ProviderConfigurationError, resolve_provider_name
+from app.providers.ollama_provider import OllamaProvider
 
 if TYPE_CHECKING:
     from app.policy import PolicyEngine
@@ -44,6 +45,8 @@ def check_health(
     settings: Settings,
     engine: Engine,
     policy: "PolicyEngine | None" = None,
+    *,
+    model_smoke_test: bool = False,
 ) -> HealthReport:
     checks = [
         HealthCheck(
@@ -120,28 +123,64 @@ def check_health(
 
     try:
         provider_name = resolve_provider_name(settings)
-        model = (
-            settings.openai_model
-            if provider_name == "openai"
-            else settings.anthropic_model
-        )
-        package_available = importlib.util.find_spec(provider_name) is not None
-        checks.append(
-            HealthCheck(
-                "model_provider",
-                "ok" if package_available else "warning",
-                (
-                    f"{provider_name}/{model} is configured"
-                    if package_available
-                    else f"{provider_name}/{model} configured; install the optional adapter"
-                ),
+        if provider_name == "ollama":
+            provider = OllamaProvider(settings)
+            try:
+                installed = provider.installed_models()
+                if settings.ollama_model in installed and model_smoke_test:
+                    provider.smoke_test()
+            finally:
+                provider.client.close()
+            if settings.ollama_model in installed:
+                checks.append(
+                    HealthCheck(
+                        "model_provider",
+                        "ok",
+                        f"ollama/{settings.ollama_model} is installed locally",
+                    )
+                )
+                if model_smoke_test:
+                    checks.append(
+                        HealthCheck(
+                            "model_inference",
+                            "ok",
+                            "local model generated a response",
+                        )
+                    )
+            else:
+                checks.append(
+                    HealthCheck(
+                        "model_provider",
+                        "warning",
+                        (
+                            f"ollama is running but {settings.ollama_model} is not installed; "
+                            f"run `ollama pull {settings.ollama_model}`"
+                        ),
+                    )
+                )
+        else:
+            model = (
+                settings.openai_model
+                if provider_name == "openai"
+                else settings.anthropic_model
             )
-        )
-    except ProviderConfigurationError as exc:
+            package_available = importlib.util.find_spec(provider_name) is not None
+            checks.append(
+                HealthCheck(
+                    "model_provider",
+                    "ok" if package_available else "warning",
+                    (
+                        f"{provider_name}/{model} is configured"
+                        if package_available
+                        else f"{provider_name}/{model} configured; install the optional adapter"
+                    ),
+                )
+            )
+    except (ProviderConfigurationError, RuntimeError) as exc:
         checks.append(
             HealthCheck(
                 "model_provider",
-                "warning",
+                "error" if model_smoke_test else "warning",
                 f"{exc}; chat and chart analysis are unavailable",
             )
         )

@@ -8,8 +8,9 @@ The MVP is a human-in-the-loop journal and playbook service:
 - PostgreSQL locally through Docker or remotely through Neon.
 - Deterministic position sizing.
 - Structured trade plans and post-trade reflections.
-- Optional OpenAI vision analysis with strict observation/hypothesis separation.
-- Provider-neutral chat and vision with optional OpenAI and Anthropic adapters.
+- Provider-neutral chart analysis with strict observation/hypothesis separation.
+- Provider-neutral chat and vision with OpenAI, Anthropic, and local Ollama adapters.
+- Progressive task context from a compact, application-owned trading harness.
 - A versioned runtime policy loaded at startup and checked by hooks before tool execution.
 - Human-readable session names backed by internal UUIDs.
 - Alembic-managed, execution-centered PostgreSQL records.

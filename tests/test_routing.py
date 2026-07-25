@@ -46,3 +46,16 @@ def test_user_mode_override_wins_over_task_classification() -> None:
 
 def test_strategy_language_alone_is_not_software_development() -> None:
     assert classify_task("I need to change how I enter this setup") == "analysis"
+
+
+def test_ollama_uses_local_model_profiles() -> None:
+    settings = Settings(
+        model_provider="ollama",
+        ollama_model="qwen3.5:9b",
+        ollama_deep_model="qwen3.5:35b-a3b",
+    )
+
+    route = route_model(settings, "ollama", "Deep research my full history.")
+
+    assert route.model == "qwen3.5:35b-a3b"
+    assert route.mode == "deep"

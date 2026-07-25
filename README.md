@@ -13,7 +13,7 @@ execution. It does not autonomously place trades.
 - Broker-contract-aware position sizing including spread, slippage, commission, quantity
   increments, margin, currency conversion, and a configured maximum risk.
 - Context-timeframe and trigger-timeframe separation.
-- Chart screenshot analysis through an optional OpenAI or Anthropic adapter.
+- Chart screenshot analysis through an optional OpenAI, Anthropic, or local Ollama adapter.
 - Explicit separation of visible facts, hypotheses, missing evidence, and questions.
 - Content-addressed chart evidence and provider/model/policy/prompt/input/output provenance.
 - Idempotent fill imports, transaction cursors, account/position snapshots, and reconciliation.
@@ -25,8 +25,25 @@ execution. It does not autonomously place trades.
 
 ## Local setup
 
-Requirements: Python 3.12+, PostgreSQL, and an OpenAI or Anthropic API key for model-backed
-chat and chart analysis.
+Requirements: Python 3.12+ and PostgreSQL. Model-backed chat and chart analysis can use an
+OpenAI or Anthropic API key, or a token-free local Ollama model.
+
+On macOS, the simplest first-time setup is:
+
+```bash
+./install.command
+```
+
+The guided setup configures the provider, installs a `trade` launcher under
+`~/.local/bin`, starts Ollama when selected, and downloads the configured local model.
+After that, start the agent from any directory:
+
+```bash
+trade
+```
+
+If `~/.local/bin` is not already on `PATH`, setup prints the line to add to
+`~/.zprofile`. The longer manual installation remains available:
 
 ```bash
 cp .env.example .env
@@ -64,6 +81,36 @@ OPENAI_MODEL=gpt-5.6-sol
 `MODEL_PROVIDER=auto` works when exactly one provider key is configured. If both keys are
 present, select one explicitly.
 
+For local, token-free use on macOS:
+
+```bash
+brew install ollama
+brew services start ollama
+ollama pull qwen3.5:9b
+```
+
+Then set the following in `.env`:
+
+```text
+MODEL_PROVIDER=ollama
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_MODEL=qwen3.5:9b
+OLLAMA_ECONOMY_MODEL=qwen3.5:9b
+OLLAMA_BALANCED_MODEL=qwen3.5:9b
+OLLAMA_DEEP_MODEL=qwen3.5:9b
+OLLAMA_CONTEXT_LENGTH=16384
+```
+
+Keep only one active `MODEL_PROVIDER` line. Ollama is restricted to the local machine by
+default; using a remote host requires the explicit `OLLAMA_ALLOW_REMOTE=true` opt-in. On a
+48 GB Apple Silicon Mac, start with the 9B model and measure responsiveness before trying a
+larger model.
+
+`trade setup` can safely change the selected provider later. It rewrites only non-secret
+provider settings, collapses duplicate provider entries, and never reads or writes API keys.
+Configuration is discovered from `TRADING_AGENT_CONFIG`, the editable installation, the
+standard user configuration directory, or the current directory.
+
 The default model remains the fallback for every route. Optionally give each effort profile
 a different model:
 
@@ -97,21 +144,23 @@ The API and journal work without either model provider; model-backed chat and
 
 ## Interactive CLI
 
-After installation, start the interactive agent:
+After installation, use the short command:
 
 ```bash
-trading-agent
+trade
 ```
 
-Startup runs lightweight health checks, opens or resumes the latest locally persisted conversation,
-and routes natural-language requests to the same application services used by the API. The
-agent can calculate risk, inspect the journal, create a confirmed plan or reflection, analyze
-a local chart path, and report system health. Journal mutations always require a terminal
-confirmation. There are no broker execution tools.
+`trading-agent` remains an equivalent compatibility command. Startup checks local services,
+warms a local model with a tiny generation test, opens or resumes the latest persisted
+conversation, and routes natural-language requests to the same services used by the API.
+The agent can calculate risk, inspect the journal, create a confirmed plan or reflection,
+analyze a local chart path, and report system health. Journal mutations always require a
+terminal confirmation. There are no broker execution tools.
 
 Conversation turns are stored in PostgreSQL so a session can be resumed. Relevant recent
 turns and requested journal/tool results are sent to the selected provider. OpenAI requests
-use `store=false`; Anthropic uses the stateless Messages API. Do not enter broker credentials
+use `store=false`; Anthropic uses the stateless Messages API; local Ollama requests remain on
+the configured Ollama host. Do not enter broker credentials
 or secrets into the conversation.
 
 Every capability also remains available as an individual command:
@@ -119,6 +168,8 @@ Every capability also remains available as an individual command:
 ```bash
 trading-agent chat
 trading-agent health
+trading-agent health --model-smoke-test
+trading-agent setup --help
 trading-agent risk --help
 trading-agent plan
 trading-agent chart /absolute/path/to/chart.png
@@ -214,6 +265,16 @@ access; the policy and execution boundary must be reviewed separately.
 
 The schema can audit a future order-preview and approval workflow, but the current
 connector interfaces remain read-only and expose no broker write method.
+
+## Progressive trading harness
+
+`app/harness/HARNESS.md` is a compact role map. For each request, deterministic routing selects
+only matching workflows and references from `skills/`, `market-models/`, `psychology/`, and
+`references/`. The selected files and hashes are placed in model context; unrelated material
+is not loaded. Use `/context` to see what influenced the previous response.
+
+Harness content supplies task context only. It cannot replace `app/trading-rules.json`, bypass
+execution hooks, perform risk arithmetic, or add broker execution capability.
 
 The CLI calls Python services directly and does not require a local HTTP server. Run the
 optional API/browser process only when needed:

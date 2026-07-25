@@ -14,6 +14,7 @@ def test_help_lists_interactive_and_fallback_commands() -> None:
     assert result.exit_code == 0
     for command in (
         "chat",
+        "setup",
         "health",
         "risk",
         "plan",
