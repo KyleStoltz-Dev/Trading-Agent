@@ -2,12 +2,13 @@ import pytest
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from app.db import engine
+from app.db import engine, upgrade_database
 
 
 @pytest.fixture
 def db_session():
     try:
+        upgrade_database()
         connection = engine.connect()
     except OperationalError:
         pytest.skip("PostgreSQL is unavailable")

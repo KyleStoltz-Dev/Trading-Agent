@@ -84,6 +84,7 @@ def select_harness_context(
     root: Path = HARNESS_ROOT,
     max_resources: int = 5,
     max_characters: int = 12_000,
+    excluded_prefixes: tuple[str, ...] = (),
 ) -> HarnessContext:
     resolved_root = root.resolve()
     entrypoint = resolved_root / "HARNESS.md"
@@ -95,6 +96,9 @@ def select_harness_context(
     for path in sorted(resolved_root.rglob("*.md")):
         resolved = path.resolve()
         if path == entrypoint or path.is_symlink() or not resolved.is_relative_to(resolved_root):
+            continue
+        relative = path.relative_to(resolved_root).as_posix()
+        if any(relative.startswith(prefix) for prefix in excluded_prefixes):
             continue
         metadata, _ = _parse_document(path)
         score = _score(message, metadata)

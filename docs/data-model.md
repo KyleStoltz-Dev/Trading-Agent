@@ -23,6 +23,9 @@ fill arrives, management changes, reconciliation runs, or a review is saved.
 | Accounts | `trading_accounts`, `broker_connections` | Identifies the venue and account while storing only a secret-store reference, never credentials. |
 | Sync | `connector_cursors` | Resumes transaction ingestion idempotently after restarts. |
 | Playbook | `playbooks`, `playbook_versions` | Freezes the exact rules used by a plan so later edits cannot rewrite history. |
+| Trader context | `trader_profiles`, `conversation_sessions`, `conversation_turns` | Stores style/preferences, the selected strategy, and the exact strategy version under which each turn was created. |
+| Strategy knowledge | `knowledge_imports`, `strategy_knowledge_items` | Hashes and deduplicates imported Discord, Telegram, X, and file content under one exact playbook version. |
+| Strategy testing | `strategy_experiments`, `strategy_test_samples` | Freezes the rules hash and retains eligible, excluded, and unclear backtest/forward-test observations. |
 | Decision | `trade_plans`, `market_contexts`, `observations`, `evidence_items`, `analysis_runs` | Separates facts from hypotheses and records content, policy, prompt, model, input, and output provenance. |
 | Events | `economic_events`, `news_items` | Retains provider IDs, source/retrieval timestamps, importance, values, and links without copying full articles. |
 | Lifecycle | `trades`, `trade_management_events` | Connects planning, broker records, fills, management decisions, and review for one position lifecycle. |
@@ -31,8 +34,10 @@ fill arrives, management changes, reconciliation runs, or a review is saved.
 | Snapshots | `position_snapshots`, `account_snapshots` | Captures state only at fills, management, review, manual capture, or reconciliation. |
 | Review | `trade_reflections`, `rule_evaluations`, `mindset_checkins` | Keeps process quality, outcome, rule adherence, and mindset separately measurable. |
 
-Screenshots and documents stay outside PostgreSQL. `evidence_items` stores their URI,
-SHA-256 hash, MIME type, source, market time, retrieval time, and safe metadata.
+Screenshots and binary documents stay outside PostgreSQL. `evidence_items` stores their URI,
+SHA-256 hash, MIME type, source, market time, retrieval time, and safe metadata. Normalized
+imported message/note text is stored in PostgreSQL because it must be queryable, deduplicated,
+and isolated by strategy version.
 
 ## Write and trust boundaries
 
@@ -52,6 +57,15 @@ SHA-256 hash, MIME type, source, market time, retrieval time, and safe metadata.
    for risk, cost, quantity, and margin arithmetic.
 9. Chart evidence is content-addressed. Re-analyzing the same image creates a new
    `analysis_run` without duplicating the underlying evidence file or item.
+10. Imported material is tied to `playbook_version_id`; searches always filter that exact
+    value and excluded items. The model has no arbitrary SQL access.
+11. Strategy experiments retain `rules_hash`. Eligibility changes require a new version and
+    experiment rather than rewriting a running sample.
+12. UUIDs remain relational primary keys. Sessions use unique names, trade plans use generated
+    references such as `xauusd-20260725-ny-short-1`, and experiments accept unique names.
+13. Prompt history is fail-closed: an active strategy sees only turns tagged with that exact
+    immutable version; general mode sees only untagged turns. The transcript viewer remains a
+    complete audit trail but is never used as unfiltered model context.
 
 ## Initial providers
 

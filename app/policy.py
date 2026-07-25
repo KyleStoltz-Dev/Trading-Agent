@@ -37,6 +37,36 @@ class PolicyViolation(RuntimeError):
     pass
 
 
+DIRECT_ACTION_METADATA = {
+    "add_mindset_checkin": {"mutating": True, "deterministic": False},
+    "add_strategy_test_sample": {"mutating": True, "deterministic": False},
+    "add_trade_reflection": {"mutating": True, "deterministic": False},
+    "analyze_chart": {"mutating": True, "deterministic": False},
+    "build_edge_report": {"mutating": False, "deterministic": False},
+    "calculate_broker_position_size": {"mutating": False, "deterministic": True},
+    "calculate_position_size": {"mutating": False, "deterministic": True},
+    "complete_strategy_experiment": {"mutating": True, "deterministic": False},
+    "complete_pretrade_workflow": {"mutating": True, "deterministic": False},
+    "configure_broker_connection": {"mutating": True, "deterministic": False},
+    "configure_instrument_specification": {"mutating": True, "deterministic": True},
+    "create_playbook_version": {"mutating": True, "deterministic": False},
+    "create_strategy_experiment": {"mutating": True, "deterministic": False},
+    "create_strategy_version": {"mutating": True, "deterministic": False},
+    "create_trade_plan": {"mutating": True, "deterministic": False},
+    "exclude_strategy_knowledge": {"mutating": True, "deterministic": False},
+    "get_live_quote": {"mutating": False, "deterministic": False},
+    "get_system_health": {"mutating": False, "deterministic": False},
+    "get_trade_plan": {"mutating": False, "deterministic": False},
+    "import_strategy_knowledge": {"mutating": True, "deterministic": False},
+    "list_mindset_checkins": {"mutating": False, "deterministic": False},
+    "list_trade_plans": {"mutating": False, "deterministic": False},
+    "record_management_event": {"mutating": True, "deterministic": False},
+    "restore_strategy_knowledge": {"mutating": True, "deterministic": False},
+    "synchronize_broker": {"mutating": True, "deterministic": False},
+    "synchronize_news": {"mutating": True, "deterministic": False},
+}
+
+
 @dataclass(frozen=True)
 class ToolContext:
     name: str
@@ -103,6 +133,21 @@ class PolicyEngine:
         if context.name in self.policy.tool_policy.forbidden_names:
             raise PolicyViolation(f"Tool is forbidden by runtime policy: {context.name}")
 
+    def authorize_registered_action(self, context: ToolContext) -> None:
+        metadata = DIRECT_ACTION_METADATA.get(context.name)
+        if metadata is None:
+            raise PolicyViolation(
+                f"Direct action has no explicit policy registration: {context.name}"
+            )
+        if (
+            context.mutating != metadata["mutating"]
+            or context.deterministic != metadata["deterministic"]
+        ):
+            raise PolicyViolation(
+                f"Direct action metadata does not match registration: {context.name}"
+            )
+        self.authorize(context)
+
 
 class ExecutionHooks:
     def __init__(
@@ -119,7 +164,7 @@ class ExecutionHooks:
             f"Policy-approved mutation: {context.name}",
             context.arguments,
         ):
-            raise PolicyViolation("trader declined journal mutation")
+            raise PolicyViolation("trader declined mutation")
 
 
 def policy_wrapped_executor(

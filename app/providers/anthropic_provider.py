@@ -3,7 +3,14 @@ import importlib
 from typing import Any
 
 from app.config import Settings, secret_value
-from app.providers.base import ProviderConfigurationError, ToolExecutor, safe_tool_error
+from app.costs import TokenUsage
+from app.providers.base import (
+    ProviderConfigurationError,
+    ToolExecutor,
+    record_analysis_usage,
+    safe_tool_error,
+    track_completion_usage,
+)
 
 
 def _anthropic_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -26,11 +33,26 @@ def _content_dict(block: Any) -> dict[str, Any]:
     raise TypeError(f"Unsupported Anthropic content block: {type(block).__name__}")
 
 
+def _anthropic_usage(response: Any) -> TokenUsage:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return TokenUsage()
+    cached = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+    cache_write = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+    base_input = int(getattr(usage, "input_tokens", 0) or 0)
+    return TokenUsage(
+        input_tokens=base_input + cached + cache_write,
+        output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
+        cached_input_tokens=cached,
+    )
+
+
 class AnthropicProvider:
     name = "anthropic"
 
     def __init__(self, settings: Settings, client: Any = None) -> None:
         self.model = settings.anthropic_model
+        self.last_usage = TokenUsage()
         if client is None:
             try:
                 anthropic = importlib.import_module("anthropic")
@@ -43,6 +65,7 @@ class AnthropicProvider:
             )
         self.client = client
 
+    @track_completion_usage
     def complete(
         self,
         *,
@@ -66,6 +89,7 @@ class AnthropicProvider:
                 messages=messages,
                 tools=provider_tools,
             )
+            self.last_usage += _anthropic_usage(response)
             tool_calls = [block for block in response.content if block.type == "tool_use"]
             if not tool_calls:
                 return "\n".join(
@@ -140,6 +164,7 @@ class AnthropicProvider:
             ],
             tool_choice={"type": "tool", "name": tool_name},
         )
+        record_analysis_usage(self, _anthropic_usage(response))
         block = next(
             (
                 item

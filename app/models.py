@@ -207,6 +207,175 @@ class PlaybookVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class TraderProfile(Base):
+    __tablename__ = "trader_profiles"
+    __table_args__ = (
+        UniqueConstraint("profile_key", name="uq_trader_profile_key"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    profile_key: Mapped[str] = mapped_column(String(80), default="local", index=True)
+    display_name: Mapped[str] = mapped_column(String(120))
+    timezone: Mapped[str] = mapped_column(String(80))
+    experience_level: Mapped[str | None] = mapped_column(String(40))
+    trading_style: Mapped[str] = mapped_column(Text, default="")
+    markets: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    sessions: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    goals: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    risk_preferences: Mapped[dict] = mapped_column(JSONB, default=dict)
+    onboarding_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class KnowledgeImport(Base):
+    __tablename__ = "knowledge_imports"
+    __table_args__ = (
+        UniqueConstraint(
+            "playbook_version_id",
+            "source_hash",
+            name="uq_knowledge_import_strategy_source",
+        ),
+        CheckConstraint(
+            "source_type IN "
+            "('discord', 'telegram', 'x', 'generic', 'file', 'directory', 'paste')",
+            name="ck_knowledge_import_source_type",
+        ),
+        CheckConstraint(
+            "status IN ('completed', 'partial', 'failed')",
+            name="ck_knowledge_import_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    playbook_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("playbook_versions.id", ondelete="CASCADE"),
+        index=True,
+    )
+    source_type: Mapped[str] = mapped_column(String(24))
+    source_name: Mapped[str] = mapped_column(String(255))
+    source_locator: Mapped[str | None] = mapped_column(Text)
+    source_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), default="completed")
+    item_count: Mapped[int] = mapped_column(Integer, default=0)
+    skipped_count: Mapped[int] = mapped_column(Integer, default=0)
+    imported_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+
+class StrategyKnowledgeItem(Base):
+    __tablename__ = "strategy_knowledge_items"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('message', 'note', 'document', 'rule', 'example')",
+            name="ck_strategy_knowledge_kind",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    import_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("knowledge_imports.id", ondelete="CASCADE"),
+        index=True,
+    )
+    playbook_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("playbook_versions.id", ondelete="CASCADE"),
+        index=True,
+    )
+    kind: Mapped[str] = mapped_column(String(24), default="document", index=True)
+    source_reference: Mapped[str | None] = mapped_column(Text)
+    author: Mapped[str | None] = mapped_column(String(160))
+    occurred_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    content: Mapped[str] = mapped_column(Text)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, default=dict)
+    excluded: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+
+class StrategyExperiment(Base):
+    __tablename__ = "strategy_experiments"
+    __table_args__ = (
+        CheckConstraint(
+            "mode IN ('backtest', 'forward_test')",
+            name="ck_strategy_experiment_mode",
+        ),
+        CheckConstraint(
+            "status IN ('draft', 'running', 'completed', 'cancelled')",
+            name="ck_strategy_experiment_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    playbook_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("playbook_versions.id"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(160))
+    mode: Mapped[str] = mapped_column(String(24), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
+    hypothesis: Mapped[str] = mapped_column(Text)
+    instrument: Mapped[str | None] = mapped_column(String(40), index=True)
+    timeframe: Mapped[str | None] = mapped_column(String(16))
+    data_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    data_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rules_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class StrategyTestSample(Base):
+    __tablename__ = "strategy_test_samples"
+    __table_args__ = (
+        CheckConstraint(
+            "classification IN ('eligible', 'excluded', 'unclear')",
+            name="ck_strategy_test_sample_classification",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    experiment_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("strategy_experiments.id", ondelete="CASCADE"),
+        index=True,
+    )
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    instrument: Mapped[str] = mapped_column(String(40), index=True)
+    setup_key: Mapped[str] = mapped_column(String(120), index=True)
+    classification: Mapped[str] = mapped_column(String(16))
+    exclusion_reason: Mapped[str | None] = mapped_column(Text)
+    outcome_r: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    process_score: Mapped[Decimal | None] = mapped_column(Numeric(6, 2))
+    feature_snapshot: Mapped[dict] = mapped_column(JSONB, default=dict)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    source_reference: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+
 class Trade(Base):
     __tablename__ = "trades"
     __table_args__ = (
@@ -239,6 +408,7 @@ class Trade(Base):
 class TradePlan(Base):
     __tablename__ = "trade_plans"
     __table_args__ = (
+        UniqueConstraint("reference", name="uq_trade_plan_reference"),
         CheckConstraint("direction IN ('long', 'short')", name="ck_trade_plan_direction"),
         CheckConstraint(
             "status IN ('draft', 'planned', 'invalidated', 'executed', 'reviewed')",
@@ -250,6 +420,7 @@ class TradePlan(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    reference: Mapped[str] = mapped_column(String(120), index=True)
     trade_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("trades.id", ondelete="SET NULL"), index=True
     )
@@ -768,6 +939,9 @@ class MindsetCheckIn(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    playbook_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("playbook_versions.id"), index=True
+    )
     trade_plan_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("trade_plans.id"), index=True
     )
@@ -781,12 +955,78 @@ class MindsetCheckIn(Base):
     )
 
 
+class PretradeAssessment(Base):
+    __tablename__ = "pretrade_assessments"
+    __table_args__ = (
+        CheckConstraint(
+            "rating IN ('eligible', 'conditional', 'stand_aside', 'blocked')",
+            name="ck_pretrade_assessment_rating",
+        ),
+        CheckConstraint(
+            "human_decision IN ('pending', 'proceed', 'stand_aside', 'cancelled')",
+            name="ck_pretrade_assessment_decision",
+        ),
+        CheckConstraint(
+            "news_status IN ('fresh', 'stale', 'not_configured', 'unavailable')",
+            name="ck_pretrade_assessment_news_status",
+        ),
+        CheckConstraint(
+            "human_decision != 'proceed' "
+            "OR (rating IN ('eligible', 'conditional') AND trade_plan_id IS NOT NULL)",
+            name="ck_pretrade_assessment_proceed_eligible",
+        ),
+        CheckConstraint(
+            "human_decision = 'proceed' OR trade_plan_id IS NULL",
+            name="ck_pretrade_assessment_trade_decision",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    playbook_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("playbook_versions.id"),
+        index=True,
+    )
+    mindset_checkin_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("mindset_checkins.id", ondelete="SET NULL"),
+        index=True,
+    )
+    trade_plan_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("trade_plans.id", ondelete="SET NULL"),
+        index=True,
+    )
+    setup_key: Mapped[str | None] = mapped_column(String(120))
+    rating: Mapped[str] = mapped_column(String(24), index=True)
+    component_scores: Mapped[dict] = mapped_column(JSONB, default=dict)
+    hard_blockers: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    stand_aside_reasons: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    missing_evidence: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    rule_results: Mapped[list[dict]] = mapped_column(JSONB, default=list)
+    news_status: Mapped[str] = mapped_column(String(24))
+    market_context: Mapped[dict] = mapped_column(JSONB, default=dict)
+    policy_hash: Mapped[str] = mapped_column(String(64))
+    human_decision: Mapped[str] = mapped_column(
+        String(24), default="pending", index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class ConversationSession(Base):
     __tablename__ = "conversation_sessions"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     title: Mapped[str] = mapped_column(String(160), default="Trading Agent session")
+    active_playbook_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("playbook_versions.id"), index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
@@ -811,6 +1051,11 @@ class ConversationTurn(Base):
     session_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("conversation_sessions.id", ondelete="CASCADE"),
+        index=True,
+    )
+    playbook_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("playbook_versions.id"),
         index=True,
     )
     role: Mapped[str] = mapped_column(String(16))

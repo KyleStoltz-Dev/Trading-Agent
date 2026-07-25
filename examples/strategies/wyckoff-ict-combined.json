@@ -1,0 +1,27 @@
+{
+  "methodology": "explicit_wyckoff_ict_combination",
+  "objective": "Test whether a defined Wyckoff context plus a defined lower-timeframe imbalance trigger improves expectancy.",
+  "composition": {
+    "wyckoff_role": "Defines range context, phase hypothesis, and directional invalidation.",
+    "ict_role": "Defines only the lower-timeframe liquidity sweep, displacement, and three-candle imbalance trigger.",
+    "conflict_rule": "No trade when the Wyckoff context and lower-timeframe trigger disagree."
+  },
+  "requirements": [
+    "A Wyckoff range and phase hypothesis exist before examining the trigger timeframe.",
+    "The external liquidity reference is marked before it is swept.",
+    "Displacement uses the numeric body-to-median definition.",
+    "Imbalance uses the numeric three-candle gap definition.",
+    "Entry, stop, target, invalidation, and news proximity are recorded before entry."
+  ],
+  "exclusions": [
+    "Either methodology is being added after the outcome is visible.",
+    "The setup qualifies under only one half of the combined definition.",
+    "A term cannot be mapped to an observable or numeric condition.",
+    "Risk or planned reward-to-risk requirements are not met."
+  ],
+  "risk": {
+    "maximum_risk_percent": 1.0,
+    "minimum_planned_r": 3.0,
+    "human_confirms_every_trade": true
+  }
+}

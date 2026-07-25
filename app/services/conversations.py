@@ -84,8 +84,15 @@ def add_turn(
     conversation: ConversationSession,
     role: str,
     content: str,
+    *,
+    playbook_version_id: uuid.UUID | None,
 ) -> ConversationTurn:
-    turn = ConversationTurn(session_id=conversation.id, role=role, content=content)
+    turn = ConversationTurn(
+        session_id=conversation.id,
+        playbook_version_id=playbook_version_id,
+        role=role,
+        content=content,
+    )
     conversation.updated_at = datetime.now(UTC)
     db.add(turn)
     db.commit()
@@ -96,8 +103,36 @@ def add_turn(
 def conversation_history(
     db: Session,
     conversation: ConversationSession,
+    *,
+    playbook_version_id: uuid.UUID | None,
     limit: int = 20,
 ) -> list[dict[str, str]]:
+    strategy_scope = (
+        ConversationTurn.playbook_version_id == playbook_version_id
+        if playbook_version_id is not None
+        else ConversationTurn.playbook_version_id.is_(None)
+    )
+    recent = list(
+        db.scalars(
+            select(ConversationTurn)
+            .where(
+                ConversationTurn.session_id == conversation.id,
+                strategy_scope,
+            )
+            .order_by(ConversationTurn.created_at.desc())
+            .limit(limit)
+        )
+    )
+    recent.reverse()
+    return [{"role": turn.role, "content": turn.content} for turn in recent]
+
+
+def conversation_transcript(
+    db: Session,
+    conversation: ConversationSession,
+    limit: int = 100,
+) -> list[dict[str, str]]:
+    """Return the complete audit transcript without using it as model context."""
     recent = list(
         db.scalars(
             select(ConversationTurn)

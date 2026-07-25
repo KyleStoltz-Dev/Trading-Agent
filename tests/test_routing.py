@@ -59,3 +59,17 @@ def test_ollama_uses_local_model_profiles() -> None:
 
     assert route.model == "qwen3.5:35b-a3b"
     assert route.mode == "deep"
+
+
+def test_session_model_override_keeps_mode_effort() -> None:
+    route = route_model(
+        Settings(model_provider="ollama"),
+        "ollama",
+        "Log this routine note.",
+        model_override="qwen3.5:35b-a3b",
+    )
+
+    assert route.model == "qwen3.5:35b-a3b"
+    assert route.mode == "economy"
+    assert route.reasoning_effort == "low"
+    assert "session model override" in route.reason
