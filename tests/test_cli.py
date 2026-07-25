@@ -181,7 +181,7 @@ def test_health_strict_fails_when_required_check_fails(monkeypatch) -> None:
     assert "unreachable" in result.stdout
 
 
-def test_agent_reply_renders_markdown_and_always_shows_references(monkeypatch) -> None:
+def test_agent_reply_is_compact_and_details_preserve_the_audit(monkeypatch) -> None:
     output = StringIO()
     monkeypatch.setattr(
         cli_module,
@@ -189,7 +189,7 @@ def test_agent_reply_renders_markdown_and_always_shows_references(monkeypatch) -
         Console(file=output, force_terminal=False, width=120),
     )
 
-    cli_module._render_agent_reply(
+    details = cli_module._render_agent_reply(
         "# Market context\n\n**Observed:** price is inside the range.",
         "balanced · ollama/qwen3.5:9b",
         2,
@@ -211,9 +211,31 @@ def test_agent_reply_renders_markdown_and_always_shows_references(monkeypatch) -
     assert "Observed:" in rendered
     assert "# Market context" not in rendered
     assert "**Observed:**" not in rendered
-    assert "References used" in rendered
-    assert "[untrusted markup]" in rendered
-    assert "$0 API" in rendered
+    assert "References used" not in rendered
+    assert "[untrusted markup]" not in rendered
+    assert "1 sources" in rendered
+    assert "/details" in rendered
+    assert "local" in rendered
+
+    output.seek(0)
+    output.truncate(0)
+    cli_module._render_response_details(details)
+    expanded = output.getvalue()
+    assert "Response details" in expanded
+    assert "balanced · ollama/qwen3.5:9b" in expanded
+    assert "100 input" in expanded
+    assert "20 output" in expanded
+    assert "$0 API" in expanded
+    assert "References" in expanded
+
+
+def test_release_local_model_uses_the_provider_unload_boundary(monkeypatch) -> None:
+    provider = object.__new__(cli_module.OllamaProvider)
+    unload = Mock()
+    monkeypatch.setattr(provider, "unload_model", unload)
+
+    assert cli_module._release_local_model(provider, "qwen3.5:9b")
+    unload.assert_called_once_with("qwen3.5:9b")
 
 
 def test_print_model_normalizes_uuid_values(monkeypatch) -> None:

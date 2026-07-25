@@ -138,6 +138,8 @@ OLLAMA_ECONOMY_MODEL=qwen3.5:9b
 OLLAMA_BALANCED_MODEL=qwen3.5:9b
 OLLAMA_DEEP_MODEL=qwen3.5:9b
 OLLAMA_CONTEXT_LENGTH=16384
+OLLAMA_KEEP_ALIVE=2m
+OLLAMA_UNLOAD_ON_EXIT=true
 ```
 
 Keep only one active `MODEL_PROVIDER` line. Ollama is restricted to the local machine by
@@ -152,12 +154,15 @@ trade models use qwen3.5:35b-a3b --tier quality
 ```
 
 Inside chat, `/model` shows local profiles, `/model use qwen3.5:35b-a3b` creates a
-session-only override, and `/model auto` restores tier routing. `/mode` still controls
-reasoning effort. Chart analysis accepts `--model qwen3.5:35b-a3b --reasoning-effort high`.
+session-only override, `/model auto` restores tier routing, and `/model unload` immediately
+releases the model owned by the current session. `/mode` still controls reasoning effort.
+Chart analysis accepts `--model qwen3.5:35b-a3b --reasoning-effort high`.
 Before local inference, the resource guard recalculates whether the selected model fits the
 current machine. It can warn, refuse an unsafe explicit override, or route an automatic
 request to the configured smaller model. The check uses OS-neutral telemetry on macOS,
 Linux, and Windows. A remote Ollama server is not judged using the client computer's memory.
+Local model weights expire after two idle minutes by default and are released immediately
+when chat exits. The startup smoke test validates inference without leaving a model resident.
 
 `trade setup` can safely change the selected provider later. It rewrites only non-secret
 provider settings, collapses duplicate provider entries, and never reads or writes API keys.
@@ -217,21 +222,24 @@ The agent can calculate risk, inspect the journal, create a confirmed plan or re
 analyze a local chart path, and report system health. Journal mutations always require a
 terminal confirmation. There are no broker execution tools.
 
-Replies render as normal terminal Markdown instead of raw Markdown inside a large panel.
-Before a model call, the CLI shows the selected context, model route, and estimated cost,
-then displays a thinking/tool-activity spinner. After the reply it shows provider-reported
-token usage, estimated API cost when known, and the complete reference ledger. Useful chat
-commands are:
+Replies render as normal terminal Markdown with one compact status line. Before a model call,
+the CLI shows one concise route/context/cost preview, then displays a thinking/tool-activity
+spinner. The default reply footer shows route, local performance, cost, and source count.
+Full token usage, performance, and audit metadata remain available through `/details`;
+provenance and harness material remain available through `/sources` and `/context`.
+Useful chat commands are:
 
 ```text
 /examples             show starter requests
 /cost                 show configured model prices
+/details              show the full response audit and performance
 /sources              show references used for the last response
 /context              show selected local harness files
 /mode auto|economy|balanced|deep
 /model                show installed/configured local models
 /model use NAME       override the local model for this session
 /model auto           restore automatic model-profile routing
+/model unload         release this session's local model immediately
 ```
 
 Conversation turns are stored in PostgreSQL so a session can be resumed. Strategy

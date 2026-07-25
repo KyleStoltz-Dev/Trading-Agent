@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from app.config import default_config_path, environment_files
+from app.config import Settings, default_config_path, environment_files
 
 
 def test_explicit_config_path_wins(monkeypatch, tmp_path: Path) -> None:
@@ -20,3 +20,10 @@ def test_default_config_uses_standard_user_location_when_none_exist(
     monkeypatch.setattr("app.config.environment_files", lambda: ())
 
     assert default_config_path() == tmp_path / "home" / ".config" / "trading-agent" / ".env"
+
+
+def test_local_model_residency_defaults_release_memory_promptly() -> None:
+    settings = Settings()
+
+    assert settings.ollama_keep_alive == "2m"
+    assert settings.ollama_unload_on_exit is True

@@ -537,6 +537,7 @@ def test_ollama_smoke_test_generates_a_small_response() -> None:
 
     assert provider.smoke_test() == "READY"
     assert captured["think"] is False
+    assert captured["keep_alive"] == 0
     assert captured["options"]["num_predict"] == 8
     assert captured["options"]["num_ctx"] == 2048
     client.close()
