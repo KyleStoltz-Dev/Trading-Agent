@@ -1,6 +1,8 @@
 import asyncio
 import json
 import mimetypes
+import shutil
+import sys
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
@@ -16,7 +18,7 @@ from rich.panel import Panel
 from rich.table import Table
 from sqlalchemy import select
 
-from app.config import Settings, get_settings, secret_value
+from app.config import Settings, default_config_path, get_settings, secret_value
 from app.connectors import (
     BrokerConfigurationError,
     create_news_connector,
@@ -82,6 +84,15 @@ from app.services.journal import (
 )
 from app.services.news import store_calendar_events, store_news_items
 from app.services.risk import calculate_broker_position_size, calculate_position_size
+from app.setup import (
+    ensure_local_services,
+    install_user_launcher,
+    provider_settings,
+    pull_ollama_model,
+    shell_path_hint,
+    start_homebrew_service,
+    update_env_file,
+)
 
 app = typer.Typer(
     name="trading-agent",
@@ -351,7 +362,14 @@ def _run_chat(
 ) -> None:
     settings = get_settings()
     policy = _runtime_policy()
-    report = check_health(settings, engine, policy=policy)
+    for message in ensure_local_services(settings, engine):
+        console.print(f"[cyan]{message}[/cyan]")
+    report = check_health(
+        settings,
+        engine,
+        policy=policy,
+        model_smoke_test=settings.startup_model_smoke_test,
+    )
     _render_health(report)
     if not report.ready:
         console.print(
@@ -414,6 +432,7 @@ def _run_chat(
                 console.print(
                     "/exit · leave\n"
                     "/health · run diagnostics\n"
+                    "/context · show harness resources selected for the last response\n"
                     "/mode auto|economy|balanced|deep · choose model effort\n"
                     "/develop <change> · hand a software change to the coding agent\n"
                     "Clear software-change requests also offer a development handoff.\n"
@@ -422,6 +441,10 @@ def _run_chat(
                 continue
             if message == "/health":
                 _render_health(check_health(settings, engine))
+                continue
+            if message == "/context":
+                paths = agent.last_harness_context.paths
+                console.print("\n".join(paths) if paths else "No task context selected yet.")
                 continue
             if message.startswith("/mode"):
                 requested_mode = message.removeprefix("/mode").strip()
@@ -469,6 +492,9 @@ def _run_chat(
             route_label = (
                 f"{route.mode} · {route.provider}/{route.model}" if route else "unknown route"
             )
+            context_paths = agent.last_harness_context.paths
+            if context_paths:
+                route_label += f" · context {len(context_paths)}"
             console.print(Panel(reply, title=f"Trading Agent · {route_label}"))
 
 
@@ -523,13 +549,106 @@ def health(
         bool,
         typer.Option(help="Exit unsuccessfully when any required check fails."),
     ] = False,
+    model_smoke_test: Annotated[
+        bool,
+        typer.Option(
+            "--model-smoke-test",
+            help="Generate a tiny local-model response instead of only checking installation.",
+        ),
+    ] = False,
 ) -> None:
     """Check policy, model-provider configuration, and database connectivity."""
     _authorize_direct("get_system_health", {})
-    report = check_health(get_settings(), engine, policy=_runtime_policy())
+    report = check_health(
+        get_settings(),
+        engine,
+        policy=_runtime_policy(),
+        model_smoke_test=model_smoke_test,
+    )
     _render_health(report)
     if strict and not report.ready:
         raise typer.Exit(1)
+
+
+@app.command("setup")
+def setup_agent(
+    provider: Annotated[
+        str | None,
+        typer.Option(help="Model provider: ollama, openai, or anthropic."),
+    ] = None,
+    model: Annotated[
+        str,
+        typer.Option(help="Local Ollama model to configure."),
+    ] = "qwen3.5:9b",
+    config: Annotated[
+        Path | None,
+        typer.Option(help="Environment file to update."),
+    ] = None,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Use defaults without confirmation."),
+    ] = False,
+    skip_pull: Annotated[
+        bool,
+        typer.Option(help="Configure Ollama without downloading the model."),
+    ] = False,
+) -> None:
+    """Configure the provider and install the short `trade` launcher."""
+    selected = (provider or typer.prompt(
+        "Provider (ollama/openai/anthropic)",
+        default="ollama",
+    )).lower()
+    if selected not in {"ollama", "openai", "anthropic"}:
+        console.print("[red]Provider must be ollama, openai, or anthropic.[/red]")
+        raise typer.Exit(2)
+
+    resolved_config = (config or default_config_path()).expanduser().resolve()
+    try:
+        values = provider_settings(selected, model)  # type: ignore[arg-type]
+        update_env_file(resolved_config, values)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
+    console.print(f"[green]Configured {selected} in {resolved_config}.[/green]")
+
+    launcher_target = Path(sys.executable).parent / "trade"
+    try:
+        launcher = install_user_launcher(launcher_target)
+    except (FileExistsError, FileNotFoundError) as exc:
+        console.print(f"[yellow]Global launcher not installed: {exc}[/yellow]")
+    else:
+        console.print(f"[green]Installed launcher: {launcher}[/green]")
+        hint = shell_path_hint(launcher)
+        if hint:
+            console.print(f"[yellow]{hint}[/yellow]")
+
+    if selected == "ollama":
+        if shutil.which("ollama") is None:
+            console.print(
+                "[yellow]Install Ollama with `brew install ollama`, then rerun setup.[/yellow]"
+            )
+            return
+        ok, detail = start_homebrew_service("ollama")
+        color = "green" if ok else "yellow"
+        console.print(f"[{color}]Ollama service: {detail}[/{color}]")
+        should_pull = not skip_pull and (
+            yes or typer.confirm(f"Download {model} now?", default=True)
+        )
+        if should_pull:
+            console.print(f"[cyan]Downloading {model}; this can take several minutes…[/cyan]")
+            pulled, pull_detail = pull_ollama_model(model)
+            color = "green" if pulled else "red"
+            console.print(f"[{color}]{pull_detail}[/{color}]")
+            if not pulled:
+                raise typer.Exit(1)
+
+    if selected in {"openai", "anthropic"}:
+        key_name = "OPENAI_API_KEY" if selected == "openai" else "ANTHROPIC_API_KEY"
+        console.print(
+            f"[yellow]Add {key_name} to {resolved_config}; "
+            "setup never reads or writes model keys.[/yellow]"
+        )
+    console.print("[bold green]Setup complete. Reopen Terminal and run: trade[/bold green]")
 
 
 @develop_app.command("start")

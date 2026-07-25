@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -32,6 +33,12 @@ class Settings(BaseSettings):
     ollama_context_length: int = Field(default=16384, ge=2048, le=262144)
     ollama_keep_alive: str = "10m"
     ollama_request_timeout_seconds: float = Field(default=300.0, gt=0, le=1800)
+    startup_model_smoke_test: bool = True
+    local_service_autostart: bool = True
+    postgres_service_name: str = Field(
+        default="postgresql@17",
+        pattern=r"^[A-Za-z0-9@._+-]+$",
+    )
     agent_mode: Literal["auto", "economy", "balanced", "deep"] = "auto"
     app_env: str = "development"
     database_auto_migrate: bool = True
@@ -52,12 +59,36 @@ class Settings(BaseSettings):
     development_timeout_seconds: int = Field(default=1800, ge=60, le=7200)
     development_state_directory: Path = Path(".data/development")
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(extra="ignore")
+
+
+def environment_files() -> tuple[Path, ...]:
+    explicit = os.environ.get("TRADING_AGENT_CONFIG")
+    if explicit:
+        return (Path(explicit).expanduser().resolve(),)
+
+    package_project = Path(__file__).resolve().parent.parent / ".env"
+    user_config = Path.home() / ".config" / "trading-agent" / ".env"
+    current = Path.cwd() / ".env"
+    candidates = (package_project, user_config, current)
+    unique: list[Path] = []
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.is_file() and resolved not in unique:
+            unique.append(resolved)
+    return tuple(unique)
+
+
+def default_config_path() -> Path:
+    existing = environment_files()
+    if existing:
+        return existing[-1]
+    return Path.home() / ".config" / "trading-agent" / ".env"
 
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    return Settings(_env_file=environment_files() or None)
 
 
 def secret_value(value: SecretStr | None) -> str | None:

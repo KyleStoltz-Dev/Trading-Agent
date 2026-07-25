@@ -45,6 +45,8 @@ def check_health(
     settings: Settings,
     engine: Engine,
     policy: "PolicyEngine | None" = None,
+    *,
+    model_smoke_test: bool = False,
 ) -> HealthReport:
     checks = [
         HealthCheck(
@@ -125,6 +127,8 @@ def check_health(
             provider = OllamaProvider(settings)
             try:
                 installed = provider.installed_models()
+                if settings.ollama_model in installed and model_smoke_test:
+                    provider.smoke_test()
             finally:
                 provider.client.close()
             if settings.ollama_model in installed:
@@ -135,6 +139,14 @@ def check_health(
                         f"ollama/{settings.ollama_model} is installed locally",
                     )
                 )
+                if model_smoke_test:
+                    checks.append(
+                        HealthCheck(
+                            "model_inference",
+                            "ok",
+                            "local model generated a response",
+                        )
+                    )
             else:
                 checks.append(
                     HealthCheck(
@@ -164,11 +176,11 @@ def check_health(
                     ),
                 )
             )
-    except ProviderConfigurationError as exc:
+    except (ProviderConfigurationError, RuntimeError) as exc:
         checks.append(
             HealthCheck(
                 "model_provider",
-                "warning",
+                "error" if model_smoke_test else "warning",
                 f"{exc}; chat and chart analysis are unavailable",
             )
         )

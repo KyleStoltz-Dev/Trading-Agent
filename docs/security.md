@@ -19,6 +19,10 @@ placement, modification, cancellation, closing, or hedging methods.
   Market, news, chart, and journal content cannot directly invoke the coding backend.
 - Development runs use a separate Git worktree and a minimal environment allowlist. Model,
   broker, news, API-server, and database credentials are removed from the child process.
+- Guided setup rewrites only an allowlist of non-secret configuration keys, uses an atomic
+  replacement, and enforces mode `0600`. It refuses API-key fields.
+- Harness files are application-owned, size-bounded context. They do not define executable
+  tools and cannot override runtime policy or deterministic risk controls.
 - The local HTTP API requires a key of at least 32 characters on every `/api/*` route.
   Mutating routes additionally require `X-Trader-Confirmation: confirmed`.
 
@@ -44,6 +48,7 @@ placement, modification, cancellation, closing, or hedging methods.
 7. Review reconciliation issues before relying on journal position state.
 8. Review `trading-agent develop diff SESSION_ID` before locally committing a generated
    change.
+9. Use `/context` when auditing which harness material influenced a response.
 
 Local Ollama is limited to loopback by default. A non-local `OLLAMA_BASE_URL` is rejected unless
 `OLLAMA_ALLOW_REMOTE=true` is explicitly configured, because remote inference sends prompts,

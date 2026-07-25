@@ -63,6 +63,9 @@ def test_agent_executes_risk_tool_and_loads_runtime_policy() -> None:
     assert result == "Risk is $100 and planned R is 4."
     assert "Runtime policy 1.0.0" in provider.instructions
     assert "human_controls_orders" in provider.instructions
+    assert "TASK-RELEVANT TRADING HARNESS" in provider.instructions
+    assert "skills/position-planning/SKILL.md" in provider.instructions
+    assert agent.last_harness_context.paths[0] == "HARNESS.md"
     assert agent.last_route is not None
     assert agent.last_route.mode == "balanced"
 

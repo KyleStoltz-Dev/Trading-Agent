@@ -22,6 +22,7 @@ dependencies = [
 
 [project.scripts]
 trading-agent = "app.cli:run"
+trade = "app.cli:run"
 
 [project.optional-dependencies]
 openai = [

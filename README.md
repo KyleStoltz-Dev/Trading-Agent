@@ -28,6 +28,23 @@ execution. It does not autonomously place trades.
 Requirements: Python 3.12+ and PostgreSQL. Model-backed chat and chart analysis can use an
 OpenAI or Anthropic API key, or a token-free local Ollama model.
 
+On macOS, the simplest first-time setup is:
+
+```bash
+./install.command
+```
+
+The guided setup configures the provider, installs a `trade` launcher under
+`~/.local/bin`, starts Ollama when selected, and downloads the configured local model.
+After that, start the agent from any directory:
+
+```bash
+trade
+```
+
+If `~/.local/bin` is not already on `PATH`, setup prints the line to add to
+`~/.zprofile`. The longer manual installation remains available:
+
 ```bash
 cp .env.example .env
 docker compose up -d postgres
@@ -89,6 +106,11 @@ default; using a remote host requires the explicit `OLLAMA_ALLOW_REMOTE=true` op
 48 GB Apple Silicon Mac, start with the 9B model and measure responsiveness before trying a
 larger model.
 
+`trade setup` can safely change the selected provider later. It rewrites only non-secret
+provider settings, collapses duplicate provider entries, and never reads or writes API keys.
+Configuration is discovered from `TRADING_AGENT_CONFIG`, the editable installation, the
+standard user configuration directory, or the current directory.
+
 The default model remains the fallback for every route. Optionally give each effort profile
 a different model:
 
@@ -122,17 +144,18 @@ The API and journal work without either model provider; model-backed chat and
 
 ## Interactive CLI
 
-After installation, start the interactive agent:
+After installation, use the short command:
 
 ```bash
-trading-agent
+trade
 ```
 
-Startup runs lightweight health checks, opens or resumes the latest locally persisted conversation,
-and routes natural-language requests to the same application services used by the API. The
-agent can calculate risk, inspect the journal, create a confirmed plan or reflection, analyze
-a local chart path, and report system health. Journal mutations always require a terminal
-confirmation. There are no broker execution tools.
+`trading-agent` remains an equivalent compatibility command. Startup checks local services,
+warms a local model with a tiny generation test, opens or resumes the latest persisted
+conversation, and routes natural-language requests to the same services used by the API.
+The agent can calculate risk, inspect the journal, create a confirmed plan or reflection,
+analyze a local chart path, and report system health. Journal mutations always require a
+terminal confirmation. There are no broker execution tools.
 
 Conversation turns are stored in PostgreSQL so a session can be resumed. Relevant recent
 turns and requested journal/tool results are sent to the selected provider. OpenAI requests
@@ -145,6 +168,8 @@ Every capability also remains available as an individual command:
 ```bash
 trading-agent chat
 trading-agent health
+trading-agent health --model-smoke-test
+trading-agent setup --help
 trading-agent risk --help
 trading-agent plan
 trading-agent chart /absolute/path/to/chart.png
@@ -240,6 +265,16 @@ access; the policy and execution boundary must be reviewed separately.
 
 The schema can audit a future order-preview and approval workflow, but the current
 connector interfaces remain read-only and expose no broker write method.
+
+## Progressive trading harness
+
+`app/harness/HARNESS.md` is a compact role map. For each request, deterministic routing selects
+only matching workflows and references from `skills/`, `market-models/`, `psychology/`, and
+`references/`. The selected files and hashes are placed in model context; unrelated material
+is not loaded. Use `/context` to see what influenced the previous response.
+
+Harness content supplies task context only. It cannot replace `app/trading-rules.json`, bypass
+execution hooks, perform risk arithmetic, or add broker execution capability.
 
 The CLI calls Python services directly and does not require a local HTTP server. Run the
 optional API/browser process only when needed:

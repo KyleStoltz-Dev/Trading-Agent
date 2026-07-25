@@ -243,6 +243,29 @@ def test_ollama_chart_analysis_uses_images_and_json_schema() -> None:
     client.close()
 
 
+def test_ollama_smoke_test_generates_a_small_response() -> None:
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={"message": {"role": "assistant", "content": "READY"}},
+        )
+
+    client = httpx.Client(
+        base_url="http://127.0.0.1:11434",
+        transport=httpx.MockTransport(handler),
+    )
+    provider = OllamaProvider(Settings(model_provider="ollama"), client=client)
+
+    assert provider.smoke_test() == "READY"
+    assert captured["think"] is False
+    assert captured["options"]["num_predict"] == 8
+    assert captured["options"]["num_ctx"] == 2048
+    client.close()
+
+
 def test_ollama_requires_explicit_opt_in_for_remote_hosts() -> None:
     with pytest.raises(ProviderConfigurationError, match="OLLAMA_ALLOW_REMOTE"):
         OllamaProvider(

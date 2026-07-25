@@ -72,6 +72,31 @@ class OllamaProvider:
             if isinstance(item, dict) and isinstance(item.get("name"), str)
         )
 
+    def smoke_test(self) -> str:
+        data = self._chat(
+            {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Reply with exactly READY.",
+                    }
+                ],
+                "stream": False,
+                "think": False,
+                "keep_alive": self.keep_alive,
+                "options": {
+                    "num_ctx": min(self.context_length, 2048),
+                    "num_predict": 8,
+                    "temperature": 0,
+                },
+            }
+        )
+        content = (data.get("message") or {}).get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("Ollama model did not generate a smoke-test response")
+        return content.strip()
+
     def complete(
         self,
         *,

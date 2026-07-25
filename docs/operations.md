@@ -2,6 +2,22 @@
 
 ## Startup
 
+Normal daily startup:
+
+```bash
+trade
+```
+
+One-time guided macOS setup:
+
+```bash
+./install.command
+# or, after installation:
+trade setup
+```
+
+Detailed diagnostics and the compatibility command remain available:
+
 ```bash
 source .venv/bin/activate
 trading-agent health --strict
@@ -19,10 +35,32 @@ ollama pull qwen3.5:9b
 Set `MODEL_PROVIDER=ollama` and `OLLAMA_MODEL=qwen3.5:9b` in `.env`. The health command checks
 that Ollama is reachable and that the configured model is installed. If the service was not
 registered successfully, run `ollama serve` in a separate Terminal window for that session.
+Run `trading-agent health --model-smoke-test` to require a real generated response.
 
 The CLI talks directly to Python services; `trading-agent api` is optional. Startup loads
 and hashes the runtime rules, checks PostgreSQL and migration state, checks configured
 providers/connectors, and resumes the latest named conversation unless told otherwise.
+When enabled, startup asks Homebrew to start local PostgreSQL or Ollama if either is
+unreachable. It never installs a system package silently.
+
+## Configuration discovery
+
+Configuration lookup order is:
+
+1. `TRADING_AGENT_CONFIG` when explicitly set;
+2. `.env` beside an editable source installation;
+3. `~/.config/trading-agent/.env`;
+4. `.env` in the current directory.
+
+Later files override earlier files. Environment variables override all files. `trade setup`
+updates the active file atomically with mode `0600` and refuses to write secret keys.
+
+## Harness context
+
+Every response loads the compact `HARNESS.md` entry point and at most four matching task
+resources within the configured context budget. `/context` shows the selected relative paths.
+Routing is deterministic and tested against representative chart, planning, risk, review,
+psychology, regime, and edge-analysis prompts.
 
 ## Model routing
 

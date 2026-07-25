@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.connectors import create_news_connector, create_oanda_connector
+from app.harness_context import HarnessContext, select_harness_context
 from app.policy import ExecutionHooks, PolicyEngine, policy_wrapped_executor
 from app.providers import ModelProvider, create_model_provider
 from app.routing import AgentMode, ModelRoute, route_model
@@ -369,6 +370,7 @@ class TradingAgent:
         self.policy.validate_tool_surface(TOOLS, TOOL_METADATA)
         self.hooks = ExecutionHooks(self.policy, confirm_mutation)
         self.last_route: ModelRoute | None = None
+        self.last_harness_context = HarnessContext(())
 
     def respond(
         self,
@@ -376,7 +378,14 @@ class TradingAgent:
         history: list[dict[str, str]] | None = None,
         mode: AgentMode | None = None,
     ) -> str:
+        self.last_harness_context = select_harness_context(message)
+        harness_instructions = self.last_harness_context.render()
         instructions = f"{AGENT_INSTRUCTIONS}\n\n{self.policy.instructions}"
+        if harness_instructions:
+            instructions = (
+                f"{instructions}\n\nTASK-RELEVANT TRADING HARNESS\n"
+                f"{harness_instructions}"
+            )
         execute_tool = policy_wrapped_executor(
             self._execute_tool,
             self.hooks,
