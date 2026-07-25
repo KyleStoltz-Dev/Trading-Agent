@@ -14,9 +14,16 @@ class Settings(BaseSettings):
     model_provider: Literal["auto", "openai", "anthropic"] = "auto"
     openai_api_key: SecretStr | None = None
     openai_model: str = "gpt-5.6-sol"
+    openai_economy_model: str | None = None
+    openai_balanced_model: str | None = None
+    openai_deep_model: str | None = None
     openai_safety_identifier: str = "trading-agent-local"
     anthropic_api_key: SecretStr | None = None
     anthropic_model: str = "claude-sonnet-5"
+    anthropic_economy_model: str | None = None
+    anthropic_balanced_model: str | None = None
+    anthropic_deep_model: str | None = None
+    agent_mode: Literal["auto", "economy", "balanced", "deep"] = "auto"
     app_env: str = "development"
     database_auto_migrate: bool = True
     trading_agent_api_key: SecretStr | None = None
@@ -28,6 +35,13 @@ class Settings(BaseSettings):
     oanda_request_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
     market_quote_max_age_seconds: float = Field(default=5.0, gt=0, le=300)
     trading_economics_api_key: SecretStr | None = None
+    development_enabled: bool = True
+    development_repository: Path = Path(".")
+    development_base_ref: str = "HEAD"
+    development_backend: Literal["codex"] = "codex"
+    development_approval_flow: Literal["scope_only", "scope_and_diff"] = "scope_and_diff"
+    development_timeout_seconds: int = Field(default=1800, ge=60, le=7200)
+    development_state_directory: Path = Path(".data/development")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

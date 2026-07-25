@@ -60,6 +60,16 @@
       "id": "fail_closed",
       "text": "Missing, stale, conflicting, unauthorized, or invalid inputs must fail closed and be reported plainly.",
       "enforcement": "code_and_prompt"
+    },
+    {
+      "id": "explicit_development_handoff",
+      "text": "Software changes require a reiterated scope and explicit human confirmation before a coding backend starts.",
+      "enforcement": "code_and_process"
+    },
+    {
+      "id": "development_isolation",
+      "text": "Coding backends operate in an isolated Git worktree without trading, broker, database, or model API credentials and cannot push, merge, deploy, or restart the running agent.",
+      "enforcement": "code"
     }
   ],
   "tool_policy": {

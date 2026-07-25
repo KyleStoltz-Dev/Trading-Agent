@@ -32,15 +32,17 @@ class OpenAIProvider:
         tools: list[dict[str, Any]],
         execute_tool: ToolExecutor,
         max_tool_rounds: int,
+        model: str | None = None,
+        reasoning_effort: str = "medium",
     ) -> str:
         input_items: list[Any] = [*history, {"role": "user", "content": message}]
         for _ in range(max_tool_rounds):
             response = self.client.responses.create(
-                model=self.model,
+                model=model or self.model,
                 instructions=instructions,
                 input=input_items,
                 tools=tools,
-                reasoning={"effort": "medium", "context": "current_turn"},
+                reasoning={"effort": reasoning_effort, "context": "current_turn"},
                 safety_identifier=self.safety_identifier,
                 store=False,
             )
@@ -76,11 +78,13 @@ class OpenAIProvider:
         user_context: str,
         instructions: str,
         output_schema: dict[str, Any],
+        model: str | None = None,
+        reasoning_effort: str = "medium",
     ) -> dict[str, Any]:
         encoded = base64.b64encode(image_bytes).decode("ascii")
         response = self.client.responses.create(
-            model=self.model,
-            reasoning={"effort": "medium"},
+            model=model or self.model,
+            reasoning={"effort": reasoning_effort},
             input=[
                 {
                     "role": "user",

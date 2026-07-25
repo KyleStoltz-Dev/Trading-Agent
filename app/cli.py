@@ -16,7 +16,7 @@ from rich.panel import Panel
 from rich.table import Table
 from sqlalchemy import select
 
-from app.config import get_settings, secret_value
+from app.config import Settings, get_settings, secret_value
 from app.connectors import (
     BrokerConfigurationError,
     create_news_connector,
@@ -34,6 +34,7 @@ from app.db import (
 from app.models import BrokerConnection, ConnectorCursor, ConversationSession
 from app.policy import ExecutionHooks, PolicyEngine, ToolContext
 from app.providers import ProviderConfigurationError, create_model_provider
+from app.routing import AgentMode
 from app.schemas import (
     BrokerPositionSizeRequest,
     InstrumentSpecificationCreate,
@@ -61,6 +62,12 @@ from app.services.conversations import (
     latest_conversation,
     list_conversations,
     resolve_conversation,
+)
+from app.services.development import (
+    DevelopmentService,
+    DevelopmentSession,
+    detect_development_intent,
+    development_request,
 )
 from app.services.evidence import record_chart_analysis
 from app.services.execution_ledger import record_management_event
@@ -98,6 +105,8 @@ playbook_app = typer.Typer(help="Create immutable playbook versions.")
 app.add_typer(playbook_app, name="playbook")
 news_app = typer.Typer(help="Read and retain timestamped news/calendar metadata.")
 app.add_typer(news_app, name="news")
+develop_app = typer.Typer(help="Make isolated, testable changes to Trading Agent.")
+app.add_typer(develop_app, name="develop")
 console = Console()
 
 
@@ -283,6 +292,58 @@ def _confirm_agent_mutation(action: str, arguments: dict) -> bool:
     return typer.confirm("Apply this journal change?")
 
 
+def _render_development_session(session: object) -> None:
+    validation = getattr(session, "validation", None) or []
+    checks = "\n".join(
+        f"{'✓' if item['passed'] else '✗'} {item['command']}" for item in validation
+    )
+    detail = (
+        f"ID: {session.id}\n"
+        f"Status: {session.status}\n"
+        f"Branch: {session.branch}\n"
+        f"Worktree: {session.worktree}"
+    )
+    if checks:
+        detail += f"\n\nValidation:\n{checks}"
+    console.print(Panel(detail, title="Development handoff"))
+
+
+def _run_development_handoff(
+    settings: Settings,
+    raw_request: str,
+) -> DevelopmentSession | None:
+    request = development_request(raw_request)
+    commit_behavior = (
+        "Validated changes will be committed to the isolated branch."
+        if settings.development_approval_flow == "scope_only"
+        else "Validated changes will wait for diff review before a local commit."
+    )
+    console.print(
+        Panel(
+            f"Change requested:\n{request}\n\n"
+            "Scope: Trading Agent source and tests only.\n"
+            f"{commit_behavior}\n"
+            "Not included: broker order execution, secrets, push, merge, or live restart.",
+            title="Confirm development change",
+        )
+    )
+    if not typer.confirm("Is this what you want me to change?"):
+        console.print("[yellow]Development handoff cancelled.[/yellow]")
+        return None
+    console.print("[cyan]Creating an isolated branch and running the coding agent…[/cyan]")
+    service = DevelopmentService(settings, _runtime_policy())
+    session = service.start(request)
+    if (
+        settings.development_approval_flow == "scope_only"
+        and session.status == "needs_review"
+    ):
+        session = service.approve(session.id)
+    _render_development_session(session)
+    if session.summary:
+        console.print(Panel(session.summary, title="Coding agent summary"))
+    return session
+
+
 def _run_chat(
     session_reference: str | None,
     new_session: bool,
@@ -310,6 +371,7 @@ def _run_chat(
     if settings.database_auto_migrate:
         upgrade_database()
     with SessionLocal() as db:
+        current_mode: AgentMode = settings.agent_mode
         conversation = (
             resolve_conversation(db, session_reference) if session_reference else None
         )
@@ -334,7 +396,7 @@ def _run_chat(
         console.print(
             Panel(
                 f"Session {conversation.name} ({conversation.id})\n"
-                "Type /help for commands; /exit to leave.",
+                f"Mode: {current_mode}\nType /help for commands; /exit to leave.",
                 title="Trading Agent",
             )
         )
@@ -352,22 +414,62 @@ def _run_chat(
                 console.print(
                     "/exit · leave\n"
                     "/health · run diagnostics\n"
+                    "/mode auto|economy|balanced|deep · choose model effort\n"
+                    "/develop <change> · hand a software change to the coding agent\n"
+                    "Clear software-change requests also offer a development handoff.\n"
                     "Everything else is natural language; include a local chart path when needed."
                 )
                 continue
             if message == "/health":
                 _render_health(check_health(settings, engine))
                 continue
+            if message.startswith("/mode"):
+                requested_mode = message.removeprefix("/mode").strip()
+                if requested_mode not in {"auto", "economy", "balanced", "deep"}:
+                    console.print("[red]Use /mode auto|economy|balanced|deep[/red]")
+                    continue
+                current_mode = requested_mode  # type: ignore[assignment]
+                console.print(f"[green]Model mode is now {current_mode}.[/green]")
+                continue
+            if detect_development_intent(message):
+                try:
+                    development = _run_development_handoff(settings, message)
+                    add_turn(db, conversation, "user", message)
+                    if development is None:
+                        add_turn(
+                            db,
+                            conversation,
+                            "assistant",
+                            "Development handoff was offered and cancelled.",
+                        )
+                    else:
+                        add_turn(
+                            db,
+                            conversation,
+                            "assistant",
+                            (
+                                f"Development session {development.id} finished with "
+                                f"status {development.status} on branch "
+                                f"{development.branch}."
+                            ),
+                        )
+                except Exception as exc:
+                    console.print(f"[red]{type(exc).__name__}: {exc}[/red]")
+                continue
 
             history = conversation_history(db, conversation)
             try:
-                reply = agent.respond(message, history)
+                reply = agent.respond(message, history, mode=current_mode)
             except Exception as exc:
                 console.print(f"[red]{type(exc).__name__}: {exc}[/red]")
                 continue
             add_turn(db, conversation, "user", message)
             add_turn(db, conversation, "assistant", reply)
-            console.print(Panel(reply, title="Trading Agent"))
+            route = agent.last_route
+            route_label = (
+                f"{route.mode} · {route.provider}/{route.model}" if route else "unknown route"
+            )
+            console.print(Panel(reply, title=f"Trading Agent · {route_label}"))
 
 
 @app.callback()
@@ -428,6 +530,69 @@ def health(
     _render_health(report)
     if strict and not report.ready:
         raise typer.Exit(1)
+
+
+@develop_app.command("start")
+def develop_start(
+    request: Annotated[str, typer.Argument(help="The software change to make.")],
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Accept the reiterated scope without prompting."),
+    ] = False,
+) -> None:
+    """Create an isolated coding session and leave its changes ready for review."""
+    if yes:
+        settings = get_settings()
+        service = DevelopmentService(settings, _runtime_policy())
+        session = service.start(request)
+        if (
+            settings.development_approval_flow == "scope_only"
+            and session.status == "needs_review"
+        ):
+            session = service.approve(session.id)
+        _render_development_session(session)
+        if session.summary:
+            console.print(Panel(session.summary, title="Coding agent summary"))
+        return
+    _run_development_handoff(get_settings(), request)
+
+
+@develop_app.command("status")
+def develop_status(
+    session_id: Annotated[str, typer.Argument(help="Development session ID.")],
+) -> None:
+    """Show one development session and its validation result."""
+    session = DevelopmentService(get_settings(), _runtime_policy()).get(session_id)
+    _render_development_session(session)
+    if session.summary:
+        console.print(Panel(session.summary, title="Coding agent summary"))
+
+
+@develop_app.command("diff")
+def develop_diff(
+    session_id: Annotated[str, typer.Argument(help="Development session ID.")],
+) -> None:
+    """Print the uncommitted code diff produced by a development session."""
+    diff = DevelopmentService(get_settings(), _runtime_policy()).diff(session_id)
+    console.print(diff or "[yellow]No uncommitted changes.[/yellow]", markup=False)
+
+
+@develop_app.command("approve")
+def develop_approve(
+    session_id: Annotated[str, typer.Argument(help="Development session ID.")],
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Commit the validated change on its isolated branch."),
+    ] = False,
+) -> None:
+    """Commit a reviewed change locally; this never pushes or merges it."""
+    if not yes:
+        console.print(
+            "[red]Review `trading-agent develop diff SESSION_ID`, then repeat with --yes.[/red]"
+        )
+        raise typer.Exit(2)
+    session = DevelopmentService(get_settings(), _runtime_policy()).approve(session_id)
+    _render_development_session(session)
 
 
 @app.command()

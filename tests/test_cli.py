@@ -22,6 +22,7 @@ def test_help_lists_interactive_and_fallback_commands() -> None:
         "api",
         "journal",
         "sessions",
+        "develop",
     ):
         assert command in result.stdout
 

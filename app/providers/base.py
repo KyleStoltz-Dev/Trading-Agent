@@ -27,6 +27,8 @@ class ModelProvider(Protocol):
         tools: list[dict[str, Any]],
         execute_tool: ToolExecutor,
         max_tool_rounds: int,
+        model: str | None = None,
+        reasoning_effort: str = "medium",
     ) -> str: ...
 
     def analyze_chart(
@@ -37,4 +39,6 @@ class ModelProvider(Protocol):
         user_context: str,
         instructions: str,
         output_schema: dict[str, Any],
+        model: str | None = None,
+        reasoning_effort: str = "medium",
     ) -> dict[str, Any]: ...
