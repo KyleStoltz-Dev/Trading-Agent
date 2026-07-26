@@ -4,7 +4,7 @@ import mimetypes
 import shutil
 import sys
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from functools import lru_cache
@@ -564,36 +564,97 @@ def _render_request_steps(
     context_count: int,
 ) -> None:
     route = prepared.route
-    console.print(
-        f"[dim]Context  ✓ {context_count} "
-        f"{'resource' if context_count == 1 else 'resources'} selected[/dim]"
-    )
-    console.print(
-        f"[dim]Route    ✓ {route.mode} · {provider_name}/{route.model} "
-        f"· {route.reasoning_effort} reasoning[/dim]"
-    )
     pricing = model_pricing(provider_name, route.model)
     if pricing is None:
-        console.print("[yellow]Cost     ? pricing unavailable for this model[/yellow]")
-        return
-    input_tokens = estimated_request_tokens(
-        instructions=prepared.instructions,
-        message=prepared.message,
-        history=prepared.history,
-        tools=TOOLS,
-    )
-    output_tokens = output_budget_for_mode(route.mode)
-    estimate = calculate_cost(
-        pricing,
-        TokenUsage(input_tokens=input_tokens, output_tokens=output_tokens),
-    )
-    if provider_name == "ollama":
-        console.print("[dim]Cost     ✓ $0 API cost · local inference[/dim]")
+        cost_label = "pricing unavailable"
+    elif provider_name == "ollama":
+        cost_label = "local · $0 API"
     else:
-        console.print(
-            f"[dim]Cost     ~ {format_usd(estimate)} first-response estimate "
-            f"· ~{input_tokens:,} input + up to {output_tokens:,} output tokens[/dim]"
+        input_tokens = estimated_request_tokens(
+            instructions=prepared.instructions,
+            message=prepared.message,
+            history=prepared.history,
+            tools=TOOLS,
         )
+        output_tokens = output_budget_for_mode(route.mode)
+        estimate = calculate_cost(
+            pricing,
+            TokenUsage(input_tokens=input_tokens, output_tokens=output_tokens),
+        )
+        cost_label = f"~{format_usd(estimate)} estimated"
+    console.print(
+        f"[dim]Analyzing · {route.mode} · {provider_name}/{route.model} · "
+        f"{context_count} context · {cost_label}[/dim]"
+    )
+
+
+@dataclass(frozen=True)
+class ResponseDetails:
+    route_label: str
+    context_count: int
+    provider_name: str
+    model: str
+    usage: TokenUsage
+    references: tuple[UsedReference, ...]
+    performance: dict[str, float]
+
+
+def _usage_cost_label(details: ResponseDetails) -> str:
+    pricing = model_pricing(details.provider_name, details.model)
+    if details.provider_name == "ollama":
+        return "$0 API"
+    if pricing and (details.usage.input_tokens or details.usage.output_tokens):
+        return f"{format_usd(calculate_cost(pricing, details.usage))} estimated API"
+    return "pricing unavailable"
+
+
+def _render_response_details(details: ResponseDetails) -> None:
+    table = Table(title="Response details", show_header=False, box=None)
+    table.add_column("Field", style="bold")
+    table.add_column("Value")
+    table.add_row("Route", details.route_label)
+    table.add_row(
+        "Context",
+        (
+            f"{details.context_count} harness "
+            f"{'resource' if details.context_count == 1 else 'resources'}"
+        ),
+    )
+    table.add_row(
+        "Usage",
+        (
+            f"{details.usage.input_tokens:,} input · "
+            f"{details.usage.output_tokens:,} output · "
+            f"{details.usage.cached_input_tokens:,} cached"
+        ),
+    )
+    table.add_row("Cost", _usage_cost_label(details))
+    if details.performance:
+        table.add_row(
+            "Performance",
+            (
+                f"{details.performance.get('total_seconds', 0):g}s total · "
+                f"{details.performance.get('load_seconds', 0):g}s load · "
+                f"{details.performance.get('output_tokens_per_second', 0):g} tok/s"
+            ),
+        )
+    table.add_row("References", str(len(details.references)))
+    console.print(table)
+    console.print("[dim]/sources lists provenance · /context lists harness resources[/dim]")
+
+
+def _release_local_model(
+    provider: object,
+    model: str | None,
+    *,
+    announce: bool = False,
+) -> bool:
+    if not isinstance(provider, OllamaProvider) or not model:
+        return False
+    provider.unload_model(model)
+    if announce:
+        console.print(f"[green]Released {model} from memory.[/green]")
+    return True
 
 
 def _render_agent_reply(
@@ -605,47 +666,39 @@ def _render_agent_reply(
     usage: TokenUsage,
     references: list[UsedReference],
     performance: dict[str, float] | None = None,
-) -> None:
+) -> ResponseDetails:
+    details = ResponseDetails(
+        route_label=route_label,
+        context_count=context_count,
+        provider_name=provider_name,
+        model=model,
+        usage=usage,
+        references=tuple(references),
+        performance=dict(performance or {}),
+    )
     console.print()
     console.print("[bold green]Trading Agent[/bold green]")
     console.print(Markdown(reply))
-    usage_label = ""
-    pricing = model_pricing(provider_name, model)
-    if provider_name == "ollama":
-        usage_label = (
-            f" · $0 API · {usage.input_tokens:,} in/{usage.output_tokens:,} out"
-            if usage.input_tokens or usage.output_tokens
-            else " · $0 API"
-        )
-    elif pricing and (usage.input_tokens or usage.output_tokens):
-        cost = calculate_cost(pricing, usage)
-        usage_label = (
-            f" · {format_usd(cost)} est. API"
-            f" · {usage.input_tokens:,} in/{usage.output_tokens:,} out"
-        )
-    console.print(
-        f"[dim]{route_label} · {context_count} context "
-        f"{'resource' if context_count == 1 else 'resources'}"
-        f"{usage_label} · /context to inspect[/dim]"
+    performance_label = (
+        f" · {details.performance.get('total_seconds', 0):g}s"
+        f" · {details.performance.get('output_tokens_per_second', 0):g} tok/s"
+        if details.performance
+        else ""
     )
-    if performance:
-        console.print(
-            "[dim]Local performance · "
-            f"{performance.get('output_tokens_per_second', 0):g} output tok/s · "
-            f"{performance.get('load_seconds', 0):g}s load · "
-            f"{performance.get('total_seconds', 0):g}s total[/dim]"
-        )
-    console.print("[bold]References used[/bold]")
-    for reference in references:
-        timestamp = f" · {reference.retrieved_at}" if reference.retrieved_at else ""
-        console.print(
-            Text(
-                f"  • {reference.kind}: {reference.label} — "
-                f"{reference.locator}{timestamp}",
-                style="dim",
-            )
-        )
+    compact_route = (
+        f"{route_label.split(' · ', 1)[0]} · {model} · local"
+        if provider_name == "ollama"
+        else route_label
+    )
+    cost_label = (
+        "" if provider_name == "ollama" else f" · {_usage_cost_label(details)}"
+    )
+    console.print(
+        f"[dim]{compact_route}{performance_label}{cost_label} · "
+        f"{len(references)} sources · /details[/dim]"
+    )
     console.print()
+    return details
 
 
 def _split_list(value: str) -> list[str]:
@@ -1355,6 +1408,7 @@ def _run_chat(
         current_mode: AgentMode = settings.agent_mode
         current_model_override: str | None = None
         last_runtime_model: str | None = None
+        last_response_details: ResponseDetails | None = None
         conversation = (
             resolve_conversation(db, session_reference) if session_reference else None
         )
@@ -1398,7 +1452,7 @@ def _run_chat(
         _render_starter_prompts()
         console.print(
             "[dim]/help commands · /examples starter prompts · /cost model pricing "
-            "· /model local model · /sources references · /exit leave[/dim]\n"
+            "· /model local model · /details response audit · /exit leave[/dim]\n"
         )
         while True:
             try:
@@ -1416,6 +1470,7 @@ def _run_chat(
                     "/health · run diagnostics\n"
                     "/examples · show starter prompts\n"
                     "/cost · show configured model prices\n"
+                    "/details · show the full response audit and performance\n"
                     "/sources · show references used for the last response\n"
                     "/context · show harness resources selected for the last response\n"
                     "/strategy · show active isolated strategy\n"
@@ -1425,6 +1480,7 @@ def _run_chat(
                     "/model · show local model profiles\n"
                     "/model use NAME · override the local model for this session\n"
                     "/model auto · return to automatic profile routing\n"
+                    "/model unload · release this session's local model from memory\n"
                     "/develop <change> · hand a software change to the coding agent\n"
                     "Clear software-change requests also offer a development handoff.\n"
                     "Everything else is natural language; include a local chart path when needed."
@@ -1435,6 +1491,12 @@ def _run_chat(
                 continue
             if message == "/cost":
                 _render_cost_table(settings, provider.name, provider.model)
+                continue
+            if message == "/details":
+                if last_response_details is None:
+                    console.print("No response details recorded yet.")
+                else:
+                    _render_response_details(last_response_details)
                 continue
             if message == "/sources":
                 if not agent.last_references:
@@ -1530,12 +1592,30 @@ def _run_chat(
             if message == "/model auto":
                 if isinstance(provider, OllamaProvider) and last_runtime_model:
                     try:
-                        provider.unload_model(last_runtime_model)
+                        _release_local_model(provider, last_runtime_model)
                     except ProviderConfigurationError as exc:
                         console.print(f"[yellow]{exc}[/yellow]")
                     last_runtime_model = None
                 current_model_override = None
                 console.print("[green]Returned to automatic model-profile routing.[/green]")
+                continue
+            if message == "/model unload":
+                if not isinstance(provider, OllamaProvider):
+                    console.print("[dim]No local model is managed by this session.[/dim]")
+                    continue
+                if last_runtime_model is None:
+                    console.print("[dim]This session has no loaded local model.[/dim]")
+                    continue
+                try:
+                    _release_local_model(
+                        provider,
+                        last_runtime_model,
+                        announce=True,
+                    )
+                except ProviderConfigurationError as exc:
+                    console.print(f"[yellow]{exc}[/yellow]")
+                    continue
+                last_runtime_model = None
                 continue
             if message.startswith("/model use "):
                 if not isinstance(provider, OllamaProvider):
@@ -1558,7 +1638,7 @@ def _run_chat(
                     continue
                 if last_runtime_model and last_runtime_model != selected_model:
                     try:
-                        provider.unload_model(last_runtime_model)
+                        _release_local_model(provider, last_runtime_model)
                     except ProviderConfigurationError as exc:
                         console.print(f"[yellow]{exc}[/yellow]")
                     last_runtime_model = None
@@ -1677,7 +1757,7 @@ def _run_chat(
                     and last_runtime_model
                     and last_runtime_model != prepared.route.model
                 ):
-                    provider.unload_model(last_runtime_model)
+                    _release_local_model(provider, last_runtime_model)
                     last_runtime_model = None
                 if isinstance(provider, OllamaProvider):
                     model_sizes = provider.installed_model_sizes()
@@ -1766,7 +1846,7 @@ def _run_chat(
             )
             context_paths = agent.last_harness_context.paths
             usage = getattr(provider, "last_usage", TokenUsage())
-            _render_agent_reply(
+            last_response_details = _render_agent_reply(
                 reply,
                 route_label,
                 len(context_paths),
@@ -1776,6 +1856,19 @@ def _run_chat(
                 agent.last_references,
                 getattr(provider, "last_performance", None),
             )
+        if (
+            settings.ollama_unload_on_exit
+            and isinstance(provider, OllamaProvider)
+            and (
+                provider.local_runtime
+                or settings.ollama_manage_remote_runtime
+            )
+            and last_runtime_model
+        ):
+            try:
+                _release_local_model(provider, last_runtime_model)
+            except ProviderConfigurationError as exc:
+                console.print(f"[yellow]Local model cleanup failed: {exc}[/yellow]")
 
 
 @app.callback()

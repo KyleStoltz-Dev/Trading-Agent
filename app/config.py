@@ -44,7 +44,8 @@ class Settings(BaseSettings):
     ollama_balanced_model: str | None = None
     ollama_deep_model: str | None = None
     ollama_context_length: int = Field(default=16384, ge=2048, le=262144)
-    ollama_keep_alive: str = "10m"
+    ollama_keep_alive: str = "2m"
+    ollama_unload_on_exit: bool = True
     ollama_request_timeout_seconds: float = Field(default=300.0, gt=0, le=1800)
     resource_aware_model_routing: bool = True
     model_memory_reserve_gb: float = Field(default=6.0, ge=2, le=64)

@@ -66,6 +66,10 @@ trade models use qwen3.5:35b-a3b --tier quality
 
 `quality` changes balanced and deep only, leaving default/economy on the faster model.
 Persistent changes require a restart; `/model use NAME` is an immediate session-only override.
+`/model unload` releases the current session's model immediately. By default, Ollama model
+weights also expire after two idle minutes and are released when chat exits; configure
+`OLLAMA_KEEP_ALIVE` and `OLLAMA_UNLOAD_ON_EXIT` when a different residency policy is needed.
+The health smoke test uses a one-shot model load and does not leave weights resident.
 Before every `ollama pull`, the agent estimates the download from a parameter count in the
 model tag and requires download-plus-verification headroom on the filesystem that stores
 Ollama models. For an ambiguous tag such as `latest`, provide a conservative size:
@@ -130,9 +134,11 @@ Valid phases are `pre-session`, `pre-trade`, `during-trade`, and `post-trade` in
 reference or internal UUID. Agent-created check-ins require explicit confirmation; recent
 check-in retrieval is read-only.
 
-`/sources` shows the full reference ledger for the previous answer. It always includes the
-runtime policy and selected harness resources, then adds journal records, charts, broker
-observations, news/calendar items, fetched pages, and search results actually used.
+The normal response footer stays compact. `/details` expands route, token usage, cost, local
+performance, context count, and reference count. `/sources` shows the full reference ledger
+for the previous answer. It always includes the runtime policy and selected harness resources,
+then adds journal records, charts, broker observations, news/calendar items, fetched pages,
+and search results actually used. `/context` lists the exact harness resources.
 
 ## Model routing
 

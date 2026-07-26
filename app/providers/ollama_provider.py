@@ -214,7 +214,7 @@ class OllamaProvider:
                 ],
                 "stream": False,
                 "think": False,
-                "keep_alive": self.keep_alive,
+                "keep_alive": 0 if self.local_runtime else self.keep_alive,
                 "options": {
                     "num_ctx": min(self.context_length, 2048),
                     "num_predict": 8,
