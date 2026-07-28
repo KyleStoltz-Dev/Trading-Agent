@@ -23,7 +23,12 @@ def test_development_intent_requires_a_software_action_and_target() -> None:
 
 
 def test_development_rejects_autonomous_order_execution_before_starting() -> None:
-    service = DevelopmentService(Settings())
+    service = DevelopmentService(
+        Settings(
+            development_enabled=True,
+            development_acknowledge_host_filesystem_read_risk=True,
+        )
+    )
 
     with pytest.raises(PolicyViolation, match="broker order execution"):
         service.start("Add code that places broker orders after confirmation.")
@@ -32,7 +37,13 @@ def test_development_rejects_autonomous_order_execution_before_starting() -> Non
 def test_development_rejects_option_like_base_ref_before_git(
     monkeypatch,
 ) -> None:
-    service = DevelopmentService(Settings(development_base_ref="--upload-pack=evil"))
+    service = DevelopmentService(
+        Settings(
+            development_enabled=True,
+            development_acknowledge_host_filesystem_read_risk=True,
+            development_base_ref="--upload-pack=evil",
+        )
+    )
     monkeypatch.setattr(
         service,
         "_verify_repository",
@@ -43,7 +54,7 @@ def test_development_rejects_option_like_base_ref_before_git(
         service.start("Add a CLI label.")
 
 
-def test_development_runner_uses_isolated_worktree_and_secret_free_environment(
+def test_development_runner_uses_separate_worktree_and_filtered_environment(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -52,6 +63,8 @@ def test_development_runner_uses_isolated_worktree_and_secret_free_environment(
     (repository / ".git").mkdir()
     (repository / "AGENTS.md").write_text("# Rules")
     settings = Settings(
+        development_enabled=True,
+        development_acknowledge_host_filesystem_read_risk=True,
         development_repository=repository,
         development_state_directory=Path(".data/development"),
     )
@@ -100,6 +113,26 @@ def test_development_runner_uses_isolated_worktree_and_secret_free_environment(
     assert not Path(codex_call[1]["CODEX_HOME"]).is_relative_to(repository)
     assert codex_call[1]["GIT_CONFIG_GLOBAL"] in {"/dev/null", "NUL"}
     assert service.get(session.id).request == session.request
+    assert "not a confidential container" in codex_call[0][-1]
+    assert not any(
+        "pytest" in call[0] or "ruff" in call[0]
+        for call in calls
+        if call[0]
+    )
+
+
+def test_development_service_rechecks_confidentiality_acknowledgment() -> None:
+    settings = Settings.model_construct(
+        development_enabled=True,
+        development_acknowledge_host_filesystem_read_risk=False,
+        app_env="development",
+        development_repository=Path("."),
+        development_state_directory=Path(".data/development"),
+    )
+    service = DevelopmentService(settings)
+
+    with pytest.raises(RuntimeError, match="filesystem-read or container boundary"):
+        service.start("Add a CLI label.")
 
 
 def test_development_diff_scan_rejects_broker_write_sdk_or_endpoint(
@@ -237,3 +270,59 @@ def test_development_rejects_executable_local_git_drivers(
 
     with pytest.raises(RuntimeError, match="executable filter"):
         service._verify_repository()
+
+
+def test_development_secret_scan_rejects_credentials_without_echoing_them(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / ".git").mkdir()
+    (repository / "AGENTS.md").write_text("# Rules")
+    service = DevelopmentService(Settings(development_repository=repository))
+    secret = "sk-abcdefghijklmnopqrstuvwx"
+    diff = (
+        "diff --git a/app/generated.py b/app/generated.py\n"
+        "+++ b/app/generated.py\n"
+        "@@ -0,0 +1 @@\n"
+        f'+OPENAI_API_KEY = "{secret}"\n'
+    )
+
+    def fake_git(*arguments, **_kwargs):
+        if "--name-only" in arguments:
+            return "app/generated.py\0"
+        return diff
+
+    monkeypatch.setattr(service, "_git", fake_git)
+
+    result = service._scan_secret_diff(repository)
+
+    assert result["passed"] is False
+    assert secret not in str(result["output"])
+
+
+def test_development_secret_scan_allows_documented_placeholders(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / ".git").mkdir()
+    (repository / "AGENTS.md").write_text("# Rules")
+    service = DevelopmentService(Settings(development_repository=repository))
+    diff = (
+        "diff --git a/.env.example b/.env.example\n"
+        "+++ b/.env.example\n"
+        "@@ -0,0 +1 @@\n"
+        "+OPENAI_API_KEY=${OPENAI_API_KEY}\n"
+    )
+
+    def fake_git(*arguments, **_kwargs):
+        if "--name-only" in arguments:
+            return ".env.example\0"
+        return diff
+
+    monkeypatch.setattr(service, "_git", fake_git)
+
+    assert service._scan_secret_diff(repository)["passed"] is True

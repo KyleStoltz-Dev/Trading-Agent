@@ -8,11 +8,13 @@ from urllib.parse import urlparse
 import httpx
 from filelock import FileLock, Timeout
 
-from app.config import Settings
+from app.config import Settings, parse_ollama_model_digests
 from app.costs import TokenUsage
 from app.providers.base import (
     ProviderConfigurationError,
     ToolExecutor,
+    limit_provider_capacity,
+    provider_capacity_limiter,
     record_analysis_usage,
     safe_tool_error,
     track_completion_usage,
@@ -33,6 +35,15 @@ def _validate_base_url(settings: Settings) -> str:
         raise ProviderConfigurationError(
             "Remote Ollama requires OLLAMA_ALLOW_REMOTE=true because prompts leave this device"
         )
+    if (
+        not loopback
+        and parsed.scheme != "https"
+        and not settings.ollama_allow_insecure_remote
+    ):
+        raise ProviderConfigurationError(
+            "Remote Ollama requires HTTPS. For a trusted private network only, "
+            "OLLAMA_ALLOW_INSECURE_REMOTE=true is an explicit security downgrade."
+        )
     return settings.ollama_base_url.rstrip("/")
 
 
@@ -52,6 +63,15 @@ def _ollama_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _thinking_level(reasoning_effort: str) -> str:
     return reasoning_effort if reasoning_effort in {"low", "medium", "high"} else "medium"
+
+
+def _prediction_budget(max_output_tokens: int, reasoning_effort: str) -> int:
+    reasoning_reserve = {
+        "low": 1400,
+        "medium": 1800,
+        "high": 2600,
+    }.get(reasoning_effort, 1800)
+    return max(64, max_output_tokens) + reasoning_reserve
 
 
 def _ollama_usage(data: dict[str, Any]) -> TokenUsage:
@@ -95,6 +115,16 @@ class OllamaProvider:
         self.last_performance: dict[str, float] = {}
         self.context_length = settings.ollama_context_length
         self.keep_alive = settings.ollama_keep_alive
+        self.expected_model_digests = parse_ollama_model_digests(
+            settings.ollama_model_digests
+        )
+        self._capacity_limiter = provider_capacity_limiter(
+            self.name,
+            settings.model_max_concurrent_requests,
+        )
+        self._capacity_queue_timeout_seconds = (
+            settings.model_request_queue_timeout_seconds
+        )
         self.base_url = _validate_base_url(settings)
         hostname = (urlparse(self.base_url).hostname or "").lower()
         self.local_runtime = hostname in {"127.0.0.1", "::1", "localhost"}
@@ -118,9 +148,7 @@ class OllamaProvider:
         if not isinstance(records, list):
             raise ProviderConfigurationError("Ollama returned an invalid model list")
         return [
-            item
-            for item in records
-            if isinstance(item, dict) and isinstance(item.get("name"), str)
+            item for item in records if isinstance(item, dict) and isinstance(item.get("name"), str)
         ]
 
     def installed_models(self) -> frozenset[str]:
@@ -142,18 +170,14 @@ class OllamaProvider:
             response.raise_for_status()
             data = response.json()
         except (httpx.HTTPError, json.JSONDecodeError) as exc:
-            raise ProviderConfigurationError(
-                f"Ollama is unavailable at {self.base_url}"
-            ) from exc
+            raise ProviderConfigurationError(f"Ollama is unavailable at {self.base_url}") from exc
         if not isinstance(data, dict):
             raise ProviderConfigurationError("Ollama returned an invalid process list")
         records = data.get("models", [])
         if not isinstance(records, list):
             raise ProviderConfigurationError("Ollama returned an invalid process list")
         return [
-            item
-            for item in records
-            if isinstance(item, dict) and isinstance(item.get("name"), str)
+            item for item in records if isinstance(item, dict) and isinstance(item.get("name"), str)
         ]
 
     def loaded_models(self) -> frozenset[str]:
@@ -176,6 +200,23 @@ class OllamaProvider:
 
     def _preflight_model(self, model: str) -> None:
         self.last_resource_assessment = None
+        expected_digest = self.expected_model_digests.get(model)
+        if expected_digest is not None:
+            record = next(
+                (
+                    item
+                    for item in self._installed_model_records()
+                    if item["name"] == model
+                ),
+                None,
+            )
+            actual_digest = (
+                str(record.get("digest", "")).casefold() if record is not None else ""
+            )
+            if actual_digest != expected_digest:
+                raise ProviderConfigurationError(
+                    f"Installed Ollama model {model} does not match its configured digest"
+                )
         if not self.local_runtime or not self.settings.resource_aware_model_routing:
             return
         model_sizes = self.installed_model_sizes()
@@ -198,8 +239,7 @@ class OllamaProvider:
         self.last_resource_assessment = assessment
         if assessment.status == "block":
             raise RuntimeError(
-                f"Local model {model} blocked by the resource guard: "
-                f"{assessment.reason}"
+                f"Local model {model} blocked by the resource guard: {assessment.reason}"
             )
 
     def smoke_test(self) -> str:
@@ -230,8 +270,7 @@ class OllamaProvider:
     def unload_model(self, model: str) -> None:
         if not self.local_runtime and not self.settings.ollama_manage_remote_runtime:
             raise ProviderConfigurationError(
-                "Remote Ollama model unloading requires "
-                "OLLAMA_MANAGE_REMOTE_RUNTIME=true"
+                "Remote Ollama model unloading requires OLLAMA_MANAGE_REMOTE_RUNTIME=true"
             )
         try:
             response = self.client.post(
@@ -240,11 +279,10 @@ class OllamaProvider:
             )
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            raise ProviderConfigurationError(
-                f"Ollama could not unload {model}"
-            ) from exc
+            raise ProviderConfigurationError(f"Ollama could not unload {model}") from exc
 
     @track_completion_usage
+    @limit_provider_capacity
     def complete(
         self,
         *,
@@ -256,6 +294,7 @@ class OllamaProvider:
         max_tool_rounds: int,
         model: str | None = None,
         reasoning_effort: str = "medium",
+        max_output_tokens: int = 900,
     ) -> str:
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": instructions},
@@ -264,17 +303,23 @@ class OllamaProvider:
         ]
         provider_tools = _ollama_tools(tools)
         for _ in range(max_tool_rounds):
-            data = self._chat(
-                {
-                    "model": model or self.model,
-                    "messages": messages,
-                    "tools": provider_tools,
-                    "stream": False,
-                    "think": _thinking_level(reasoning_effort),
-                    "keep_alive": self.keep_alive,
-                    "options": {"num_ctx": self.context_length},
-                }
-            )
+            payload = {
+                "model": model or self.model,
+                "messages": messages,
+                "tools": provider_tools,
+                "stream": False,
+                "think": _thinking_level(reasoning_effort),
+                "keep_alive": self.keep_alive,
+                "options": {
+                    "num_ctx": self.context_length,
+                    "num_predict": _prediction_budget(
+                        max_output_tokens,
+                        reasoning_effort,
+                    ),
+                    "temperature": 0.2,
+                },
+            }
+            data = self._chat(payload)
             self.last_usage += _ollama_usage(data)
             self.last_performance = _ollama_performance(data)
             assistant = data.get("message") or {}
@@ -282,8 +327,26 @@ class OllamaProvider:
             if not tool_calls:
                 content = assistant.get("content")
                 if not isinstance(content, str) or not content.strip():
-                    raise RuntimeError("Ollama returned neither text nor tool calls")
-                return content
+                    retry_payload = {
+                        **payload,
+                        "think": False,
+                        "options": {
+                            **payload["options"],
+                            "num_predict": max(64, max_output_tokens),
+                        },
+                    }
+                    data = self._chat(retry_payload)
+                    self.last_usage += _ollama_usage(data)
+                    self.last_performance = _ollama_performance(data)
+                    assistant = data.get("message") or {}
+                    tool_calls = assistant.get("tool_calls") or []
+                    content = assistant.get("content")
+                if not tool_calls:
+                    if not isinstance(content, str) or not content.strip():
+                        raise RuntimeError(
+                            "Ollama returned neither text nor tool calls after a non-thinking retry"
+                        )
+                    return content
 
             messages.append(
                 {
@@ -318,6 +381,7 @@ class OllamaProvider:
                 )
         raise RuntimeError("agent exceeded the maximum tool-call rounds")
 
+    @limit_provider_capacity
     def analyze_chart(
         self,
         *,

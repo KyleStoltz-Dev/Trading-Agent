@@ -23,6 +23,7 @@ from app.harness_context import HARNESS_ROOT, select_harness_context
         ("Apply Mark Douglas probabilistic thinking.", "psychology/probabilistic-execution.md"),
         ("Review this XAUUSD setup.", "references/xauusd.md"),
         ("Check the London session context.", "references/REFERENCES.md"),
+        ("Teach me the next lesson in my curriculum.", "learning/LEARNING.md"),
     ],
 )
 def test_harness_routes_representative_trading_prompts(
@@ -49,6 +50,23 @@ def test_active_strategy_can_exclude_generic_market_methodologies() -> None:
     )
 
     assert all(not path.startswith("market-models/") for path in context.paths)
+
+
+def test_required_lesson_source_is_loaded_without_trigger_match() -> None:
+    context = select_harness_context(
+        "Teach me lesson-market-mechanics.",
+        required_paths=("references/REFERENCES.md",),
+    )
+
+    assert "references/REFERENCES.md" in context.paths
+
+
+def test_required_lesson_source_cannot_escape_harness_root() -> None:
+    with pytest.raises(ValueError, match="invalid required harness resource"):
+        select_harness_context(
+            "Teach me.",
+            required_paths=("../private.md",),
+        )
 
 
 def test_harness_rejects_oversized_resource(tmp_path: Path) -> None:

@@ -189,7 +189,7 @@ class Settings(BaseSettings):
     web_search_provider: Literal["disabled", "brave"] = "disabled"
     brave_search_api_key: SecretStr | None = None
     web_search_max_results: int = Field(default=5, ge=1, le=10)
-    development_enabled: bool = True
+    development_enabled: bool = False
     development_acknowledge_host_filesystem_read_risk: bool = False
     development_repository: Path = Path(".")
     development_base_ref: str = "HEAD"
@@ -206,6 +206,14 @@ class Settings(BaseSettings):
             if self.app_env.casefold() != "development":
                 raise ValueError(
                     "DEVELOPMENT_ENABLED is allowed only when APP_ENV=development"
+                )
+            if not self.development_acknowledge_host_filesystem_read_risk:
+                raise ValueError(
+                    "DEVELOPMENT_ENABLED requires "
+                    "DEVELOPMENT_ACKNOWLEDGE_HOST_FILESYSTEM_READ_RISK=true; "
+                    "Codex workspace-write limits writes but is not a filesystem-read "
+                    "or container boundary, and staged Codex authentication may be "
+                    "readable by child tools"
                 )
         if (
             self.broker_secret_backend == LEGACY_ENV_BACKEND
@@ -236,7 +244,7 @@ class Settings(BaseSettings):
                 )
         url = make_url(self.database_url)
         host = (url.host or "").casefold()
-        if host not in {"", "127.0.0.1", "::1", "localhost", "ignored"}:
+        if host not in {"", "127.0.0.1", "::1", "localhost"}:
             sslmode = str(url.query.get("sslmode", "")).casefold()
             if sslmode not in {"require", "verify-ca", "verify-full"}:
                 raise ValueError(

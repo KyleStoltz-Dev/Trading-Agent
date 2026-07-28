@@ -5,7 +5,6 @@ import re
 import shutil
 import stat
 import subprocess
-import sys
 import tempfile
 import uuid
 from dataclasses import asdict, dataclass
@@ -56,6 +55,33 @@ FORBIDDEN_DIFF_PATTERNS = (
         re.IGNORECASE,
     ),
 )
+KNOWN_SECRET_PATTERN = re.compile(
+    r"(?:sk-[A-Za-z0-9_-]{16,}|gh[opusr]_[A-Za-z0-9]{20,}|"
+    r"AKIA[0-9A-Z]{16}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)"
+)
+SECRET_ASSIGNMENT_PATTERN = re.compile(
+    r"(?i)\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|"
+    r"password|private[_-]?key|secret|token)\b\s*[=:]\s*"
+    r"[\"']?([^\"'\s,;#]{16,})"
+)
+SECRET_PLACEHOLDERS = frozenset(
+    {
+        "change-me",
+        "changeme",
+        "example",
+        "none",
+        "null",
+        "redacted",
+        "replace-me",
+        "test",
+        "your-key-here",
+    }
+)
+HOST_CODEX_CONFIDENTIALITY_NOTICE = (
+    "host Codex development requires explicit acknowledgment that workspace-write "
+    "limits writes but is not a filesystem-read or container boundary; Codex and "
+    "child tools may read host-accessible files, including staged Codex authentication"
+)
 
 
 def detect_development_intent(message: str) -> bool:
@@ -103,6 +129,11 @@ class DevelopmentService:
     def start(self, request: str) -> DevelopmentSession:
         if not self.settings.development_enabled:
             raise RuntimeError("development mode is disabled")
+        if (
+            self.settings.app_env.casefold() != "development"
+            or not self.settings.development_acknowledge_host_filesystem_read_risk
+        ):
+            raise RuntimeError(HOST_CODEX_CONFIDENTIALITY_NOTICE)
         self.policy.assert_unchanged()
         if (
             not self.settings.development_base_ref
@@ -153,14 +184,16 @@ class DevelopmentService:
         )
         self._save(session)
         runtime_directory = self._prepare_runtime(session_id, include_codex_auth=True)
-        isolated_environment = self._safe_environment(runtime_directory)
+        filtered_environment = self._safe_environment(runtime_directory)
 
         prompt = (
             "Implement the requested change in this repository. Follow AGENTS.md and all "
             "runtime policy boundaries. Make the smallest coherent change, add or update "
             "tests, and run relevant validation. Do not commit, push, open a pull request, "
             "read .env files, access databases, use broker credentials, or add broker order "
-            "execution. Leave all changes in the worktree for human review.\n\n"
+            "execution. This is a host process, not a confidential container: do not inspect "
+            "paths outside the worktree or expose the staged Codex authentication to child "
+            "tools. Leave all changes in the worktree for human review.\n\n"
             f"Requested change:\n{request}"
         )
         try:
@@ -179,13 +212,15 @@ class DevelopmentService:
                     prompt,
                 ],
                 cwd=worktree,
-                env=isolated_environment,
+                env=filtered_environment,
                 capture_output=True,
                 text=True,
                 timeout=self.settings.development_timeout_seconds,
                 check=False,
             )
-            session.summary = (result.stdout or result.stderr)[-8000:]
+            session.summary = self._redact_sensitive_text(
+                (result.stdout or result.stderr)[-8000:]
+            )
             if result.returncode != 0:
                 session.status = "failed"
             else:
@@ -198,10 +233,7 @@ class DevelopmentService:
                         "--intent-to-add",
                         "--all",
                     )
-                session.validation = self._validate(
-                    worktree,
-                    environment=isolated_environment,
-                )
+                session.validation = self._validate(worktree)
                 checks_passed = all(item["passed"] for item in session.validation)
                 session.status = (
                     "needs_review" if has_changes and checks_passed else "failed"
@@ -232,43 +264,31 @@ class DevelopmentService:
     def approve(self, session_id: str) -> DevelopmentSession:
         session = self.get(session_id)
         if session.status != "needs_review":
-            raise RuntimeError("only a reviewed, validated development session can be approved")
-        runtime_directory = self._prepare_runtime(
-            f"approval-{session.id}-{uuid.uuid4().hex[:8]}",
-            include_codex_auth=False,
+            raise RuntimeError("only a review-ready development session can be approved")
+        session.validation = self._validate(Path(session.worktree))
+        if not all(item["passed"] for item in session.validation):
+            session.status = "failed"
+            session.updated_at = datetime.now(UTC).isoformat()
+            self._save(session)
+            raise RuntimeError("static security validation changed or failed")
+        self._git("-C", session.worktree, "add", "--all")
+        staged_results = [
+            self._scan_forbidden_diff(Path(session.worktree), cached=True),
+            self._scan_secret_diff(Path(session.worktree), cached=True),
+        ]
+        session.validation.extend(staged_results)
+        if not all(item["passed"] for item in staged_results):
+            session.status = "failed"
+            session.updated_at = datetime.now(UTC).isoformat()
+            self._save(session)
+            raise RuntimeError("staged security scan failed; approval was stopped")
+        self._git(
+            "-C",
+            session.worktree,
+            "commit",
+            "-m",
+            f"Develop: {session.request[:68]}",
         )
-        try:
-            session.validation = self._validate(
-                Path(session.worktree),
-                environment=self._safe_environment(runtime_directory),
-            )
-            if not all(item["passed"] for item in session.validation):
-                session.status = "failed"
-                session.updated_at = datetime.now(UTC).isoformat()
-                self._save(session)
-                raise RuntimeError("validation changed or failed; approval was stopped")
-            self._git("-C", session.worktree, "add", "--all")
-            staged_scan = self._scan_forbidden_diff(
-                Path(session.worktree),
-                cached=True,
-            )
-            session.validation.append(staged_scan)
-            if not staged_scan["passed"]:
-                session.status = "failed"
-                session.updated_at = datetime.now(UTC).isoformat()
-                self._save(session)
-                raise RuntimeError(
-                    "staged security scan failed; approval was stopped"
-                )
-            self._git(
-                "-C",
-                session.worktree,
-                "commit",
-                "-m",
-                f"Develop: {session.request[:68]}",
-            )
-        finally:
-            shutil.rmtree(runtime_directory, ignore_errors=True)
         session.status = "approved"
         session.updated_at = datetime.now(UTC).isoformat()
         self._save(session)
@@ -279,17 +299,22 @@ class DevelopmentService:
             raise RuntimeError(f"development repository is not a Git repository: {self.repository}")
         if not (self.repository / "AGENTS.md").is_file():
             raise RuntimeError("development repository must contain AGENTS.md")
-        sensitive = self._git(
-            "-C",
-            str(self.repository),
-            "ls-files",
-            "--",
-            ".env",
-            ".env.save",
-        ).strip()
+        tracked = [
+            path.strip()
+            for path in self._git(
+                "-C",
+                str(self.repository),
+                "ls-files",
+                "-z",
+                "--",
+            ).split("\0")
+            if path.strip()
+        ]
+        sensitive = sorted(path for path in tracked if self._is_sensitive_path(path))
         if sensitive:
             raise RuntimeError(
-                "development repository tracks a private environment file; remove it first"
+                "development repository tracks a private environment or credential file; "
+                "remove it first: " + ", ".join(sensitive)
             )
         dangerous_config = self._git(
             "-C",
@@ -318,33 +343,14 @@ class DevelopmentService:
     def _validate(
         self,
         worktree: Path,
-        *,
-        environment: dict[str, str],
     ) -> list[dict[str, object]]:
-        scan = self._scan_forbidden_diff(worktree)
-        commands = (
-            [sys.executable, "-m", "ruff", "check", "."],
-            [sys.executable, "-m", "pytest", "-q"],
-        )
-        results: list[dict[str, object]] = [scan]
-        for command in commands:
-            completed = subprocess.run(  # noqa: S603
-                command,
-                cwd=worktree,
-                env=environment,
-                capture_output=True,
-                text=True,
-                timeout=min(self.settings.development_timeout_seconds, 600),
-                check=False,
-            )
-            results.append(
-                {
-                    "command": " ".join(command[1:]),
-                    "passed": completed.returncode == 0,
-                    "output": (completed.stdout + completed.stderr)[-4000:],
-                }
-            )
-        return results
+        # Never execute generated project code from the host process. Codex may run
+        # tests with workspace-write limits, but this service performs
+        # only non-executing diff inspection before a human reviews the result.
+        return [
+            self._scan_forbidden_diff(worktree),
+            self._scan_secret_diff(worktree),
+        ]
 
     def _scan_forbidden_diff(
         self,
@@ -408,6 +414,90 @@ class DevelopmentService:
             ),
         }
 
+    def _scan_secret_diff(
+        self,
+        worktree: Path,
+        *,
+        cached: bool = False,
+    ) -> dict[str, object]:
+        diff_arguments = [
+            "-C",
+            str(worktree),
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--unified=0",
+        ]
+        if cached:
+            diff_arguments.append("--cached")
+        diff_arguments.append("--")
+        diff = self._git(*diff_arguments)
+        added_lines = [
+            line[1:]
+            for line in diff.splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        ]
+        findings: set[str] = set()
+        for line in added_lines:
+            if KNOWN_SECRET_PATTERN.search(line):
+                findings.add("credential-shaped value")
+            for match in SECRET_ASSIGNMENT_PATTERN.finditer(line):
+                value = match.group(1).strip().casefold()
+                if (
+                    value in SECRET_PLACEHOLDERS
+                    or value.startswith(("${", "<", "os.environ", "settings."))
+                ):
+                    continue
+                findings.add("non-placeholder secret assignment")
+
+        path_arguments = [
+            "-C",
+            str(worktree),
+            "diff",
+            "--name-only",
+            "--diff-filter=ACMRT",
+            "-z",
+        ]
+        if cached:
+            path_arguments.append("--cached")
+        path_arguments.append("--")
+        changed_paths = self._git(*path_arguments).split("\0")
+        for relative in changed_paths:
+            if self._is_sensitive_path(relative):
+                findings.add(f"sensitive file path: {relative}")
+        return {
+            "command": "security: credential and sensitive-file diff scan",
+            "passed": not findings,
+            "output": (
+                "No credential-shaped additions or sensitive file paths detected."
+                if not findings
+                else "Rejected possible secret material: " + ", ".join(sorted(findings))
+            ),
+        }
+
+    @staticmethod
+    def _is_sensitive_path(relative: str) -> bool:
+        if not relative:
+            return False
+        path = Path(relative)
+        name = path.name.casefold()
+        if name == ".env.example":
+            return False
+        return (
+            name == "auth.json"
+            or name == ".env"
+            or name.startswith(".env.")
+            or path.suffix.casefold() in {".key", ".p12", ".pfx", ".dump"}
+        )
+
+    @staticmethod
+    def _redact_sensitive_text(value: str) -> str:
+        redacted = KNOWN_SECRET_PATTERN.sub("[REDACTED]", value)
+        return SECRET_ASSIGNMENT_PATTERN.sub(
+            lambda match: match.group(0).replace(match.group(1), "[REDACTED]"),
+            redacted,
+        )
+
     def _prepare_runtime(
         self,
         name: str,
@@ -416,7 +506,7 @@ class DevelopmentService:
     ) -> Path:
         safe_name = re.sub(r"[^a-zA-Z0-9._-]+", "-", name).strip("-")
         if not safe_name:
-            raise ValueError("invalid isolated runtime name")
+            raise ValueError("invalid ephemeral runtime name")
         repository_scope = hashlib.sha256(
             str(self.repository).encode("utf-8")
         ).hexdigest()[:12]
@@ -428,7 +518,7 @@ class DevelopmentService:
         runtime_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         runtime = (runtime_root / safe_name).resolve()
         if runtime.parent != runtime_root:
-            raise RuntimeError("isolated runtime escaped its managed directory")
+            raise RuntimeError("ephemeral runtime escaped its managed directory")
         runtime.mkdir(parents=False, exist_ok=False, mode=0o700)
         for child in (
             "home",
@@ -475,7 +565,7 @@ class DevelopmentService:
                 except (OSError, RuntimeError) as exc:
                     shutil.rmtree(runtime, ignore_errors=True)
                     raise RuntimeError(
-                        "could not stage isolated Codex authentication"
+                        "could not stage ephemeral Codex authentication"
                     ) from exc
         return runtime
 
