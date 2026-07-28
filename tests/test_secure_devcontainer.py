@@ -4,6 +4,7 @@ import re
 import runpy
 import subprocess
 import threading
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,7 @@ def test_secure_devcontainer_uses_locked_codex_cli_and_python_dependencies() -> 
     lock = json.loads(
         (DEVCONTAINER / "codex-install" / "package-lock.json").read_text(encoding="utf-8")
     )
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     dockerfile = (DEVCONTAINER / "Dockerfile.secure").read_text(encoding="utf-8")
     post_create = (DEVCONTAINER / "post-create.sh").read_text(encoding="utf-8")
 
@@ -44,6 +46,7 @@ def test_secure_devcontainer_uses_locked_codex_cli_and_python_dependencies() -> 
     assert "curl -fsSL" not in dockerfile
     assert "rm -f /usr/bin/sudo" in dockerfile
     assert "--group release" in dockerfile
+    assert "editables==0.5" in pyproject["dependency-groups"]["release"]
     assert 'ENTRYPOINT ["/usr/local/bin/trading-agent-container-entrypoint"]' in dockerfile
     assert "uv sync --locked --offline" in post_create
     assert "--no-install-project" in post_create
