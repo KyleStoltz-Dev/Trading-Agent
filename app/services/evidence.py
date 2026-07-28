@@ -9,9 +9,10 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import AnalysisRun, EvidenceItem, Observation
+from app.models import AnalysisRun, EvidenceItem, Observation, TradePlan
 from app.providers import ModelProvider
 from app.schemas import ChartAnalysis
+from app.services.workspaces import RequestScope, validate_scope
 
 EXTENSIONS = {
     "image/jpeg": ".jpg",
@@ -22,6 +23,25 @@ EXTENSIONS = {
 
 def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _scoped_evidence_directory(
+    directory: Path,
+    scope: RequestScope,
+) -> Path:
+    """Create each account boundary without following tenant-controlled symlinks."""
+    current = directory.expanduser().absolute()
+    for component in (str(scope.workspace_id), str(scope.account_id)):
+        if current.is_symlink():
+            raise ValueError("evidence directory cannot be a symlink")
+        current.mkdir(parents=True, exist_ok=True, mode=0o700)
+        current.chmod(0o700)
+        current = current / component
+    if current.is_symlink():
+        raise ValueError("evidence directory cannot be a symlink")
+    current.mkdir(exist_ok=True, mode=0o700)
+    current.chmod(0o700)
+    return current
 
 
 def store_evidence_file(
@@ -70,6 +90,7 @@ def store_evidence_file(
 def record_chart_analysis(
     db: Session,
     *,
+    scope: RequestScope,
     image_bytes: bytes,
     content_type: str,
     evidence_directory: Path,
@@ -85,21 +106,37 @@ def record_chart_analysis(
     timeframe: str | None,
     trade_plan_id: uuid.UUID | None = None,
 ) -> tuple[EvidenceItem, AnalysisRun]:
+    validate_scope(db, scope)
+    if trade_plan_id is not None:
+        plan = db.scalar(
+            select(TradePlan).where(
+                TradePlan.workspace_id == scope.workspace_id,
+                TradePlan.account_id == scope.account_id,
+                TradePlan.id == trade_plan_id,
+            )
+        )
+        if plan is None:
+            raise LookupError("trade plan was not found in the requested account")
+    scoped_directory = _scoped_evidence_directory(evidence_directory, scope)
     path, digest = store_evidence_file(
         image_bytes,
         content_type,
-        evidence_directory,
+        scoped_directory,
     )
     retrieved_at = datetime.now(UTC)
     storage_uri = path.as_uri()
     evidence = db.scalar(
         select(EvidenceItem).where(
+            EvidenceItem.workspace_id == scope.workspace_id,
+            EvidenceItem.account_id == scope.account_id,
             EvidenceItem.sha256 == digest,
             EvidenceItem.storage_uri == storage_uri,
         )
     )
     if evidence is None:
         evidence = EvidenceItem(
+            workspace_id=scope.workspace_id,
+            account_id=scope.account_id,
             trade_plan_id=trade_plan_id,
             evidence_type="chart",
             storage_uri=storage_uri,
@@ -120,6 +157,8 @@ def record_chart_analysis(
     output = analysis.model_dump(mode="json")
     output_bytes = json.dumps(output, sort_keys=True, separators=(",", ":")).encode()
     run = AnalysisRun(
+        workspace_id=scope.workspace_id,
+        account_id=scope.account_id,
         evidence_id=evidence.id,
         trade_plan_id=trade_plan_id,
         analysis_type="chart",
@@ -136,6 +175,8 @@ def record_chart_analysis(
     db.add_all(
         [
             Observation(
+                workspace_id=scope.workspace_id,
+                account_id=scope.account_id,
                 trade_plan_id=trade_plan_id,
                 evidence_id=evidence.id,
                 kind="fact",
@@ -147,6 +188,8 @@ def record_chart_analysis(
         ]
         + [
             Observation(
+                workspace_id=scope.workspace_id,
+                account_id=scope.account_id,
                 trade_plan_id=trade_plan_id,
                 evidence_id=evidence.id,
                 kind="hypothesis",

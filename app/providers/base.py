@@ -1,3 +1,4 @@
+import threading
 from collections.abc import Callable
 from functools import wraps
 from typing import Any, Protocol
@@ -5,6 +6,40 @@ from typing import Any, Protocol
 from app.costs import TokenUsage
 
 ToolExecutor = Callable[[str, dict[str, Any]], str]
+_CAPACITY_LOCK = threading.Lock()
+_CAPACITY_LIMITERS: dict[tuple[str, int], threading.BoundedSemaphore] = {}
+
+
+def provider_capacity_limiter(
+    provider: str,
+    maximum: int,
+) -> threading.BoundedSemaphore:
+    key = (provider, maximum)
+    with _CAPACITY_LOCK:
+        limiter = _CAPACITY_LIMITERS.get(key)
+        if limiter is None:
+            limiter = threading.BoundedSemaphore(maximum)
+            _CAPACITY_LIMITERS[key] = limiter
+        return limiter
+
+
+def limit_provider_capacity(method):
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        acquired = self._capacity_limiter.acquire(
+            timeout=self._capacity_queue_timeout_seconds
+        )
+        if not acquired:
+            raise RuntimeError(
+                f"{self.name} model request capacity is full; retry after an active "
+                "analysis finishes"
+            )
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._capacity_limiter.release()
+
+    return wrapper
 
 
 def track_completion_usage(method):
@@ -53,6 +88,7 @@ class ModelProvider(Protocol):
         max_tool_rounds: int,
         model: str | None = None,
         reasoning_effort: str = "medium",
+        max_output_tokens: int = 900,
     ) -> str: ...
 
     def analyze_chart(

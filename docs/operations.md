@@ -24,6 +24,9 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\install-trading-agent.ps1
 ```
 
+The installers bootstrap a pinned `uv`, then synchronize the checked-in lock file. The
+Windows installer also includes the locked MetaTrader 5 bridge dependency.
+
 Or, after installation:
 
 ```bash
@@ -48,8 +51,26 @@ ollama pull qwen3.5:9b
 ```
 
 Linux can use Ollama's Linux installer and `ollama serve`; Windows uses the Ollama desktop
-application. For PostgreSQL, `docker compose up -d postgres` is the most consistent option
-across operating systems, while native installations remain supported.
+application. For PostgreSQL, set a unique `POSTGRES_PASSWORD` in the private mode-`0600`
+`.env` before running `docker compose up -d postgres`. Compose publishes PostgreSQL only on
+`127.0.0.1` by default. Native installations remain supported.
+
+### Rotate an existing local PostgreSQL password
+
+Changing `POSTGRES_PASSWORD` after a PostgreSQL data directory or Docker volume has already
+been initialized does not change the password stored by PostgreSQL. Rotate the role
+interactively so the new password is not placed in shell history:
+
+```bash
+psql -d postgres
+\password trading
+\q
+```
+
+Then update `POSTGRES_PASSWORD` and `DATABASE_URL` in the one private Trading Agent `.env`
+file, keep that file at mode `0600`, and restart the agent. For Docker, run the same
+`\password` command inside the existing database container before changing `.env`; recreating
+the container without deliberately preserving or migrating the volume can destroy local data.
 
 Set `MODEL_PROVIDER=ollama` and `OLLAMA_MODEL=qwen3.5:9b` in `.env`. The health command checks
 that Ollama is reachable and that the configured model is installed. If the service was not
@@ -94,6 +115,57 @@ trade onboard
 trade integrations
 ```
 
+Both setup wizards show numbered choices with plain-language descriptions. They accept the
+number, displayed provider name, or common aliases such as `Open AI`, `OANDA v20`, and
+`Trading Economics`. Invalid entries are explained and prompted again instead of producing a
+traceback. Onboarding validates timezones and risk percentages, normalizes common market and
+session names, suggests likely typo corrections, and displays one complete review table before
+writing the profile or integration selections.
+
+Profile answers are written only after the final confirmation to the `trader_profiles` table in
+PostgreSQL. Broker and news provider selections are written to the private `.env`; credentials
+remain separate. The incomplete wizard is not placed in conversation history or sent to a model.
+Onboarding always starts from clean, experience-aware recommendations. Previously saved answers
+are not displayed or reused in prompt brackets; the saved profile remains unchanged until the
+new final review is confirmed.
+At the final review, answering No opens an edit menu rather than exiting. One field is changed
+at a time and the complete review is shown again. Exiting without writing requires choosing
+`Discard onboarding` and confirming that separate action.
+
+Beginner setup recommends the computer's detected timezone, a guided curriculum, one practice
+instrument and session, a simple predefined-risk style, process goals, and 0.5% planned risk.
+Personal/demo accounts collect only name, starting size, and currency; the advanced loss,
+drawdown, news, and holding questionnaire is skipped. Beginner prop setup can defer unverified
+firm rules or enter only the essential loss, target, and drawdown values.
+
+The same final confirmation writes one active `account_constraint_profiles` record when an
+account is configured. This record is independent of `trading_accounts`: the former contains
+trader-entered personal/prop program rules, while the latter identifies a broker account used
+for imported execution data. Account-rule profiles contain no broker credentials. Rerun
+onboarding and edit `Account and prop rules` to switch the active reminder profile.
+
+Prop setup records firm/program, evaluation phase, starting size/currency, loss and profit
+limits, trading-day and consistency limits, drawdown calculation, news/overnight/weekend
+policies, reset timezone, and bounded custom restrictions. `unknown` is a valid state and is
+shown as a verification gap. A preflight audit links to the exact account-rule profile used.
+Stored percentages are translated to currency amounts from starting size for readability, but
+the application does not treat starting size as current equity.
+
+Onboarding also offers guided, flexible, on-demand, or paused teaching. Every level can select
+the full topic library and ask questions at any time. After a successful `trade onboard`, the
+interactive agent opens automatically. Use `/onboard` to update setup without leaving the
+session, `/mode` to change model effort, `/learn` for curriculum, and `/strategy` to change
+isolated strategy context. Natural-language preference changes repeat the full proposed
+selection and require confirmation before the database is updated.
+
+```bash
+trade learn
+trade learn start lesson-probability-and-process
+```
+
+Inside chat, `/learn` shows progress and `/learn LESSON` begins a sourced teaching request. See
+[`learning.md`](learning.md) for source tiers and the education/execution isolation boundary.
+
 When Trading Economics is selected and configured, startup refreshes the upcoming calendar.
 Trade-intent requests receive a nearby-event warning and timestamped event context.
 
@@ -101,13 +173,14 @@ Trade-intent requests receive a nearby-event warning and timestamped event conte
 
 Configuration lookup order is:
 
-1. `TRADING_AGENT_CONFIG` when explicitly set;
-2. `.env` beside an editable source installation;
-3. `~/.config/trading-agent/.env`;
-4. `.env` in the current directory.
+1. an absolute `TRADING_AGENT_CONFIG` when explicitly set;
+2. `~/.config/trading-agent/.env`;
+3. `.env` beside an editable source installation.
 
-Later files override earlier files. Environment variables override all files. `trade setup`
-updates the active file atomically with mode `0600` and refuses to write secret keys.
+Exactly one file is loaded; files are never merged and the current directory is never searched.
+Environment variables override the selected file. On POSIX, the file must be current-user
+owned, non-symlink, and mode `0600`. `trade setup` updates the active file atomically and
+refuses to write secret keys.
 
 ## Harness context
 
@@ -124,21 +197,42 @@ mental-health diagnosis and not a trade signal.
 
 ```bash
 trade mindset check --phase pre-trade --readiness 4 --accepted-risk \
-  --emotion focused --emotion patient --trade xauusd-20260725-ny-short-1 \
+  --emotion focused --emotion patient \
+  --emotional-state "I feel calm and fully accept the loss." \
+  --trade xauusd-20260725-ny-short-1 \
   --note "The predefined loss is acceptable."
 trade mindset list --limit 10
 ```
+
+`--emotion` is a repeatable, concise tag used for later grouping. `--emotional-state`
+preserves the trader's exact free-form wording, including profanity. It is reflective evidence,
+not a trade signal. Database writes still show the exact proposed change and require confirmation
+unless `--yes` was explicitly supplied.
 
 Valid phases are `pre-session`, `pre-trade`, `during-trade`, and `post-trade` in the CLI
 (Typer also accepts their underscore forms). A check-in may reference a trade by its readable
 reference or internal UUID. Agent-created check-ins require explicit confirmation; recent
 check-in retrieval is read-only.
 
-The normal response footer stays compact. `/details` expands route, token usage, cost, local
+The normal response footer stays compact. Model prose is normalized for terminal display:
+document-style Markdown fences are unwrapped, wide tables are stacked vertically, unsafe control
+characters are removed, and runnable command/code fences remain intact. Hosted providers receive
+the same economy/balanced/deep output budget used by the cost estimate. Ollama adds bounded
+reasoning headroom and performs one non-thinking retry if reasoning consumes the generation
+without producing visible text. `/details` expands route,
+token usage, cost, local
 performance, context count, and reference count. `/sources` shows the full reference ledger
 for the previous answer. It always includes the runtime policy and selected harness resources,
 then adds journal records, charts, broker observations, news/calendar items, fetched pages,
 and search results actually used. `/context` lists the exact harness resources.
+
+At chat startup, `Recall` is assembled deterministically from PostgreSQL and shown locally. It
+contains the trader's saved goals, the exact active immutable strategy version, metadata for the
+most recent prior session in that scope, up to three unresolved plans, two recent review scores,
+and three structured mindset check-ins. It never includes raw prior turns, reflection notes,
+mindset notes, or free-form emotional-state prose. Use `/memory` to inspect the complete bounded
+set. Use `/memory use` to confirm sending it to the configured model with the next request only;
+the consent resets after that response or a strategy switch. `/memory off` cancels it.
 
 ## Model routing
 
@@ -167,10 +261,25 @@ codex login status
 trading-agent health
 ```
 
+Host Codex development is deliberately disabled by default. It is available only under
+`APP_ENV=development` and requires:
+
+```text
+DEVELOPMENT_ENABLED=true
+DEVELOPMENT_ACKNOWLEDGE_HOST_FILESYSTEM_READ_RISK=true
+```
+
+That acknowledgment is not a claim of secure isolation. Codex `workspace-write` limits
+writes, not filesystem reads, and it is not a container boundary. Codex or child tools may
+read other host-accessible files, including the ephemeral copy of Codex authentication.
+Enable it only for a trusted machine, repository, and requested change.
+
 In interactive chat, state a clear software change or use `/develop`. After the scope
 confirmation, the command may run for several minutes. It records a local session under
 `.data/development`, creates an `agent/dev-*` branch in a separate worktree, runs Codex
-non-interactively with workspace-only writes, then runs Ruff and pytest.
+non-interactively with workspace-only writes, and then performs non-executing diff scans.
+Codex may run Ruff and pytest inside its workspace sandbox, but the host application never
+executes generated project code before review.
 
 Inspect and commit the result:
 
@@ -180,17 +289,24 @@ trading-agent develop diff SESSION_ID
 trading-agent develop approve SESSION_ID --yes
 ```
 
-Approval reruns validation and commits only to the isolated branch. Push, pull-request,
+Approval reruns the broker-write, secret, sensitive-path, binary, and symlink scans and
+commits only to the isolated branch. Push, pull-request,
 merge, deployment, and process restart are deliberately separate operations.
 
 `DEVELOPMENT_APPROVAL_FLOW=scope_only` removes the second commit approval: the initial
 reiterated-scope confirmation authorizes Codex to edit, validate, and commit on the isolated
 branch. `scope_and_diff` is the default for shared installations.
 
-Codex runs with ephemeral home, XDG, Codex, Git-config, and temporary directories outside
-the repository. Only its authentication file is copied into that runtime, and the copy is
-removed afterward. Tracked `.env`/`.env.save` files stop the handoff. A host-side diff scan
-also rejects known broker-order SDK calls and write endpoints before review or approval.
+Review the full diff before approval. Run dependency, build-hook, test-runner, or other
+executable changes in a disposable environment after review.
+
+Codex runs with redirected ephemeral home, XDG, Codex, Git-config, and temporary directories
+outside the repository. Only its authentication file is deliberately copied into that
+runtime, and the copy is removed afterward. This redirection reduces accidental exposure but
+does not prevent reads from other host paths or prevent child tools from reading the staged
+authentication. Tracked `.env`/`.env.save` files stop the handoff. A host-side diff scan also
+rejects known broker-order SDK calls, write endpoints, credential-shaped additions, sensitive
+file paths, binaries, and symlinks before review or approval.
 
 ## Database
 
@@ -235,7 +351,60 @@ trading-agent broker sync --from-transaction-id 12345
 
 Once a cursor exists, rewind is refused. Transaction imports are idempotent. Every sync
 also records account/position snapshots and compares broker positions with the normalized
-fill ledger. A mismatch marks the connection degraded.
+fill ledger only when complete history coverage is proven. Baseline/incremental coverage
+remains explicitly unreconciled instead of reporting a false mismatch for positions opened
+before the cursor.
+
+OANDA fill transactions can contain separate `tradeOpened`, `tradeReduced`, and
+`tradesClosed` effects. The sync applies those explicit effects to lifecycle status and
+`closed_at`, retains all normalized effects on the execution event, and records
+provider-reported commission, financing, guaranteed-execution fee, and half-spread cost on
+the fill. It never infers an opening transaction that is outside the selected history range.
+
+OANDA positions are instrument aggregates. A position snapshot is linked to a lifecycle trade
+only when exactly one active imported trade matches that account and instrument. With hedging
+or multiple same-instrument trades, the snapshot deliberately remains unlinked rather than
+choosing the wrong trade.
+
+## MetaTrader 4/5 read-only sync
+
+The Trading Agent process never loads a trading terminal or exposes an order method. It calls
+a fixed read-only bridge contract. Configure the client in `.env`:
+
+```text
+BROKER_PROVIDER=metatrader
+METATRADER_PLATFORM=mt5
+METATRADER_BRIDGE_URL=https://YOUR-PRIVATE-BRIDGE
+METATRADER_BRIDGE_TOKEN=generate-at-least-32-random-characters
+METATRADER_ACCOUNT_ID=12345678
+METATRADER_MODE=practice
+```
+
+Then verify and register the exact account before importing:
+
+```bash
+trade broker configure-metatrader --label mt5-practice
+trade broker quote XAUUSD
+trade broker sync
+```
+
+The first sync creates a present-time cursor and imports no unbounded history. On a new
+connection, explicitly choose the beginning of a history import:
+
+```bash
+trade broker sync --from-cursor 2020-01-01T00:00:00Z
+```
+
+Each response is bounded to 5,000 deals and each terminal query is restricted to an adaptive
+time window. When a response reports more history, rerun sync to advance the stored cursor;
+`has_more` is preserved in the command result. Final exits are checked against the exact MT5
+position history so a trade that closes on an earlier page is not left partially closed.
+Imports are idempotent. A reused event ID with changed normalized content holds the cursor and
+marks the connection degraded. Quotes and requested candles remain bounded in memory;
+executions, fills, account snapshots, and net position snapshots are durable.
+
+The included MT5 companion requires Windows and the official terminal. MT4 must implement the
+same read-only contract from an EA/bridge. See `docs/metatrader-bridge.md`.
 
 ## Instrument contract and sizing
 
@@ -288,8 +457,19 @@ output hashes, output JSON, and normalized facts versus hypotheses.
 ```bash
 trading-agent chart /absolute/path/chart.png \
   --instrument XAUUSD --venue OANDA --timeframe M5
+trading-agent chart --clipboard \
+  --instrument XAUUSD --venue OANDA --timeframe M5
 trading-agent edge report --minimum-sample 30
 ```
+
+`--clipboard` reads the image currently copied from a chart, browser, or image viewer. It
+accepts only PNG, JPEG, or WebP image bytes up to 10 MB and never interprets clipboard text as
+a filename. macOS uses its built-in clipboard support; Windows uses PowerShell; Linux requires
+`wl-paste` from `wl-clipboard` or `xclip`. If no supported image or reader is available, the
+command explains what to copy or install. Provide either a path or `--clipboard`, never both.
+Hosted providers still show the exact provider, destination, image source/type/size, and context
+for confirmation before any bytes leave the machine. Accepted images enter the same
+content-addressed evidence and analysis-provenance pipeline as path-based screenshots.
 
 Expectancy remains explicitly unvalidated below the minimum sample. Process score and
 outcome are kept separate.
@@ -329,8 +509,32 @@ screenshot, numeric-feature, and daily/weekly outlook workflows.
 ## Recovery
 
 - Keep `.env` and backups outside Git.
-- Test restores periodically with `pg_restore` into a separate database.
+- Test restores periodically with the source-read-only verification command:
+
+  ```bash
+  uv run python scripts/verify_postgres_backup_restore.py
+  ```
+
+  It restores into a random temporary database, compares table counts and migration revisions,
+  and never writes to the source. See [`release.md`](release.md) for retained backups, the
+  disposable migration drill, release gates, and rollback instructions.
 - If reconciliation becomes degraded, stop relying on derived position state, verify the
   configured account and cursor, and compare broker transactions against imported fills.
 - Evidence is file-backed. Back up both PostgreSQL and `.data/evidence` to preserve a
   complete audit trail.
+## Reproducible dependency installs
+
+`uv.lock` pins resolved package artifacts and integrity hashes for supported platforms.
+Production and CI installs must refuse lock drift:
+
+```bash
+uv sync --locked --extra ai
+```
+
+After intentionally changing `pyproject.toml`, run `uv lock`, review both files, run the
+test/security suite, and commit them together. The convenience installers remain available
+for first-time desktop users, but release verification always uses the locked environment.
+
+`./install-trading-agent.sh --no-setup` (or PowerShell `-NoSetup`) performs a clean locked
+installation without opening the wizard and is the mode exercised across Linux, macOS, and
+Windows CI.

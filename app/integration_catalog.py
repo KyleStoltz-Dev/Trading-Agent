@@ -24,11 +24,17 @@ INTEGRATIONS = (
     ),
     IntegrationOption(
         kind="broker",
-        key="mt5",
-        name="MetaTrader 5",
-        status="adapter-only",
-        capability="tick/candle normalization examples; no live terminal connector yet",
-        setup="Requires the official MT5 terminal bridge; typically Windows-hosted",
+        key="metatrader",
+        name="MetaTrader 4 / 5 bridge",
+        status="ready",
+        capability=(
+            "read-only live data and execution ingestion; included Windows MT5 service "
+            "and a shared MT4 bridge contract"
+        ),
+        setup=(
+            "METATRADER_BRIDGE_URL, METATRADER_BRIDGE_TOKEN, "
+            "METATRADER_ACCOUNT_ID, METATRADER_PLATFORM"
+        ),
         documentation="https://www.mql5.com/en/docs/python_metatrader5",
     ),
     IntegrationOption(
@@ -57,6 +63,24 @@ INTEGRATIONS = (
         capability="economic calendar and news with provider/source timestamps",
         setup="TRADING_ECONOMICS_API_KEY",
         documentation="https://docs.tradingeconomics.com/get_started/",
+    ),
+    IntegrationOption(
+        kind="chart-alert",
+        key="tradingview",
+        name="TradingView webhooks",
+        status="ready",
+        capability=(
+            "verified, replay-safe chart alerts as read-only evidence; "
+            "never broker execution"
+        ),
+        setup=(
+            "Public HTTPS proxy with TradingView mTLS/source-IP verification; "
+            "then TRADINGVIEW_WEBHOOK_ENABLED=true"
+        ),
+        documentation=(
+            "https://www.tradingview.com/support/solutions/43000529348-"
+            "how-to-configure-webhook-alerts/"
+        ),
     ),
     IntegrationOption(
         kind="news",

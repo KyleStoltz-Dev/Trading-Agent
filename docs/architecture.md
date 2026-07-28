@@ -13,10 +13,18 @@ The MVP is a human-in-the-loop journal and playbook service:
 - Progressive task context from a compact, application-owned trading harness.
 - A versioned runtime policy loaded at startup and checked by hooks before tool execution.
 - Human-readable session names backed by internal UUIDs.
+- Explicit workspace/account request scope for every decision, memory, evidence, and
+  broker-ingestion operation.
+- Account selection that keeps personal, prop, demo, scalp, intraday, and swing histories
+  separate while allowing workspace-owned immutable strategies to be reused deliberately.
 - Alembic-managed, execution-centered PostgreSQL records.
 - Provider-neutral read-only broker and market-data contracts.
 - Bounded in-memory quote/candle state with explicit freshness checks.
 - A read-only OANDA implementation with transaction cursors and reconciliation.
+- Typed broker sync pages with explicit cursor bounds, pagination, history coverage, and
+  conflict-aware idempotency.
+- Provider qualification that separates implemented, configured, reachable, and
+  evidence-observed states, with optional bounded live read-only probes.
 - Broker-contract-aware deterministic sizing and versioned instrument specifications.
 - Trading Economics calendar/news metadata ingestion.
 - Tiered local, connector, allowlisted-web, and optional broad-search retrieval.
@@ -46,6 +54,14 @@ The MVP is a human-in-the-loop journal and playbook service:
     resources and executed data tools are recorded even when the model omits citations.
 11. Imported material is untrusted and is never model instruction. Every knowledge query
     requires one exact playbook-version ID.
+12. A historical successful sync is labeled as prior evidence, never as proof that a
+    provider is reachable now. Live verification is explicit, read-only, and non-persistent.
+13. The CLI/API edge resolves one immutable `(workspace_id, account_id)` scope before a
+    service runs. Account-owned reads and writes fail closed when scope is absent or invalid.
+14. Composite database foreign keys prevent an account-owned record from referencing a
+    parent in another workspace/account. PostgreSQL row-level security is not enabled yet;
+    hosted multi-user deployments still require identity/authentication and RLS or an
+    equivalent database-enforced authorization layer.
 
 ## Adapter boundary
 
@@ -58,7 +74,8 @@ The MVP is a human-in-the-loop journal and playbook service:
 - Broker: read-only account, positions, and transaction/fill ingestion first.
 - Discord: slash commands and image uploads calling this API.
 - Storage: local private content-addressed files for chart evidence; PostgreSQL stores
-  metadata and hashes. Object storage is a future deployment adapter.
+  metadata and hashes under workspace/account-specific directories and rows. Object storage
+  is a future deployment adapter.
 - Knowledge: normalized imported text is stored in PostgreSQL under an immutable
   playbook-version foreign key; no unrestricted SQL tool is exposed to the model.
 
@@ -69,12 +86,15 @@ have no place, modify, cancel, close, or hedge methods.
 ## Request and provenance flow
 
 1. Deterministic harness routing selects local resources and records their path/hash.
-2. Recent conversation context, when present, is content-hashed into the reference ledger.
-3. Model routing chooses provider, model, and reasoning effort; the CLI computes an
+2. The host resolves and validates one workspace/account scope; all subsequent account-owned
+   context, broker reads, journal queries, and mutations use that same scope.
+3. Recent conversation context, when present, is filtered to that account and exact strategy
+   state, then content-hashed into the reference ledger.
+4. Model routing chooses provider, model, and reasoning effort; the CLI computes an
    approximate first-response cost.
-4. Read-only tools may add journal, evidence, broker, news, calendar, allowlisted-page, or
+5. Read-only tools may add journal, evidence, broker, news, calendar, allowlisted-page, or
    search-result references. Mutating journal tools still pass policy and confirmation hooks.
-5. Provider-reported usage is accumulated across every response and nested chart-analysis
+6. Provider-reported usage is accumulated across every response and nested chart-analysis
    call.
-6. The CLI renders the response and appends the host-owned reference ledger, provider-reported
+7. The CLI renders the response and appends the host-owned reference ledger, provider-reported
    token usage, and estimated API cost.

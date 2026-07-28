@@ -12,7 +12,10 @@ class WebSearchError(ValueError):
 
 
 SENSITIVE_QUERY_PATTERNS = (
-    re.compile(r"\b(?:api[_-]?key|password|secret|token)\s*[:=]", re.IGNORECASE),
+    re.compile(
+        r"\b(?:[a-z0-9]+[_-])*(?:api[_-]?key|password|secret|token)\s*[:=]",
+        re.IGNORECASE,
+    ),
     re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),
     re.compile(r"\bgh[opsu]_[A-Za-z0-9]{20,}"),
     re.compile(r"https?://", re.IGNORECASE),

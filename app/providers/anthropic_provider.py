@@ -7,6 +7,8 @@ from app.costs import TokenUsage
 from app.providers.base import (
     ProviderConfigurationError,
     ToolExecutor,
+    limit_provider_capacity,
+    provider_capacity_limiter,
     record_analysis_usage,
     safe_tool_error,
     track_completion_usage,
@@ -44,7 +46,20 @@ def _anthropic_usage(response: Any) -> TokenUsage:
         input_tokens=base_input + cached + cache_write,
         output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
         cached_input_tokens=cached,
+        cache_write_input_tokens=cache_write,
     )
+
+
+def _reasoning_options(reasoning_effort: str) -> dict[str, Any]:
+    effort = (
+        reasoning_effort
+        if reasoning_effort in {"low", "medium", "high", "xhigh", "max"}
+        else "medium"
+    )
+    return {
+        "thinking": {"type": "adaptive", "display": "summarized"},
+        "output_config": {"effort": effort},
+    }
 
 
 class AnthropicProvider:
@@ -53,6 +68,13 @@ class AnthropicProvider:
     def __init__(self, settings: Settings, client: Any = None) -> None:
         self.model = settings.anthropic_model
         self.last_usage = TokenUsage()
+        self._capacity_limiter = provider_capacity_limiter(
+            self.name,
+            settings.model_max_concurrent_requests,
+        )
+        self._capacity_queue_timeout_seconds = (
+            settings.model_request_queue_timeout_seconds
+        )
         if client is None:
             try:
                 anthropic = importlib.import_module("anthropic")
@@ -60,12 +82,11 @@ class AnthropicProvider:
                 raise ProviderConfigurationError(
                     'Install the Anthropic adapter with `pip install -e ".[anthropic]"`'
                 ) from exc
-            client = anthropic.Anthropic(
-                api_key=secret_value(settings.anthropic_api_key)
-            )
+            client = anthropic.Anthropic(api_key=secret_value(settings.anthropic_api_key))
         self.client = client
 
     @track_completion_usage
+    @limit_provider_capacity
     def complete(
         self,
         *,
@@ -77,6 +98,7 @@ class AnthropicProvider:
         max_tool_rounds: int,
         model: str | None = None,
         reasoning_effort: str = "medium",
+        max_output_tokens: int = 900,
     ) -> str:
         messages: list[dict[str, Any]] = [*history, {"role": "user", "content": message}]
         provider_tools = _anthropic_tools(tools)
@@ -84,17 +106,16 @@ class AnthropicProvider:
         for _ in range(max_tool_rounds):
             response = self.client.messages.create(
                 model=model or self.model,
-                max_tokens=4096,
+                max_tokens=max_output_tokens,
                 system=instructions,
                 messages=messages,
                 tools=provider_tools,
+                **_reasoning_options(reasoning_effort),
             )
             self.last_usage += _anthropic_usage(response)
             tool_calls = [block for block in response.content if block.type == "tool_use"]
             if not tool_calls:
-                return "\n".join(
-                    block.text for block in response.content if block.type == "text"
-                )
+                return "\n".join(block.text for block in response.content if block.type == "text")
 
             messages.append(
                 {
@@ -121,6 +142,7 @@ class AnthropicProvider:
             messages.append({"role": "user", "content": results})
         raise RuntimeError("agent exceeded the maximum tool-call rounds")
 
+    @limit_provider_capacity
     def analyze_chart(
         self,
         *,
@@ -163,6 +185,7 @@ class AnthropicProvider:
                 }
             ],
             tool_choice={"type": "tool", "name": tool_name},
+            **_reasoning_options(reasoning_effort),
         )
         record_analysis_usage(self, _anthropic_usage(response))
         block = next(

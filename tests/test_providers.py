@@ -104,6 +104,7 @@ def test_openai_adapter_returns_tool_output_to_responses_api() -> None:
     assert result == "done"
     assert responses.calls[0]["model"] == "economy-model"
     assert responses.calls[0]["reasoning"]["effort"] == "low"
+    assert responses.calls[0]["max_output_tokens"] == 900
     assert responses.calls[0]["store"] is False
     assert provider.last_usage.input_tokens == 150
     assert provider.last_usage.output_tokens == 30
@@ -123,12 +124,14 @@ def test_nested_chart_analysis_is_included_in_total_usage() -> None:
         call_id="chart-1",
         arguments="{}",
     )
+
     def usage(input_tokens, output_tokens):
         return SimpleNamespace(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             input_tokens_details=SimpleNamespace(cached_tokens=0),
         )
+
     responses = FakeResponses(
         [
             SimpleNamespace(output=[tool_call], output_text="", usage=usage(100, 10)),
@@ -233,12 +236,17 @@ def test_anthropic_adapter_returns_tool_result_immediately_after_tool_use() -> N
     )
 
     assert result == "done"
+    assert messages.calls[0]["max_tokens"] == 900
+    assert messages.calls[0]["thinking"]["type"] == "adaptive"
+    assert messages.calls[0]["output_config"]["effort"] == "medium"
     continuation = messages.calls[1]["messages"]
     assert continuation[-2]["role"] == "assistant"
     assert continuation[-1]["role"] == "user"
     assert continuation[-1]["content"][0]["type"] == "tool_result"
     assert continuation[-1]["content"][0]["tool_use_id"] == "tool-1"
     assert provider.last_usage.input_tokens == 175
+    assert provider.last_usage.cached_input_tokens == 20
+    assert provider.last_usage.cache_write_input_tokens == 5
     assert provider.last_usage.output_tokens == 30
     assert provider.last_usage.cached_input_tokens == 20
 
@@ -311,6 +319,8 @@ def test_ollama_adapter_runs_tools_and_returns_the_follow_up_text() -> None:
     assert result == "done"
     assert requests[0]["model"] == "local-model"
     assert requests[0]["think"] == "low"
+    assert requests[0]["options"]["num_predict"] == 2300
+    assert requests[0]["options"]["temperature"] == 0.2
     assert requests[0]["tools"][0]["function"]["name"] == "calculate_position_size"
     assert requests[1]["messages"][-1] == {
         "role": "tool",
@@ -321,6 +331,65 @@ def test_ollama_adapter_runs_tools_and_returns_the_follow_up_text() -> None:
     assert provider.last_usage.output_tokens == 12
     assert provider.last_performance["output_tokens_per_second"] == 7
     assert provider.last_performance["load_seconds"] == 0.5
+    client.close()
+
+
+def test_ollama_retries_without_thinking_when_reasoning_uses_the_generation_cap() -> None:
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append(payload)
+        if len(requests) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "thinking": "Reasoning consumed the available generation.",
+                    },
+                    "prompt_eval_count": 20,
+                    "eval_count": 1800,
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "message": {"role": "assistant", "content": "Compact answer."},
+                "prompt_eval_count": 20,
+                "eval_count": 20,
+            },
+        )
+
+    client = httpx.Client(
+        base_url="http://127.0.0.1:11434",
+        transport=httpx.MockTransport(handler),
+    )
+    provider = OllamaProvider(
+        Settings(model_provider="ollama", resource_aware_model_routing=False),
+        client=client,
+    )
+
+    result = provider.complete(
+        instructions="Be concise.",
+        message="Answer.",
+        history=[],
+        tools=[],
+        execute_tool=lambda name, arguments: "{}",
+        max_tool_rounds=1,
+        model="local-model",
+        reasoning_effort="low",
+        max_output_tokens=400,
+    )
+
+    assert result == "Compact answer."
+    assert requests[0]["think"] == "low"
+    assert requests[0]["options"]["num_predict"] == 1800
+    assert requests[1]["think"] is False
+    assert requests[1]["options"]["num_predict"] == 400
+    assert provider.last_usage.input_tokens == 40
+    assert provider.last_usage.output_tokens == 1820
     client.close()
 
 
@@ -551,6 +620,64 @@ def test_ollama_requires_explicit_opt_in_for_remote_hosts() -> None:
                 ollama_base_url="http://remote.example:11434",
             )
         )
+
+
+def test_remote_ollama_requires_tls_or_separate_insecure_override() -> None:
+    with pytest.raises(ProviderConfigurationError, match="requires HTTPS"):
+        OllamaProvider(
+            Settings(
+                model_provider="ollama",
+                ollama_base_url="http://remote.example:11434",
+                ollama_allow_remote=True,
+            )
+        )
+
+    provider = OllamaProvider(
+        Settings(
+            model_provider="ollama",
+            ollama_base_url="http://remote.example:11434",
+            ollama_allow_remote=True,
+            ollama_allow_insecure_remote=True,
+        )
+    )
+    provider.client.close()
+
+
+def test_ollama_rejects_installed_model_digest_drift() -> None:
+    expected = "sha256:" + ("a" * 64)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {
+                            "name": "qwen3.5:9b",
+                            "size": 6_600_000_000,
+                            "digest": "sha256:" + ("b" * 64),
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(500)
+
+    client = httpx.Client(
+        base_url="http://127.0.0.1:11434",
+        transport=httpx.MockTransport(handler),
+    )
+    provider = OllamaProvider(
+        Settings(
+            model_provider="ollama",
+            ollama_model_digests=f"qwen3.5:9b={expected}",
+            resource_aware_model_routing=False,
+        ),
+        client=client,
+    )
+
+    with pytest.raises(ProviderConfigurationError, match="does not match"):
+        provider.smoke_test()
+    client.close()
 
 
 @pytest.mark.parametrize(
