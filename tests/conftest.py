@@ -6,7 +6,14 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.db import engine, upgrade_database
-from app.models import BrokerConnection, Trade, TradingAccount, Workspace
+from app.models import (
+    BrokerConnection,
+    ExecutionEvent,
+    OrderIntent,
+    Trade,
+    TradingAccount,
+    Workspace,
+)
 from app.services.workspaces import RequestScope
 
 LEGACY_WORKSPACE_ID = uuid.UUID("00000000-0000-4000-8000-000000000001")
@@ -25,6 +32,8 @@ def _apply_legacy_scope(session, _flush_context, _instances) -> None:
         for key, model in (
             ("connection_id", BrokerConnection),
             ("trade_id", Trade),
+            ("order_intent_id", OrderIntent),
+            ("execution_event_id", ExecutionEvent),
         ):
             parent_id = getattr(instance, key, None)
             if parent_id is None:
