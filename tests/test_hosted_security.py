@@ -299,8 +299,21 @@ def test_rls_policies_cover_all_workspace_owned_tables(db_session: Session) -> N
     assert missing == []
 
 
-def test_hosted_startup_rejects_table_owner_runtime_role(db_session: Session) -> None:
-    with pytest.raises(RuntimeError, match="not enforceable"):
+def test_hosted_startup_rejects_privileged_or_table_owner_runtime_role(
+    db_session: Session,
+) -> None:
+    role = db_session.execute(
+        text(
+            "SELECT r.rolbypassrls, r.rolsuper "
+            "FROM pg_roles r WHERE r.rolname = current_user"
+        )
+    ).one()
+    expected = (
+        "may not bypass row-level security"
+        if role.rolbypassrls or role.rolsuper
+        else "not enforceable"
+    )
+    with pytest.raises(RuntimeError, match=expected):
         verify_hosted_rls()
 
 
