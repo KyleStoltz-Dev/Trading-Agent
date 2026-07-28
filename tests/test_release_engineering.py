@@ -260,6 +260,8 @@ def test_ci_exercises_secure_container_runtime_and_fail_closed_paths() -> None:
     assert "--network none" in workflow
     assert "did not resolve to an IPv4 address" in workflow
     assert "docker sbom" in workflow
+    assert "grep -Eq -- '--format([=[:space:]]|$)'" in workflow
+    assert "docker sbom with SPDX-JSON output is unavailable" in workflow
     assert "npm audit --omit=dev --audit-level=high" in workflow
     assert "uv export --locked --all-extras --all-groups --no-emit-project" in workflow
     assert "pip-audit --strict --no-deps --disable-pip" in workflow

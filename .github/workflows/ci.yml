@@ -373,11 +373,11 @@ jobs:
             trading-agent-secure-dev:ci \
             -W '-f=${binary:Package}\t${Version}\n' \
             > secure-container-evidence/dpkg-packages.tsv
-          if docker sbom --help >/dev/null 2>&1; then
+          if docker sbom --help 2>&1 | grep -Eq -- '--format([=[:space:]]|$)'; then
             docker sbom trading-agent-secure-dev:ci --format spdx-json \
               > secure-container-evidence/image-sbom.spdx.json
           else
-            echo "docker sbom is unavailable on this runner." \
+            echo "docker sbom with SPDX-JSON output is unavailable on this runner." \
               > secure-container-evidence/sbom-unavailable.txt
           fi
           if command -v trivy >/dev/null 2>&1; then
