@@ -176,7 +176,7 @@ def set_session_strategy(
     conversation: ConversationSession,
     strategy: str | None,
     *,
-    scope: RequestScope,
+    scope: RequestScope | None = None,
     version: int | None = None,
 ) -> tuple[Playbook, PlaybookVersion] | None:
     scope = _legacy_scope(scope)
@@ -306,11 +306,12 @@ def search_strategy_knowledge_for_management(
     playbook_version_id: uuid.UUID,
     query: str,
     *,
-    scope: RequestScope,
+    scope: RequestScope | None = None,
     status: str,
     limit: int = 8,
 ) -> list[StrategyKnowledgeItem]:
     """Find bounded candidates within one immutable strategy version."""
+    scope = _legacy_scope(scope)
     validate_strategy_scope(db, scope, playbook_version_id)
     if status not in {"active", "quarantined"}:
         raise ValueError("knowledge status must be active or quarantined")
@@ -346,9 +347,10 @@ def resolve_strategy_knowledge_reference(
     playbook_version_id: uuid.UUID,
     reference: str,
     *,
-    scope: RequestScope,
+    scope: RequestScope | None = None,
 ) -> StrategyKnowledgeItem:
     """Resolve one human reference, failing closed on malformed or ambiguous values."""
+    scope = _legacy_scope(scope)
     validate_strategy_scope(db, scope, playbook_version_id)
     match = KNOWLEDGE_REFERENCE.fullmatch(reference.strip().lower())
     if match is None:
@@ -383,10 +385,11 @@ def set_active_strategy_knowledge_excluded(
     playbook_version_id: uuid.UUID,
     reference: str,
     *,
-    scope: RequestScope,
+    scope: RequestScope | None = None,
     excluded: bool,
 ) -> StrategyKnowledgeItem:
     """Reversibly change one item already scoped by the host's active strategy."""
+    scope = _legacy_scope(scope)
     item = resolve_strategy_knowledge_reference(
         db,
         playbook_version_id,
@@ -407,9 +410,10 @@ def set_strategy_knowledge_excluded(
     strategy: str,
     item_id: uuid.UUID,
     *,
-    scope: RequestScope,
+    scope: RequestScope | None = None,
     excluded: bool,
 ) -> StrategyKnowledgeItem:
+    scope = _legacy_scope(scope)
     _, version = resolve_strategy_version(db, strategy, scope=scope)
     item = db.scalar(
         select(StrategyKnowledgeItem).where(
