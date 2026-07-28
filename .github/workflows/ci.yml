@@ -8,24 +8,35 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   setup-compatibility:
     name: Setup compatibility (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      UV_CACHE_DIR: ${{ github.workspace }}/.data/uv-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-          cache: pip
-      - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[dev,ai]"
-      - run: ruff check app/setup.py tests/test_setup.py tests/test_installers.py
-      - run: pytest -q tests/test_setup.py tests/test_installers.py
+      - run: >-
+          python -m pip install --require-hashes --only-binary=:all:
+          --requirement requirements-bootstrap.txt
+      - run: uv lock --check
+      - run: uv sync --locked --extra dev --extra ai
+      - run: uv run ruff check app/setup.py tests/test_setup.py tests/test_installers.py
+      - run: uv run pytest -q tests/test_setup.py tests/test_installers.py
       - name: POSIX installer syntax
         if: runner.os != 'Windows'
         run: sh -n install-trading-agent.sh install.sh
@@ -41,11 +52,54 @@ jobs:
             $null = [scriptblock]::Create((Get-Content -Raw $File))
           }
 
+  clean-install:
+    name: Clean installer smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      UV_CACHE_DIR: ${{ github.workspace }}/.data/uv-cache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Run Linux installer without interactive setup
+        if: runner.os == 'Linux'
+        run: ./install-trading-agent.sh --no-setup
+      - name: Run macOS installer without interactive setup
+        if: runner.os == 'macOS'
+        run: ./install-trading-agent.command --no-setup
+      - name: Run Windows installer without interactive setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\install-trading-agent.ps1 -NoSetup
+      - name: Verify installed POSIX commands and providers
+        if: runner.os != 'Windows'
+        run: |
+          .venv/bin/python -c "import alembic, anthropic, app, openai, psycopg"
+          .venv/bin/trade --help
+          .venv/bin/trading-agent --help
+      - name: Verify installed Windows commands, providers, and MT5 extra
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & ".venv\Scripts\python.exe" -c "import alembic, anthropic, app, MetaTrader5, openai, psycopg"
+          & ".venv\Scripts\trade.exe" --help
+          & ".venv\Scripts\trading-agent.exe" --help
+
   verify:
+    name: Tests and security checks
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     services:
       postgres:
-        image: postgres:17
+        image: postgres:17@sha256:a426e44bac0b759c95894d68e1a0ac03ecc20b619f498a91aae373bf06d8508d
         env:
           POSTGRES_DB: trading_agent
           POSTGRES_USER: trading
@@ -62,30 +116,395 @@ jobs:
       MODEL_PROVIDER: openai
       OPENAI_API_KEY: test-only-not-a-real-key
       DATABASE_AUTO_MIGRATE: "false"
+      UV_CACHE_DIR: ${{ github.workspace }}/.data/uv-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-          cache: pip
-      - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[dev,ai]"
+      - run: >-
+          python -m pip install --require-hashes --only-binary=:all:
+          --requirement requirements-bootstrap.txt
+      - run: uv lock --check
+      - run: uv sync --locked --extra dev --extra ai --group release
       - name: Static and security lint
         run: |
-          ruff check .
-          ruff check --select S app
+          uv run ruff check .
+          uv run ruff check --select S app scripts
       - name: Database migration
         run: |
-          alembic upgrade head
-          alembic check
+          uv run alembic upgrade head
+          uv run alembic check
       - name: Tests
-        run: pytest -q
-      - name: Build and inspect wheel
-        run: |
-          python -m pip install build
-          python -m build
-          python -m zipfile --list dist/*.whl | grep "app/migrations/versions"
+        run: uv run pytest -q
+      - name: Secure development profile static validation
+        run: uv run pytest -q tests/test_secure_devcontainer.py
       - name: Dependency vulnerability audit
         run: |
-          python -m pip install pip-audit
-          pip-audit
+          uv export --locked --all-extras --all-groups --no-emit-project \
+            --no-header --output-file "$RUNNER_TEMP/audit-requirements.txt" \
+            >/dev/null
+          uv run pip-audit --strict --no-deps --disable-pip \
+            --requirement "$RUNNER_TEMP/audit-requirements.txt"
+
+  secure-devcontainer:
+    name: Secure development container build and runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Confirm private files are excluded from Docker context
+        run: |
+          grep -Fx '.env' .dockerignore
+          grep -Fx '.env.*' .dockerignore
+          grep -Fx '.data' .dockerignore
+          grep -Fx '.git' .dockerignore
+      - name: Audit locked Codex npm dependencies
+        working-directory: .devcontainer/codex-install
+        run: npm audit --omit=dev --audit-level=high
+      - name: Build secure profile without credentials
+        run: >-
+          docker build
+          --file .devcontainer/Dockerfile.secure
+          --tag trading-agent-secure-dev:ci
+          .
+      - name: Create an independent credential-free runtime clone
+        run: |
+          git clone --no-hardlinks "$GITHUB_WORKSPACE" "$RUNNER_TEMP/secure-profile-clone"
+          git -C "$RUNNER_TEMP/secure-profile-clone" remote remove origin
+          test -z "$(git -C "$RUNNER_TEMP/secure-profile-clone" status --porcelain)"
+          test ! -e "$RUNNER_TEMP/secure-profile-clone/.env"
+          test ! -e "$RUNNER_TEMP/secure-profile-clone/.data"
+      - name: Exercise secure profile and fail-closed egress
+        run: |
+          set -euo pipefail
+          container="trading-agent-secure-runtime"
+          cleanup() {
+            docker logs "$container" >"$RUNNER_TEMP/secure-profile.log" 2>&1 || true
+            docker rm --force "$container" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker run --detach \
+            --name "$container" \
+            --cap-add=SYS_ADMIN \
+            --cap-add=SYS_CHROOT \
+            --cap-add=SETUID \
+            --cap-add=SETGID \
+            --cap-add=NET_ADMIN \
+            --cap-add=NET_RAW \
+            --security-opt seccomp=unconfined \
+            --security-opt apparmor=unconfined \
+            --pids-limit=512 \
+            --env CODEX_HOME=/tmp/trading-agent-codex-home \
+            --env GIT_CONFIG_GLOBAL=/dev/null \
+            --env UV_PROJECT_ENVIRONMENT=/workspace/.venv \
+            --mount \
+              "type=bind,source=$RUNNER_TEMP/secure-profile-clone,target=/workspace" \
+            trading-agent-secure-dev:ci
+
+          ready=false
+          for _ in $(seq 1 60); do
+            if docker exec "$container" \
+              bash -c \
+                'test -d /tmp/trading-agent-codex-home &&
+                 test -S /run/trading-agent/codex-proxy.sock'; then
+              ready=true
+              break
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' "$container")" != "true" ]; then
+              docker logs "$container"
+              exit 1
+            fi
+            sleep 1
+          done
+          if [ "$ready" != "true" ]; then
+            docker logs "$container"
+            exit 1
+          fi
+
+          docker exec "$container" chown -R vscode:vscode /workspace
+          docker exec --user vscode "$container" trading-agent-post-create
+          docker exec --user vscode "$container" \
+            /workspace/.venv/bin/trade --help
+          docker exec --user vscode "$container" \
+            git -C /workspace rev-parse --is-inside-work-tree
+          test -z "$(docker exec --user vscode "$container" \
+            git -C /workspace status --porcelain)"
+          test -z "$(docker exec --user vscode "$container" \
+            git -C /workspace diff --)"
+          docker exec --user vscode "$container" \
+            bash -c 'test "$CODEX_HOME" = /tmp/trading-agent-codex-home'
+          docker exec --user vscode "$container" \
+            bash -c '! command -v sudo'
+          docker exec --user vscode "$container" \
+            bash -c 'test ! -e "$CODEX_HOME/auth.json"'
+
+          proxy_status="$(docker exec --user vscode "$container" \
+            curl --silent --output /dev/null --write-out '%{http_code}' \
+              --connect-timeout 2 --max-time 5 \
+              --request POST --header 'Content-Length: 0' \
+              http://127.0.0.1:3128/v1/responses)"
+          test "$proxy_status" = "503"
+          rejected_status="$(docker exec --user vscode "$container" \
+            curl --silent --output /dev/null --write-out '%{http_code}' \
+              --connect-timeout 2 --max-time 5 \
+              http://127.0.0.1:3128/v1/models)"
+          test "$rejected_status" = "403"
+
+          printf '%s\n' 'ci-fake-key-000000000000000000' |
+            docker exec --interactive --user vscode "$container" \
+              trading-agent-configure-codex-proxy --stdin
+          for _ in $(seq 1 50); do
+            if ! docker exec "$container" \
+              test -S /run/trading-agent/codex-proxy.sock; then
+              break
+            fi
+            sleep 0.1
+          done
+          docker exec "$container" \
+            test ! -S /run/trading-agent/codex-proxy.sock
+          if printf '%s\n' 'ci-second-fake-key-00000000000' |
+            docker exec --interactive --user vscode "$container" \
+              trading-agent-configure-codex-proxy --stdin \
+              >/dev/null 2>&1; then
+            echo "The one-time proxy credential could be configured twice." >&2
+            exit 1
+          fi
+
+          proxy_pid="$(docker exec "$container" \
+            pgrep --full --oldest \
+              '^python3 /usr/local/libexec/trading-agent-responses-api-proxy$')"
+          if docker inspect --format \
+            '{{range .Config.Env}}{{println .}}{{end}}' "$container" |
+            grep -E '^(OPENAI_API_KEY|CODEX_API_KEY)=|ci-fake-key'; then
+            echo "A model API credential was present in the container environment." >&2
+            exit 1
+          fi
+          docker exec --user vscode "$container" \
+            test ! -r "/proc/$proxy_pid/environ"
+          locked_kib="$(docker exec "$container" \
+            awk '$1 == "VmLck:" {print $2}' "/proc/$proxy_pid/status")"
+          test "$locked_kib" -gt 0
+          core_limit="$(docker exec "$container" \
+            awk '$1 == "Max" && $2 == "core" {print $5}' \
+              "/proc/$proxy_pid/limits")"
+          test "$core_limit" = "0"
+
+          upstream_status="$(docker exec --user vscode "$container" \
+            curl --silent --output /dev/null --write-out '%{http_code}' \
+              --connect-timeout 5 --max-time 20 \
+              --request POST --header 'Content-Type: application/json' \
+              --data '{"model":"gpt-5.6-sol","input":"CI credential probe","max_output_tokens":1}' \
+              http://127.0.0.1:3128/v1/responses)"
+          test "$upstream_status" = "401"
+
+          for rejected_payload in \
+            '{"model":"gpt-5.6-sol","input":"x","background":true}' \
+            '{"model":"gpt-5.6-sol","input":"x","previous_response_id":"r"}' \
+            '{"model":"gpt-5.6-sol","input":"x","tools":[{"type":"mcp"}]}' \
+            '{"model":"gpt-5.6-sol","input":"x","tools":[{"type":"web_search"}]}' \
+            '{"model":"gpt-5.6-sol","input":[{"role":"user","content":[{"type":"input_image","image_url":"https://attacker.invalid/private.png"}]}]}' \
+            '{"model":"gpt-5.6-sol","input":[{"role":"user","content":[{"type":"input_file","file_id":"file_stored"}]}]}' \
+            '{"model":"gpt-5.6-sol","input":"x","tool_choice":{"type":"allowed_tools","tools":[{"type":"web_search"}]}}' \
+            '{"model":"unapproved-model","input":"x"}'; do
+            policy_status="$(docker exec --user vscode "$container" \
+              curl --silent --output /dev/null --write-out '%{http_code}' \
+                --connect-timeout 2 --max-time 5 \
+                --request POST --header 'Content-Type: application/json' \
+                --data "$rejected_payload" \
+                http://127.0.0.1:3128/v1/responses)"
+            test "$policy_status" = "403"
+          done
+
+          docker exec --user trading-egress "$container" \
+            curl --silent --show-error --connect-timeout 5 --max-time 15 \
+              https://api.openai.com >/dev/null
+          if docker exec --user vscode "$container" \
+            curl --silent --show-error --connect-timeout 3 --max-time 8 \
+              https://api.openai.com >/dev/null 2>&1; then
+            echo "Workspace code reached the OpenAI API directly." >&2
+            exit 1
+          fi
+          if docker exec --user vscode "$container" \
+            curl --insecure --silent --show-error \
+              --connect-timeout 3 --max-time 8 \
+              https://1.1.1.1 >/dev/null 2>&1; then
+            echo "Workspace code reached a direct Internet IP." >&2
+            exit 1
+          fi
+          if docker exec --user vscode "$container" \
+            getent ahostsv4 example.com >/dev/null 2>&1; then
+            echo "Workspace code resolved DNS directly." >&2
+            exit 1
+          fi
+      - name: Require startup failure when DNS is unavailable
+        run: |
+          set +e
+          timeout 30s docker run --rm \
+            --network none \
+            --cap-add=NET_ADMIN \
+            --cap-add=NET_RAW \
+            --security-opt seccomp=unconfined \
+            --security-opt apparmor=unconfined \
+            trading-agent-secure-dev:ci true \
+            >"$RUNNER_TEMP/secure-profile-bad-dns.log" 2>&1
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ] || [ "$status" -eq 124 ]; then
+            cat "$RUNNER_TEMP/secure-profile-bad-dns.log"
+            echo "The secure profile did not fail promptly with unavailable DNS." >&2
+            exit 1
+          fi
+          grep -F "did not resolve to an IPv4 address" \
+            "$RUNNER_TEMP/secure-profile-bad-dns.log"
+      - name: Record image inventory and scan when a runner scanner is available
+        run: |
+          mkdir -p secure-container-evidence
+          docker image inspect trading-agent-secure-dev:ci \
+            > secure-container-evidence/image-inspect.json
+          docker history --no-trunc trading-agent-secure-dev:ci \
+            > secure-container-evidence/image-history.txt
+          docker run --rm --entrypoint /usr/bin/dpkg-query \
+            trading-agent-secure-dev:ci \
+            -W '-f=${binary:Package}\t${Version}\n' \
+            > secure-container-evidence/dpkg-packages.tsv
+          if docker sbom --help 2>&1 | grep -Eq -- '--format([=[:space:]]|$)'; then
+            docker sbom trading-agent-secure-dev:ci --format spdx-json \
+              > secure-container-evidence/image-sbom.spdx.json
+          else
+            echo "docker sbom with SPDX-JSON output is unavailable on this runner." \
+              > secure-container-evidence/sbom-unavailable.txt
+          fi
+          if command -v trivy >/dev/null 2>&1; then
+            trivy image --exit-code 1 --severity CRITICAL \
+              --ignore-unfixed trading-agent-secure-dev:ci
+          elif command -v grype >/dev/null 2>&1; then
+            grype trading-agent-secure-dev:ci --fail-on critical
+          else
+            echo "No supported image vulnerability scanner is installed on this runner." \
+              > secure-container-evidence/vulnerability-scan-unavailable.txt
+          fi
+      - name: Upload secure image evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: secure-container-evidence-${{ github.sha }}
+          path: |
+            secure-container-evidence/
+            ${{ runner.temp }}/secure-profile.log
+            ${{ runner.temp }}/secure-profile-bad-dns.log
+          if-no-files-found: error
+          retention-days: 7
+
+  migration-drill:
+    name: PostgreSQL 16 migration and restore drill
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
+        env:
+          POSTGRES_DB: trading_agent_release_ci
+          POSTGRES_USER: trading
+          POSTGRES_PASSWORD: trading
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U trading -d trading_agent_release_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://trading:trading@localhost:5432/trading_agent_release_ci
+      DATABASE_AUTO_MIGRATE: "false"
+      MODEL_PROVIDER: openai
+      OPENAI_API_KEY: test-only-not-a-real-key
+      UV_CACHE_DIR: ${{ github.workspace }}/.data/uv-cache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --require-hashes --only-binary=:all:
+          --requirement requirements-bootstrap.txt
+      - run: uv sync --locked --extra dev --extra ai
+      - name: Require PostgreSQL client tools
+        run: |
+          command -v pg_dump
+          command -v pg_restore
+      - name: Upgrade, restore, downgrade reversible tail, and re-upgrade
+        run: >-
+          uv run python scripts/run_migration_drill.py
+          --confirm-disposable-database trading_agent_release_ci
+
+  release-artifacts:
+    name: Reproducible package and artifact checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      UV_CACHE_DIR: ${{ github.workspace }}/.data/uv-cache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: >-
+          python -m pip install --require-hashes --only-binary=:all:
+          --requirement requirements-bootstrap.txt
+      - run: uv lock --check
+      - run: uv sync --locked --extra ai --group release
+      - name: Require an uncontaminated source checkout
+        run: |
+          git diff --exit-code
+          test -z "$(git status --porcelain)"
+      - name: Set reproducible build timestamp
+        run: |
+          BUILD_EPOCH="$(git log -1 --pretty=%ct)"
+          echo "SOURCE_DATE_EPOCH=$BUILD_EPOCH" >> "$GITHUB_ENV"
+          python -c "from datetime import UTC,datetime; import sys; print('SBOM_CREATED='+datetime.fromtimestamp(int(sys.argv[1]), UTC).replace(microsecond=0).isoformat().replace('+00:00','Z'))" "$BUILD_EPOCH" >> "$GITHUB_ENV"
+      - name: Build twice and require byte-identical archives
+        run: |
+          rm -rf dist first-build
+          uv build --no-build-isolation
+          mkdir first-build
+          cp dist/*.whl dist/*.tar.gz first-build/
+          rm -rf dist
+          uv build --no-build-isolation
+          for artifact in first-build/*; do
+            cmp "$artifact" "dist/$(basename "$artifact")"
+          done
+      - name: Generate SBOM, inspect archives, and write provenance manifest
+        run: |
+          python scripts/generate_sbom.py --created "$SBOM_CREATED"
+          python scripts/verify_release_artifacts.py --write-metadata
+          python scripts/verify_release_artifacts.py --check-metadata
+      - name: Smoke test the built wheel outside the source tree
+        run: |
+          uv pip install --python .venv/bin/python --no-deps --force-reinstall dist/*.whl
+          EXPECTED_VERSION="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
+          export EXPECTED_VERSION
+          cd "$RUNNER_TEMP"
+          "$GITHUB_WORKSPACE/.venv/bin/python" -c "import app,os; from importlib.metadata import version; assert version('trading-agent') == os.environ['EXPECTED_VERSION']"
+          "$GITHUB_WORKSPACE/.venv/bin/trade" --help
+      - name: Upload verified candidate artifacts
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: trading-agent-candidate-${{ github.sha }}
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/SHA256SUMS
+            dist/release-manifest.json
+            dist/sbom.spdx.json
+          if-no-files-found: error
+          retention-days: 7
