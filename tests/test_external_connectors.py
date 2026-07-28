@@ -1,15 +1,28 @@
 import asyncio
+import uuid
 from datetime import date
 
 import httpx
+import pytest
 
 from app.config import Settings
-from app.connectors.oanda import OandaReadOnlyConnector
+from app.connectors.factory import BrokerConfigurationError, create_broker_connector
+from app.connectors.oanda import (
+    OandaConnectorError,
+    OandaReadOnlyConnector,
+)
+from app.connectors.oanda import (
+    _retry_delay as oanda_retry_delay,
+)
 from app.connectors.trading_economics import TradingEconomicsReadOnlyConnector
+from app.models import BrokerConnection, TradingAccount
 
 
 def test_oanda_read_connector_normalizes_account_positions_and_events() -> None:
+    summary_calls = 0
+
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal summary_calls
         path = request.url.path
         if path.endswith("/pricing"):
             return httpx.Response(
@@ -46,10 +59,11 @@ def test_oanda_read_connector_normalizes_account_positions_and_events() -> None:
                 },
             )
         if path.endswith("/summary"):
+            summary_calls += 1
             return httpx.Response(
                 200,
                 json={
-                    "lastTransactionID": "10",
+                    "lastTransactionID": "10" if summary_calls <= 2 else "11",
                     "account": {
                         "id": "account-1",
                         "currency": "USD",
@@ -74,7 +88,9 @@ def test_oanda_read_connector_normalizes_account_positions_and_events() -> None:
                     ]
                 },
             )
-        if path.endswith("/sinceid"):
+        if path.endswith("/idrange"):
+            assert request.url.params["from"] == "11"
+            assert request.url.params["to"] == "11"
             return httpx.Response(
                 200,
                 json={
@@ -110,21 +126,88 @@ def test_oanda_read_connector_normalizes_account_positions_and_events() -> None:
         candles = await connector.candles("XAU_USD", "M5", count=1)
         account = await connector.account()
         positions = await connector.positions()
-        initial_events, initial_cursor = await connector.events_since(None)
-        events, cursor = await connector.events_since(initial_cursor)
+        initial_page = await connector.events_since(None)
+        page = await connector.events_since(initial_page.cursor_after)
         await client.aclose()
-        return quote, candles, account, positions, initial_events, events, cursor
+        return quote, candles, account, positions, initial_page, page
 
-    quote, candles, account, positions, initial_events, events, cursor = asyncio.run(
+    quote, candles, account, positions, initial_page, page = asyncio.run(
         exercise()
     )
     assert quote.instrument == "XAU_USD"
     assert candles[0].complete is True
     assert account.external_account_id == "account-1"
     assert positions[0].net_quantity == 2
-    assert initial_events == ()
-    assert events[0].external_trade_id == "trade-1"
-    assert cursor == "11"
+    assert initial_page.events == ()
+    assert initial_page.cursor_before is None
+    assert initial_page.cursor_after == "10"
+    assert initial_page.has_more is False
+    assert initial_page.coverage == "baseline"
+    assert page.events[0].external_trade_id == "trade-1"
+    assert page.cursor_before == "10"
+    assert page.cursor_after == "11"
+    assert page.has_more is False
+    assert page.coverage == "incremental"
+
+
+def test_oanda_response_body_is_bounded() -> None:
+    async def exercise() -> None:
+        client = httpx.AsyncClient(
+            base_url="https://api-fxpractice.oanda.com",
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(200, content=b"x" * 101)
+            ),
+        )
+        connector = OandaReadOnlyConnector(
+            token="secret-token",
+            account_id="account-1",
+            client=client,
+            stream_client=client,
+            maximum_response_bytes=100,
+        )
+        try:
+            with pytest.raises(OandaConnectorError, match="exceeded"):
+                await connector.latest_quote("XAU_USD")
+        finally:
+            await client.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_oanda_history_uses_bounded_transaction_id_pages() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/summary"):
+            return httpx.Response(200, json={"lastTransactionID": "2005"})
+        if request.url.path.endswith("/idrange"):
+            assert request.url.params["from"] == "1"
+            assert request.url.params["to"] == "1000"
+            return httpx.Response(200, json={"transactions": []})
+        raise AssertionError(request.url.path)
+
+    async def exercise():
+        client = httpx.AsyncClient(
+            base_url="https://api-fxpractice.oanda.com",
+            transport=httpx.MockTransport(handler),
+        )
+        connector = OandaReadOnlyConnector(
+            token="secret-token",
+            account_id="account-1",
+            client=client,
+            stream_client=client,
+        )
+        try:
+            return await connector.events_since("0")
+        finally:
+            await client.aclose()
+
+    page = asyncio.run(exercise())
+    assert page.cursor_after == "1000"
+    assert page.has_more is True
+    assert page.coverage == "incremental"
+
+
+def test_oanda_invalid_retry_after_falls_back_without_crashing() -> None:
+    assert oanda_retry_delay("not-a-delay", 1) == 0.5
 
 
 def test_trading_economics_connector_preserves_provider_timestamps() -> None:
@@ -212,3 +295,33 @@ def test_settings_repr_masks_all_credentials() -> None:
         "secret-news",
     ):
         assert secret not in rendered
+
+
+def test_broker_factory_rejects_selected_account_without_secret_reference() -> None:
+    account = TradingAccount(
+        workspace_id=uuid.uuid4(),
+        broker="OANDA",
+        external_account_id="selected-account",
+        label="Selected",
+        currency="USD",
+        mode="practice",
+        active=True,
+    )
+    account.id = uuid.uuid4()
+    connection = BrokerConnection(
+        workspace_id=account.workspace_id,
+        account_id=account.id,
+        provider="oanda-v20",
+        environment="practice",
+    )
+
+    with pytest.raises(BrokerConfigurationError, match="secret reference"):
+        create_broker_connector(
+            Settings(
+                broker_provider="oanda",
+                oanda_api_token="token",
+                oanda_account_id="different-account",
+            ),
+            account=account,
+            connection=connection,
+        )

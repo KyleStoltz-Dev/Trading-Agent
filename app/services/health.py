@@ -2,21 +2,29 @@ import importlib.util
 import shutil
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Literal
+from urllib.parse import urlsplit
 
 from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from app.config import Settings, secret_value
+from app.config import LEGACY_ENV_BACKEND, Settings, secret_value
+from app.connectors.factory import (
+    BrokerConfigurationError,
+    validate_broker_account_selection,
+)
 from app.db import inspect_schema
-from app.models import BrokerConnection
+from app.models import BrokerConnection, TradingAccount
 from app.providers import ProviderConfigurationError, resolve_provider_name
 from app.providers.ollama_provider import OllamaProvider
+from app.services.secrets import SecretBackendError, validate_secret_backend
+from app.services.tradingview import trusted_proxy_networks
 from app.services.web_fetch import (
     WebFetchError,
     allowed_domain_paths,
     allowed_domains,
 )
+from app.services.workspaces import RequestScope, resolve_current_scope
 from app.system_resources import GIB, assess_model_fit, resource_snapshot
 
 if TYPE_CHECKING:
@@ -53,6 +61,7 @@ def check_health(
     policy: "PolicyEngine | None" = None,
     *,
     model_smoke_test: bool = False,
+    scope: RequestScope | None = None,
 ) -> HealthReport:
     checks = [
         HealthCheck(
@@ -111,13 +120,99 @@ def check_health(
     else:
         checks.append(HealthCheck("api_security", "ok", "API key is configured"))
 
+    if not settings.tradingview_webhook_enabled:
+        checks.append(
+            HealthCheck(
+                "tradingview",
+                "ok",
+                "TradingView webhook receiver intentionally disabled",
+            )
+        )
+    else:
+        try:
+            networks = trusted_proxy_networks(
+                settings.tradingview_trusted_proxy_cidrs
+            )
+        except ValueError as exc:
+            checks.append(
+                HealthCheck(
+                    "tradingview",
+                    "error",
+                    f"invalid trusted proxy boundary: {exc}",
+                )
+            )
+        else:
+            checks.append(
+                HealthCheck(
+                    "tradingview",
+                    "warning",
+                    (
+                        "receiver enabled for "
+                        f"{len(networks)} trusted proxy network(s); verify public "
+                        "proxy mTLS, source-IP allowlisting, rate limiting, and "
+                        "header stripping"
+                    ),
+                )
+            )
+
     oanda_values = (settings.oanda_api_token, settings.oanda_account_id)
-    if any(oanda_values) and not all(oanda_values):
+    metatrader_values = (
+        settings.metatrader_bridge_token,
+        settings.metatrader_account_id,
+    )
+    if settings.broker_secret_backend != LEGACY_ENV_BACKEND:
+        if (
+            settings.broker_provider == "none"
+            and settings.deployment_mode == "local-single-user"
+        ):
+            checks.append(
+                HealthCheck(
+                    "broker-secrets",
+                    "ok",
+                    "per-account secret backend selected; no broker needs it yet",
+                )
+            )
+        else:
+            try:
+                validate_secret_backend(settings)
+            except SecretBackendError as exc:
+                checks.append(HealthCheck("broker-secrets", "error", str(exc)))
+            else:
+                checks.append(
+                    HealthCheck(
+                        "broker-secrets",
+                        "ok",
+                        f"per-account {settings.broker_secret_backend} secret backend ready",
+                    )
+                )
+    elif settings.broker_provider == "oanda" and any(oanda_values) and not all(oanda_values):
         checks.append(
             HealthCheck(
                 "oanda",
                 "error",
                 "OANDA token and account id must be configured together",
+            )
+        )
+    elif settings.broker_provider == "metatrader" and any(metatrader_values) and not all(
+        metatrader_values
+    ):
+        checks.append(
+            HealthCheck(
+                "metatrader",
+                "error",
+                "MetaTrader bridge token and account id must be configured together",
+            )
+        )
+    elif (
+        settings.broker_provider == "metatrader"
+        and settings.metatrader_bridge_token is not None
+        and len(secret_value(settings.metatrader_bridge_token) or "") < 32
+    ):
+        checks.append(
+            HealthCheck(
+                "metatrader",
+                "error",
+                "MetaTrader bridge token must contain at least 32 characters",
             )
         )
     elif settings.broker_provider == "none":
@@ -128,7 +223,7 @@ def check_health(
                 "broker connector intentionally disabled",
             )
         )
-    elif all(oanda_values):
+    elif settings.broker_provider == "oanda" and all(oanda_values):
         checks.append(
             HealthCheck(
                 "oanda",
@@ -140,12 +235,39 @@ def check_health(
                 ),
             )
         )
-    else:
+    elif settings.broker_provider == "oanda":
         checks.append(
             HealthCheck(
                 "oanda",
                 "warning",
                 "OANDA is selected but its read-only token and account id are not configured",
+            )
+        )
+    elif all(metatrader_values):
+        bridge_url = urlsplit(settings.metatrader_bridge_url)
+        bridge_is_remote_http = (
+            bridge_url.scheme.casefold() == "http"
+            and (bridge_url.hostname or "").casefold()
+            not in {"127.0.0.1", "::1", "localhost"}
+        )
+        insecure = bridge_is_remote_http and settings.metatrader_allow_insecure_remote
+        checks.append(
+            HealthCheck(
+                "metatrader",
+                "warning" if settings.metatrader_mode == "live" or insecure else "ok",
+                (
+                    f"read-only {settings.metatrader_platform.upper()} bridge configured"
+                    + (" for a LIVE account" if settings.metatrader_mode == "live" else "")
+                    + (" over explicitly allowed remote HTTP" if insecure else "")
+                ),
+            )
+        )
+    else:
+        checks.append(
+            HealthCheck(
+                "metatrader",
+                "warning",
+                "MetaTrader is selected but its bridge token and account id are not configured",
             )
         )
 
@@ -482,7 +604,108 @@ def check_health(
                     )
                 )
                 with Session(engine) as session:
-                    connections = list(session.scalars(select(BrokerConnection)))
+                    selected_scope = scope
+                    if selected_scope is None:
+                        try:
+                            selected_scope = resolve_current_scope(
+                                session,
+                                workspace_reference=settings.trading_workspace,
+                                account_reference=settings.trading_account,
+                            )
+                        except LookupError as exc:
+                            checks.append(
+                                HealthCheck(
+                                    "account_scope",
+                                    "error",
+                                    f"{exc}; run `trade onboard` or `trade account list`",
+                                )
+                            )
+                    connections = (
+                        []
+                        if selected_scope is None
+                        else list(
+                            session.scalars(
+                                select(BrokerConnection).where(
+                                    BrokerConnection.workspace_id
+                                    == selected_scope.workspace_id,
+                                    BrokerConnection.account_id
+                                    == selected_scope.account_id,
+                                )
+                            )
+                        )
+                    )
+                    selected_account = (
+                        None
+                        if selected_scope is None
+                        else session.scalar(
+                            select(TradingAccount).where(
+                                TradingAccount.workspace_id
+                                == selected_scope.workspace_id,
+                                TradingAccount.id == selected_scope.account_id,
+                            )
+                        )
+                    )
+                    if settings.tradingview_webhook_enabled:
+                        if (
+                            selected_account is None
+                            or not selected_account.tradingview_webhook_secret_sha256
+                        ):
+                            checks.append(
+                                HealthCheck(
+                                    "tradingview_account_secret",
+                                    "error",
+                                    "selected account has no TradingView webhook "
+                                    "secret; run `trade account tradingview-secret`",
+                                )
+                            )
+                        else:
+                            checks.append(
+                                HealthCheck(
+                                    "tradingview_account_secret",
+                                    "ok",
+                                    "selected account has a TradingView webhook secret",
+                                )
+                            )
+                    if (
+                        settings.broker_provider != "none"
+                        and selected_account is not None
+                    ):
+                        expected_provider = (
+                            "oanda-v20"
+                            if settings.broker_provider == "oanda"
+                            else f"metatrader-{settings.metatrader_platform}-bridge"
+                        )
+                        selected_connection = next(
+                            (
+                                item
+                                for item in connections
+                                if item.provider == expected_provider
+                            ),
+                            None,
+                        )
+                        try:
+                            validate_broker_account_selection(
+                                settings,
+                                selected_account,
+                                selected_connection,
+                            )
+                        except BrokerConfigurationError as exc:
+                            checks.append(
+                                HealthCheck(
+                                    "broker_account_scope",
+                                    "error",
+                                    str(exc),
+                                )
+                            )
+                        else:
+                            checks.append(
+                                HealthCheck(
+                                    "broker_account_scope",
+                                    "ok",
+                                    "broker credentials and connection match the "
+                                    "selected account",
+                                )
+                            )
                 for connection in connections:
                     detail = f"{connection.provider}/{connection.environment}: {connection.status}"
                     if connection.last_healthy_at is not None:

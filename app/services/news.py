@@ -1,6 +1,8 @@
 import hashlib
+import uuid
 
-from sqlalchemy import select
+from sqlalchemy import update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from app.models import EconomicEvent, NewsItem
@@ -13,12 +15,6 @@ def store_calendar_events(
 ) -> int:
     stored = 0
     for event in events:
-        existing = db.scalar(
-            select(EconomicEvent).where(
-                EconomicEvent.source == event.source,
-                EconomicEvent.source_event_id == event.external_id,
-            )
-        )
         values = {
             "scheduled_at": event.scheduled_at,
             "timing_estimated": event.timing_estimated,
@@ -34,18 +30,33 @@ def store_calendar_events(
             "retrieved_at": event.retrieved_at,
             "source_url": event.source_url,
         }
-        if existing is None:
-            db.add(
-                EconomicEvent(
-                    source=event.source,
-                    source_event_id=event.external_id,
-                    **values,
-                )
+        inserted = db.scalar(
+            insert(EconomicEvent)
+            .values(
+                id=uuid.uuid4(),
+                source=event.source,
+                source_event_id=event.external_id,
+                **values,
             )
+            .on_conflict_do_nothing(
+                index_elements=[
+                    EconomicEvent.source,
+                    EconomicEvent.source_event_id,
+                ]
+            )
+            .returning(EconomicEvent.id)
+        )
+        if inserted is not None:
             stored += 1
         else:
-            for key, value in values.items():
-                setattr(existing, key, value)
+            db.execute(
+                update(EconomicEvent)
+                .where(
+                    EconomicEvent.source == event.source,
+                    EconomicEvent.source_event_id == event.external_id,
+                )
+                .values(**values)
+            )
     db.commit()
     return stored
 
@@ -53,12 +64,6 @@ def store_calendar_events(
 def store_news_items(db: Session, items: list[NewsHeadline] | tuple[NewsHeadline, ...]) -> int:
     stored = 0
     for item in items:
-        existing = db.scalar(
-            select(NewsItem).where(
-                NewsItem.source == item.source,
-                NewsItem.source_item_id == item.external_id,
-            )
-        )
         content_hash = hashlib.sha256(
             f"{item.title}\n{item.summary or ''}".encode()
         ).hexdigest()
@@ -74,17 +79,29 @@ def store_news_items(db: Session, items: list[NewsHeadline] | tuple[NewsHeadline
             "source_url": item.source_url,
             "content_hash": content_hash,
         }
-        if existing is None:
-            db.add(
-                NewsItem(
-                    source=item.source,
-                    source_item_id=item.external_id,
-                    **values,
-                )
+        inserted = db.scalar(
+            insert(NewsItem)
+            .values(
+                id=uuid.uuid4(),
+                source=item.source,
+                source_item_id=item.external_id,
+                **values,
             )
+            .on_conflict_do_nothing(
+                index_elements=[NewsItem.source, NewsItem.source_item_id]
+            )
+            .returning(NewsItem.id)
+        )
+        if inserted is not None:
             stored += 1
         else:
-            for key, value in values.items():
-                setattr(existing, key, value)
+            db.execute(
+                update(NewsItem)
+                .where(
+                    NewsItem.source == item.source,
+                    NewsItem.source_item_id == item.external_id,
+                )
+                .values(**values)
+            )
     db.commit()
     return stored
