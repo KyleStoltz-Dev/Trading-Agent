@@ -38,6 +38,7 @@ class PolicyViolation(RuntimeError):
 
 
 DIRECT_ACTION_METADATA = {
+    "add_learning_module": {"mutating": True, "deterministic": False},
     "add_mindset_checkin": {"mutating": True, "deterministic": False},
     "add_strategy_test_sample": {"mutating": True, "deterministic": False},
     "add_trade_reflection": {"mutating": True, "deterministic": False},
@@ -48,6 +49,14 @@ DIRECT_ACTION_METADATA = {
     "complete_strategy_experiment": {"mutating": True, "deterministic": False},
     "complete_pretrade_workflow": {"mutating": True, "deterministic": False},
     "configure_broker_connection": {"mutating": True, "deterministic": False},
+    "rotate_broker_credential": {"mutating": True, "deterministic": False},
+    "remove_broker_credential": {"mutating": True, "deterministic": False},
+    "retry_broker_credential_cleanup": {"mutating": True, "deterministic": False},
+    "create_api_principal": {"mutating": True, "deterministic": False},
+    "grant_api_principal": {"mutating": True, "deterministic": False},
+    "rotate_api_principal_token": {"mutating": True, "deterministic": False},
+    "revoke_api_principal": {"mutating": True, "deterministic": False},
+    "configure_tradingview_webhook": {"mutating": True, "deterministic": False},
     "configure_instrument_specification": {"mutating": True, "deterministic": True},
     "create_playbook_version": {"mutating": True, "deterministic": False},
     "create_strategy_experiment": {"mutating": True, "deterministic": False},
@@ -56,14 +65,22 @@ DIRECT_ACTION_METADATA = {
     "exclude_strategy_knowledge": {"mutating": True, "deterministic": False},
     "get_live_quote": {"mutating": False, "deterministic": False},
     "get_system_health": {"mutating": False, "deterministic": False},
+    "get_recent_tradingview_alerts": {"mutating": False, "deterministic": False},
     "get_trade_plan": {"mutating": False, "deterministic": False},
+    "verify_integrations": {"mutating": False, "deterministic": False},
+    "ingest_tradingview_alert": {"mutating": True, "deterministic": False},
     "import_strategy_knowledge": {"mutating": True, "deterministic": False},
     "list_mindset_checkins": {"mutating": False, "deterministic": False},
     "list_trade_plans": {"mutating": False, "deterministic": False},
     "record_management_event": {"mutating": True, "deterministic": False},
     "restore_strategy_knowledge": {"mutating": True, "deterministic": False},
+    "select_trading_account": {"mutating": True, "deterministic": False},
+    "set_session_strategy": {"mutating": True, "deterministic": False},
+    "clear_session_strategy": {"mutating": True, "deterministic": False},
+    "set_learning_preferences": {"mutating": True, "deterministic": False},
     "synchronize_broker": {"mutating": True, "deterministic": False},
     "synchronize_news": {"mutating": True, "deterministic": False},
+    "update_learning_progress": {"mutating": True, "deterministic": False},
 }
 
 
