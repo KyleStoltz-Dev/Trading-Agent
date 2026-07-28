@@ -6,19 +6,26 @@ commands remain available.
 
 ## Start
 
-Select exactly one immutable strategy in an interactive session:
+You can ask naturally:
 
 ```text
 trade
-/strategy use wyckoff-pure
-/exit
+I want to take a trade. Help me evaluate this setup.
 ```
 
-Then run:
+The agent offers the guided preflight. If no exact strategy is active, it now:
 
-```text
-trade preflight
-```
+1. Shows every saved strategy and lets you activate one.
+2. Offers to build a new strategy if none fits.
+3. Walks through methodology, objective, setup, observable context requirements, entry
+   confirmations, stand-aside conditions, risk ceiling, minimum planned R, mindset caution
+   tags, excluded cross-strategy concepts, and the evidence sample required before calling it
+   an edge.
+4. Shows the exact immutable definition for confirmation.
+5. Activates that version and resumes the original preflight automatically.
+
+You can still select a strategy manually with `/strategy use NAME` or start directly with
+`trade preflight`; the direct command uses the same guided recovery when needed.
 
 Use `--session NAME` when the latest session is not the intended one. A prepared
 `TradePlanCreate` JSON can be supplied with `--file`. `--live-market` optionally reads an

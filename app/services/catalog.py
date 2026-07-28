@@ -1,8 +1,9 @@
 import hashlib
 import json
+import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -79,9 +80,15 @@ def configure_instrument_specification(
     db: Session,
     request: InstrumentSpecificationCreate,
     *,
-    account_id=None,
+    workspace_id: uuid.UUID | None = None,
+    account_id: uuid.UUID | None = None,
     retrieved_at: datetime | None = None,
 ) -> InstrumentSpecification:
+    if (workspace_id is None) != (account_id is None):
+        raise ValueError(
+            "workspace_id and account_id must both be provided for an "
+            "account-specific specification"
+        )
     now = retrieved_at or datetime.now(UTC)
     instrument = get_or_create_instrument(
         db,
@@ -99,6 +106,7 @@ def configure_instrument_specification(
         select(InstrumentSpecification)
         .where(
             InstrumentSpecification.instrument_mapping_id == mapping.id,
+            InstrumentSpecification.workspace_id == workspace_id,
             InstrumentSpecification.account_id == account_id,
             InstrumentSpecification.effective_to.is_(None),
         )
@@ -107,6 +115,7 @@ def configure_instrument_specification(
     if previous is not None:
         previous.effective_to = now
     specification = InstrumentSpecification(
+        workspace_id=workspace_id,
         instrument_mapping_id=mapping.id,
         account_id=account_id,
         contract_size=request.contract_size,
@@ -135,9 +144,15 @@ def active_instrument_specification(
     *,
     provider: str,
     external_symbol: str,
-    account_id=None,
+    workspace_id: uuid.UUID | None = None,
+    account_id: uuid.UUID | None = None,
     at: datetime | None = None,
 ) -> InstrumentSpecification:
+    if (workspace_id is None) != (account_id is None):
+        raise ValueError(
+            "workspace_id and account_id must both be provided for an "
+            "account-specific specification"
+        )
     effective_at = at or datetime.now(UTC)
     statement = (
         select(InstrumentSpecification)
@@ -145,6 +160,7 @@ def active_instrument_specification(
         .where(
             InstrumentMapping.provider == provider,
             InstrumentMapping.external_symbol == external_symbol,
+            InstrumentSpecification.workspace_id == workspace_id,
             InstrumentSpecification.effective_from <= effective_at,
             (
                 InstrumentSpecification.effective_to.is_(None)
@@ -169,6 +185,7 @@ def active_instrument_specification(
 def configure_account(
     db: Session,
     *,
+    workspace_id: uuid.UUID,
     broker: str,
     external_account_id: str,
     label: str,
@@ -177,15 +194,19 @@ def configure_account(
     provider: str,
     environment: str,
     config_reference: str | None,
+    make_default: bool = False,
+    commit: bool = True,
 ) -> tuple[TradingAccount, BrokerConnection]:
     account = db.scalar(
         select(TradingAccount).where(
+            TradingAccount.workspace_id == workspace_id,
             TradingAccount.broker == broker,
             TradingAccount.external_account_id == external_account_id,
         )
     )
     if account is None:
         account = TradingAccount(
+            workspace_id=workspace_id,
             broker=broker,
             external_account_id=external_account_id,
             label=label,
@@ -194,29 +215,56 @@ def configure_account(
         )
         db.add(account)
         db.flush()
+    else:
+        account.label = label
+        account.currency = currency.upper()
+        account.mode = mode
+        account.active = True
     connection = db.scalar(
         select(BrokerConnection).where(
+            BrokerConnection.workspace_id == workspace_id,
             BrokerConnection.provider == provider,
             BrokerConnection.account_id == account.id,
         )
     )
     if connection is None:
         connection = BrokerConnection(
+            workspace_id=workspace_id,
             account_id=account.id,
             provider=provider,
             environment=environment,
             config_reference=config_reference,
         )
         db.add(connection)
-    db.commit()
-    db.refresh(account)
-    db.refresh(connection)
+    else:
+        changed = (
+            connection.environment != environment
+            or connection.config_reference != config_reference
+        )
+        connection.environment = environment
+        connection.config_reference = config_reference
+        if changed or connection.status == "disabled":
+            connection.status = "configured"
+    if make_default:
+        db.execute(
+            update(TradingAccount)
+            .where(TradingAccount.workspace_id == workspace_id)
+            .values(is_default=False)
+        )
+        account.is_default = True
+    if commit:
+        db.commit()
+        db.refresh(account)
+        db.refresh(connection)
+    else:
+        db.flush()
     return account, connection
 
 
 def create_playbook_version(
     db: Session,
     *,
+    workspace_id: uuid.UUID,
     name: str,
     definition: dict,
     description: str = "",
@@ -226,13 +274,23 @@ def create_playbook_version(
 ) -> PlaybookVersion:
     serialized = json.dumps(definition, sort_keys=True, separators=(",", ":"))
     content_hash = hashlib.sha256(serialized.encode()).hexdigest()
-    playbook = db.scalar(select(Playbook).where(Playbook.name == name))
+    playbook = db.scalar(
+        select(Playbook).where(
+            Playbook.workspace_id == workspace_id,
+            Playbook.name == name,
+        )
+    )
     if playbook is None:
-        playbook = Playbook(name=name, description=description)
+        playbook = Playbook(
+            workspace_id=workspace_id,
+            name=name,
+            description=description,
+        )
         db.add(playbook)
         db.flush()
     existing = db.scalar(
         select(PlaybookVersion).where(
+            PlaybookVersion.workspace_id == workspace_id,
             PlaybookVersion.playbook_id == playbook.id,
             PlaybookVersion.content_hash == content_hash,
         )
@@ -241,10 +299,14 @@ def create_playbook_version(
         return existing
     latest = db.scalar(
         select(PlaybookVersion)
-        .where(PlaybookVersion.playbook_id == playbook.id)
+        .where(
+            PlaybookVersion.workspace_id == workspace_id,
+            PlaybookVersion.playbook_id == playbook.id,
+        )
         .order_by(PlaybookVersion.version.desc())
     )
     version = PlaybookVersion(
+        workspace_id=workspace_id,
         playbook_id=playbook.id,
         version=1 if latest is None else latest.version + 1,
         definition=definition,
@@ -257,3 +319,17 @@ def create_playbook_version(
     db.commit()
     db.refresh(version)
     return version
+
+
+def verify_playbook_version_integrity(version: PlaybookVersion) -> None:
+    serialized = json.dumps(
+        version.definition,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    expected = hashlib.sha256(serialized.encode()).hexdigest()
+    if version.content_hash != expected:
+        raise ValueError(
+            "strategy version integrity check failed; stored definition does not "
+            "match its immutable content hash"
+        )

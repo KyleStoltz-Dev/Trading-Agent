@@ -3,9 +3,13 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import MindsetCheckIn, PlaybookVersion, TradePlan
+from app.models import MindsetCheckIn, TradePlan
 from app.schemas import MindsetCheckInCreate, MindsetCheckInRead
 from app.services.journal import get_trade_plan
+from app.services.workspaces import (
+    RequestScope,
+    validate_strategy_scope,
+)
 
 
 def mindset_read(
@@ -14,6 +18,8 @@ def mindset_read(
 ) -> MindsetCheckInRead:
     return MindsetCheckInRead(
         id=check_in.id,
+        workspace_id=check_in.workspace_id,
+        account_id=check_in.account_id,
         playbook_version_id=check_in.playbook_version_id,
         trade_plan_id=check_in.trade_plan_id,
         trade_reference=trade_reference,
@@ -21,6 +27,7 @@ def mindset_read(
         readiness=check_in.readiness,
         accepted_risk=check_in.accepted_risk,
         emotion_tags=check_in.emotion_tags,
+        emotional_state=check_in.emotional_state,
         note=check_in.note,
         created_at=check_in.created_at,
     )
@@ -30,23 +37,24 @@ def create_mindset_check_in(
     db: Session,
     request: MindsetCheckInCreate,
     *,
+    scope: RequestScope,
     playbook_version_id: uuid.UUID,
     commit: bool = True,
 ) -> MindsetCheckInRead:
-    if db.get(PlaybookVersion, playbook_version_id) is None:
-        raise LookupError(
-            f"strategy version was not found: {playbook_version_id}"
-        )
+    validate_strategy_scope(db, scope, playbook_version_id)
     trade = (
         get_trade_plan(
             db,
             request.trade_reference,
+            scope=scope,
             playbook_version_id=playbook_version_id,
         )
         if request.trade_reference is not None
         else None
     )
     check_in = MindsetCheckIn(
+        workspace_id=scope.workspace_id,
+        account_id=scope.account_id,
         playbook_version_id=playbook_version_id,
         trade_plan_id=trade.id if trade else None,
         **request.model_dump(exclude={"trade_reference"}),
@@ -62,14 +70,27 @@ def create_mindset_check_in(
 def list_mindset_check_ins(
     db: Session,
     *,
+    scope: RequestScope,
     playbook_version_id: uuid.UUID,
     limit: int = 20,
     phase: str | None = None,
 ) -> list[MindsetCheckInRead]:
+    validate_strategy_scope(db, scope, playbook_version_id)
     statement = (
         select(MindsetCheckIn, TradePlan.reference)
-        .outerjoin(TradePlan, TradePlan.id == MindsetCheckIn.trade_plan_id)
-        .where(MindsetCheckIn.playbook_version_id == playbook_version_id)
+        .outerjoin(
+            TradePlan,
+            (
+                (TradePlan.workspace_id == MindsetCheckIn.workspace_id)
+                & (TradePlan.account_id == MindsetCheckIn.account_id)
+                & (TradePlan.id == MindsetCheckIn.trade_plan_id)
+            ),
+        )
+        .where(
+            MindsetCheckIn.workspace_id == scope.workspace_id,
+            MindsetCheckIn.account_id == scope.account_id,
+            MindsetCheckIn.playbook_version_id == playbook_version_id,
+        )
         .order_by(MindsetCheckIn.created_at.desc())
         .limit(limit)
     )
