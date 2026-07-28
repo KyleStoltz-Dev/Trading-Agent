@@ -1,0 +1,32 @@
+{
+  "$schema": "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json",
+  "name": "Trading Agent development (secure)",
+  "build": {
+    "dockerfile": "Dockerfile.secure",
+    "context": ".."
+  },
+  "runArgs": [
+    "--cap-add=SYS_ADMIN",
+    "--cap-add=SYS_CHROOT",
+    "--cap-add=SETUID",
+    "--cap-add=SETGID",
+    "--security-opt=seccomp=unconfined",
+    "--security-opt=apparmor=unconfined",
+    "--cap-add=NET_ADMIN",
+    "--cap-add=NET_RAW",
+    "--pids-limit=512"
+  ],
+  "overrideCommand": false,
+  "init": true,
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": true,
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=delegated",
+  "workspaceFolder": "/workspace",
+  "containerEnv": {
+    "CODEX_HOME": "/tmp/trading-agent-codex-home",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "UV_PROJECT_ENVIRONMENT": "/workspace/.venv"
+  },
+  "postCreateCommand": "trading-agent-post-create",
+  "waitFor": "postCreateCommand"
+}
