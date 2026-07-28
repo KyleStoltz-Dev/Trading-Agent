@@ -11,3 +11,4 @@ uploads/
 .data/
 dist/
 *.egg-info/
+.worktrees/

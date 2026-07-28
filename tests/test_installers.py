@@ -18,8 +18,32 @@ def test_descriptive_installer_entrypoints_exist() -> None:
 
 
 def test_primary_installers_include_hosted_provider_adapters() -> None:
-    for name in ("install-trading-agent.sh", "install-trading-agent.ps1"):
-        assert ".[dev,ai]" in _text(name)
+    shell = _text("install-trading-agent.sh")
+    powershell = _text("install-trading-agent.ps1")
+    for content in (shell, powershell):
+        assert "--require-hashes" in content
+        assert "--only-binary=:all:" in content
+        assert "requirements-bootstrap.txt" in content
+        assert "sync --locked --inexact --extra ai" in content
+        assert "pip install -e" not in content
+    assert "--extra metatrader" not in shell
+    assert "--extra metatrader" in powershell
+    assert "--no-setup" in shell
+    assert "$NoSetup" in powershell
+    assert powershell.count("if ($LASTEXITCODE -ne 0)") >= 8
+
+
+def test_uv_bootstrap_is_version_and_hash_pinned() -> None:
+    bootstrap = _text("requirements-bootstrap.txt")
+    hashes = {
+        line.split("sha256:", 1)[1].split()[0].rstrip("\\")
+        for line in bootstrap.splitlines()
+        if "sha256:" in line
+    }
+    assert "uv==0.11.32" in bootstrap
+    assert len(hashes) == 18
+    assert all(len(digest) == 64 for digest in hashes)
+    assert all(set(digest) <= set("0123456789abcdef") for digest in hashes)
 
 
 def test_clean_install_exposes_both_hosted_provider_sdks() -> None:
