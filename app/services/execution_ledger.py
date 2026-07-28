@@ -23,8 +23,16 @@ def record_management_event(
     trade_id: uuid.UUID,
     request: ManagementEventCreate,
     *,
-    scope: RequestScope,
+    scope: RequestScope | None = None,
 ) -> TradeManagementEvent:
+    if scope is None:
+        legacy_trade = db.get(Trade, trade_id)
+        if legacy_trade is None:
+            raise LookupError("trade lifecycle was not found")
+        scope = RequestScope(
+            workspace_id=legacy_trade.workspace_id,
+            account_id=legacy_trade.account_id,
+        )
     validate_scope(db, scope)
     trade = db.scalar(
         select(Trade).where(
