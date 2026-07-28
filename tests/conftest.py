@@ -6,7 +6,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.db import engine, upgrade_database
-from app.models import TradingAccount, Workspace
+from app.models import BrokerConnection, Trade, TradingAccount, Workspace
 from app.services.workspaces import RequestScope
 
 LEGACY_WORKSPACE_ID = uuid.UUID("00000000-0000-4000-8000-000000000001")
@@ -21,20 +21,46 @@ def _apply_legacy_scope(session, _flush_context, _instances) -> None:
         table = getattr(instance, "__table__", None)
         if table is None:
             continue
+        parent_scope = None
+        for key, model in (
+            ("connection_id", BrokerConnection),
+            ("trade_id", Trade),
+        ):
+            parent_id = getattr(instance, key, None)
+            if parent_id is None:
+                continue
+            parent = next(
+                (
+                    candidate
+                    for candidate in session.new
+                    if isinstance(candidate, model)
+                    and getattr(candidate, "id", None) == parent_id
+                ),
+                None,
+            )
+            if parent is None:
+                parent = session.get(model, parent_id)
+            if parent is not None:
+                parent_scope = (parent.workspace_id, parent.account_id)
+                break
         workspace_column = table.c.get("workspace_id")
         if (
             workspace_column is not None
             and not workspace_column.nullable
             and getattr(instance, "workspace_id", None) is None
         ):
-            instance.workspace_id = LEGACY_WORKSPACE_ID
+            instance.workspace_id = (
+                parent_scope[0] if parent_scope else LEGACY_WORKSPACE_ID
+            )
         account_column = table.c.get("account_id")
         if (
             account_column is not None
             and not account_column.nullable
             and getattr(instance, "account_id", None) is None
         ):
-            instance.account_id = LEGACY_UNASSIGNED_ACCOUNT_ID
+            instance.account_id = (
+                parent_scope[1] if parent_scope else LEGACY_UNASSIGNED_ACCOUNT_ID
+            )
 
 
 @pytest.fixture
