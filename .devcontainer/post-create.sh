@@ -34,5 +34,9 @@ cleanup() {
 trap cleanup EXIT
 cp -R /opt/uv-cache/. "$cache_directory/"
 UV_CACHE_DIR="$cache_directory" \
-  uv sync --locked --offline --extra dev --extra ai --extra metatrader
+  uv sync --locked --offline --no-install-project \
+    --extra dev --extra ai --extra metatrader --group release
+UV_CACHE_DIR="$cache_directory" \
+  uv sync --locked --offline --no-build-isolation \
+    --extra dev --extra ai --extra metatrader --group release
 echo "Trading Agent secure development environment is ready."

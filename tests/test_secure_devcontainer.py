@@ -46,6 +46,9 @@ def test_secure_devcontainer_uses_locked_codex_cli_and_python_dependencies() -> 
     assert "--group release" in dockerfile
     assert 'ENTRYPOINT ["/usr/local/bin/trading-agent-container-entrypoint"]' in dockerfile
     assert "uv sync --locked --offline" in post_create
+    assert "--no-install-project" in post_create
+    assert "--no-build-isolation" in post_create
+    assert "--group release" in post_create
     assert "! -name '.env.example'" in post_create
 
     instructions = (ROOT / "docs" / "secure-development.md").read_text(encoding="utf-8")
