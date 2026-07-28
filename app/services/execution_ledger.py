@@ -23,16 +23,8 @@ def record_management_event(
     trade_id: uuid.UUID,
     request: ManagementEventCreate,
     *,
-    scope: RequestScope | None = None,
+    scope: RequestScope,
 ) -> TradeManagementEvent:
-    if scope is None:
-        legacy_trade = db.get(Trade, trade_id)
-        if legacy_trade is None:
-            raise LookupError("trade lifecycle was not found")
-        scope = RequestScope(
-            workspace_id=legacy_trade.workspace_id,
-            account_id=legacy_trade.account_id,
-        )
     validate_scope(db, scope)
     trade = db.scalar(
         select(Trade).where(
@@ -102,7 +94,7 @@ def _require_matching_idempotent_intent(
 def propose_order_intent(
     db: Session,
     *,
-    scope: RequestScope | None = None,
+    scope: RequestScope,
     action: str,
     side: str,
     order_type: str,
@@ -119,20 +111,6 @@ def propose_order_intent(
     time_in_force: str | None = None,
     expires_at: datetime | None = None,
 ) -> OrderIntent:
-    if scope is None:
-        related = (
-            db.get(Trade, trade_id)
-            if trade_id is not None
-            else db.get(TradePlan, trade_plan_id)
-            if trade_plan_id is not None
-            else None
-        )
-        if related is None:
-            raise ValueError("legacy order intent requires a trade or trade plan")
-        scope = RequestScope(
-            workspace_id=related.workspace_id,
-            account_id=related.account_id,
-        )
     validate_scope(db, scope)
     if expires_at is not None and (
         expires_at.tzinfo is None or expires_at.utcoffset() is None
@@ -228,7 +206,7 @@ def decide_order_intent(
     db: Session,
     intent_id: uuid.UUID,
     *,
-    scope: RequestScope | None = None,
+    scope: RequestScope,
     decision: str,
     decided_by: str,
     channel: str,
@@ -236,14 +214,6 @@ def decide_order_intent(
     note: str | None = None,
     now: datetime | None = None,
 ) -> OrderApproval:
-    if scope is None:
-        legacy_intent = db.get(OrderIntent, intent_id)
-        if legacy_intent is None:
-            raise LookupError("order intent was not found")
-        scope = RequestScope(
-            workspace_id=legacy_intent.workspace_id,
-            account_id=legacy_intent.account_id,
-        )
     validate_scope(db, scope)
     intent = db.scalar(
         select(OrderIntent)

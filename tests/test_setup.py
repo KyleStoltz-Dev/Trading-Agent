@@ -45,6 +45,28 @@ def test_setup_refuses_to_write_secret_settings(tmp_path: Path) -> None:
         update_env_file(tmp_path / ".env", {"OPENAI_API_KEY": "secret"})
 
 
+def test_setup_writes_runtime_scope_and_risk_without_touching_secrets(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPENAI_API_KEY=keep-this-value\n", encoding="utf-8")
+
+    update_env_file(
+        env_file,
+        {
+            "TRADING_WORKSPACE": "trading",
+            "TRADING_ACCOUNT": "00000000-0000-4000-8000-000000000123",
+            "MAXIMUM_TRADE_RISK_PERCENT": "0.5",
+        },
+    )
+
+    content = env_file.read_text(encoding="utf-8")
+    assert "OPENAI_API_KEY=keep-this-value" in content
+    assert "TRADING_WORKSPACE=trading" in content
+    assert "TRADING_ACCOUNT=00000000-0000-4000-8000-000000000123" in content
+    assert "MAXIMUM_TRADE_RISK_PERCENT=0.5" in content
+
+
 def test_setup_rejects_environment_injection(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="control characters"):
         update_env_file(

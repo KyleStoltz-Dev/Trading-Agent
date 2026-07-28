@@ -2,6 +2,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from app.market_data.contracts import Candle
 from app.services.market_features import (
@@ -9,8 +10,10 @@ from app.services.market_features import (
     measure_candle_features,
     strategy_experiment_report,
 )
+from app.services.workspaces import RequestScope
 
 NOW = datetime(2026, 7, 25, 12, 0, tzinfo=UTC)
+TEST_SCOPE = RequestScope(workspace_id=uuid.uuid4(), account_id=uuid.uuid4())
 
 
 def candle(
@@ -62,7 +65,9 @@ class SampleSession:
         return self.samples
 
 
-def test_feature_correlations_require_a_sample_and_do_not_claim_causation() -> None:
+def test_feature_correlations_require_a_sample_and_do_not_claim_causation(
+    monkeypatch,
+) -> None:
     samples = [
         SimpleNamespace(
             outcome_r=Decimal(str(index)),
@@ -71,9 +76,14 @@ def test_feature_correlations_require_a_sample_and_do_not_claim_causation() -> N
         for index in range(1, 11)
     ]
 
+    monkeypatch.setattr(
+        "app.services.market_features.validate_scope",
+        lambda *args, **kwargs: None,
+    )
     result = experiment_feature_correlations(
         SampleSession(samples),
         "experiment",
+        scope=TEST_SCOPE,
         minimum_samples=10,
     )
 
@@ -93,7 +103,7 @@ class ExperimentSession(SampleSession):
         return self.experiment
 
 
-def test_experiment_report_enforces_strategy_isolation() -> None:
+def test_experiment_report_enforces_strategy_isolation(monkeypatch) -> None:
     active_version = uuid.uuid4()
     experiment_id = uuid.uuid4()
     experiment = SimpleNamespace(
@@ -108,14 +118,24 @@ def test_experiment_report_enforces_strategy_isolation() -> None:
         rules_hash="a" * 64,
     )
     db = ExperimentSession(experiment, [])
+    resolver = Mock(side_effect=PermissionError("different strategy version"))
+    monkeypatch.setattr(
+        "app.services.market_features.resolve_strategy_experiment",
+        resolver,
+    )
 
     try:
-            strategy_experiment_report(
-                db,
-                experiment_id,
+        strategy_experiment_report(
+            db,
+            experiment_id,
+            scope=TEST_SCOPE,
             active_playbook_version_id=active_version,
         )
     except PermissionError as exc:
         assert "different strategy version" in str(exc)
     else:
         raise AssertionError("cross-strategy experiment access must fail closed")
+    assert resolver.call_args.kwargs == {
+        "scope": TEST_SCOPE,
+        "playbook_version_id": active_version,
+    }
