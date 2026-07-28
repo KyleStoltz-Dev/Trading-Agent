@@ -469,8 +469,8 @@ class MindsetCheckInRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
-    workspace_id: uuid.UUID | None = None
-    account_id: uuid.UUID | None = None
+    workspace_id: uuid.UUID
+    account_id: uuid.UUID
     playbook_version_id: uuid.UUID | None
     trade_plan_id: uuid.UUID | None
     trade_reference: str | None
@@ -478,7 +478,7 @@ class MindsetCheckInRead(BaseModel):
     readiness: int
     accepted_risk: bool
     emotion_tags: list[str]
-    emotional_state: str | None = None
+    emotional_state: str | None
     note: str | None
     created_at: datetime
 

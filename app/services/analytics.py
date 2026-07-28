@@ -7,6 +7,10 @@ from sqlalchemy.orm import Session
 
 from app.models import TradePlan, TradeReflection
 from app.schemas import EdgeReport, EdgeSegment
+from app.services.workspaces import (
+    RequestScope,
+    validate_strategy_scope,
+)
 
 
 def _average(values: list[Decimal]) -> Decimal | None:
@@ -31,12 +35,26 @@ def _news_bucket(minutes: int | None) -> str:
 
 def build_edge_report(
     db: Session,
+    *,
+    scope: RequestScope,
     minimum_sample: int = 30,
     playbook_version_id: uuid.UUID | None = None,
 ) -> EdgeReport:
+    validate_strategy_scope(db, scope, playbook_version_id)
     statement = (
         select(TradePlan, TradeReflection)
-        .join(TradeReflection, TradeReflection.trade_id == TradePlan.id)
+        .join(
+            TradeReflection,
+            (TradeReflection.workspace_id == TradePlan.workspace_id)
+            & (TradeReflection.account_id == TradePlan.account_id)
+            & (TradeReflection.trade_id == TradePlan.id),
+        )
+        .where(
+            TradePlan.workspace_id == scope.workspace_id,
+            TradePlan.account_id == scope.account_id,
+            TradeReflection.workspace_id == scope.workspace_id,
+            TradeReflection.account_id == scope.account_id,
+        )
         .order_by(TradePlan.created_at)
     )
     if playbook_version_id is not None:

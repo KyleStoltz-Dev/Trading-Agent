@@ -8,6 +8,8 @@ from app.costs import TokenUsage
 from app.providers.base import (
     ProviderConfigurationError,
     ToolExecutor,
+    limit_provider_capacity,
+    provider_capacity_limiter,
     record_analysis_usage,
     safe_tool_error,
     track_completion_usage,
@@ -33,6 +35,13 @@ class OpenAIProvider:
         self.model = settings.openai_model
         self.last_usage = TokenUsage()
         self.safety_identifier = settings.openai_safety_identifier
+        self._capacity_limiter = provider_capacity_limiter(
+            self.name,
+            settings.model_max_concurrent_requests,
+        )
+        self._capacity_queue_timeout_seconds = (
+            settings.model_request_queue_timeout_seconds
+        )
         if client is None:
             try:
                 openai = importlib.import_module("openai")
@@ -44,6 +53,7 @@ class OpenAIProvider:
         self.client = client
 
     @track_completion_usage
+    @limit_provider_capacity
     def complete(
         self,
         *,
@@ -55,6 +65,7 @@ class OpenAIProvider:
         max_tool_rounds: int,
         model: str | None = None,
         reasoning_effort: str = "medium",
+        max_output_tokens: int = 900,
     ) -> str:
         input_items: list[Any] = [*history, {"role": "user", "content": message}]
         for _ in range(max_tool_rounds):
@@ -64,6 +75,7 @@ class OpenAIProvider:
                 input=input_items,
                 tools=tools,
                 reasoning={"effort": reasoning_effort, "context": "current_turn"},
+                max_output_tokens=max_output_tokens,
                 safety_identifier=self.safety_identifier,
                 store=False,
             )
@@ -92,6 +104,7 @@ class OpenAIProvider:
                 )
         raise RuntimeError("agent exceeded the maximum tool-call rounds")
 
+    @limit_provider_capacity
     def analyze_chart(
         self,
         *,

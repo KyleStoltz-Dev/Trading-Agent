@@ -6,7 +6,6 @@ from datetime import UTC, datetime
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from app.db import LEGACY_WORKSPACE_ID
 from app.models import (
     BrokerConnection,
     Instrument,
@@ -186,7 +185,7 @@ def active_instrument_specification(
 def configure_account(
     db: Session,
     *,
-    workspace_id: uuid.UUID | None = None,
+    workspace_id: uuid.UUID,
     broker: str,
     external_account_id: str,
     label: str,
@@ -198,7 +197,6 @@ def configure_account(
     make_default: bool = False,
     commit: bool = True,
 ) -> tuple[TradingAccount, BrokerConnection]:
-    workspace_id = workspace_id or uuid.UUID(LEGACY_WORKSPACE_ID)
     account = db.scalar(
         select(TradingAccount).where(
             TradingAccount.workspace_id == workspace_id,
@@ -266,7 +264,7 @@ def configure_account(
 def create_playbook_version(
     db: Session,
     *,
-    workspace_id: uuid.UUID | None = None,
+    workspace_id: uuid.UUID,
     name: str,
     definition: dict,
     description: str = "",
@@ -274,7 +272,6 @@ def create_playbook_version(
     sample_requirement: int | None = None,
     created_by: str = "human",
 ) -> PlaybookVersion:
-    workspace_id = workspace_id or uuid.UUID(LEGACY_WORKSPACE_ID)
     serialized = json.dumps(definition, sort_keys=True, separators=(",", ":"))
     content_hash = hashlib.sha256(serialized.encode()).hexdigest()
     playbook = db.scalar(

@@ -36,8 +36,13 @@ SAFE_SETUP_KEYS = frozenset(
         "LOCAL_SERVICE_AUTOSTART",
         "POSTGRES_SERVICE_NAME",
         "DATABASE_MODE",
+        "TRADING_WORKSPACE",
+        "TRADING_ACCOUNT",
+        "MAXIMUM_TRADE_RISK_PERCENT",
         "BROKER_PROVIDER",
+        "METATRADER_PLATFORM",
         "NEWS_PROVIDER",
+        "TRADINGVIEW_WEBHOOK_ENABLED",
     }
 )
 
@@ -77,6 +82,37 @@ def update_env_file(path: Path, values: dict[str, str]) -> None:
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write("\n".join(output).rstrip() + "\n")
+        temporary.chmod(0o600)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    path.chmod(0o600)
+
+
+def snapshot_env_file(path: Path) -> bytes | None:
+    """Capture a private env file so a coordinated database write can be undone."""
+    if path.is_symlink():
+        raise ValueError("setup refuses to read or replace a symlinked environment file")
+    return path.read_bytes() if path.exists() else None
+
+
+def restore_env_file(path: Path, snapshot: bytes | None) -> None:
+    """Restore an env snapshot atomically after a related database failure."""
+    if path.is_symlink():
+        raise ValueError("setup refuses to read or replace a symlinked environment file")
+    if snapshot is None:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".restore",
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(snapshot)
         temporary.chmod(0o600)
         temporary.replace(path)
     finally:

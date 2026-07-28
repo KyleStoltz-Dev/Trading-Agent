@@ -5,7 +5,6 @@ from datetime import UTC, date, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db import LEGACY_UNASSIGNED_ACCOUNT_ID, LEGACY_WORKSPACE_ID
 from app.models import ConversationSession, ConversationTurn
 from app.services.workspaces import (
     RequestScope,
@@ -14,13 +13,6 @@ from app.services.workspaces import (
 )
 
 SESSION_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-
-
-def _legacy_scope(scope: RequestScope | None) -> RequestScope:
-    return scope or RequestScope(
-        workspace_id=uuid.UUID(LEGACY_WORKSPACE_ID),
-        account_id=uuid.UUID(LEGACY_UNASSIGNED_ACCOUNT_ID),
-    )
 
 
 def normalize_session_name(value: str) -> str:
@@ -36,9 +28,8 @@ def get_conversation_by_name(
     db: Session,
     name: str,
     *,
-    scope: RequestScope | None = None,
+    scope: RequestScope,
 ) -> ConversationSession | None:
-    scope = _legacy_scope(scope)
     validate_scope(db, scope)
     return _get_conversation_by_name(db, name, scope=scope)
 
@@ -62,9 +53,8 @@ def resolve_conversation(
     db: Session,
     reference: str,
     *,
-    scope: RequestScope | None = None,
+    scope: RequestScope,
 ) -> ConversationSession | None:
-    scope = _legacy_scope(scope)
     try:
         return get_conversation(db, uuid.UUID(reference), scope=scope)
     except ValueError:
@@ -86,9 +76,8 @@ def create_conversation(
     name: str | None = None,
     title: str = "Trading Agent session",
     *,
-    scope: RequestScope | None = None,
+    scope: RequestScope,
 ) -> ConversationSession:
-    scope = _legacy_scope(scope)
     validate_scope(db, scope)
     session_name = (
         normalize_session_name(name)
@@ -113,9 +102,8 @@ def get_conversation(
     db: Session,
     session_id: uuid.UUID,
     *,
-    scope: RequestScope | None = None,
+    scope: RequestScope,
 ) -> ConversationSession | None:
-    scope = _legacy_scope(scope)
     validate_scope(db, scope)
     return db.scalar(
         select(ConversationSession).where(
@@ -130,9 +118,8 @@ def list_conversations(
     db: Session,
     limit: int = 20,
     *,
-    scope: RequestScope | None = None,
+    scope: RequestScope,
 ) -> list[ConversationSession]:
-    scope = _legacy_scope(scope)
     validate_scope(db, scope)
     return list(
         db.scalars(
@@ -150,9 +137,8 @@ def list_conversations(
 def latest_conversation(
     db: Session,
     *,
-    scope: RequestScope | None = None,
+    scope: RequestScope,
 ) -> ConversationSession | None:
-    scope = _legacy_scope(scope)
     validate_scope(db, scope)
     return db.scalar(
         select(ConversationSession)
@@ -171,13 +157,12 @@ def add_turn(
     role: str,
     content: str,
     *,
-    scope: RequestScope | None = None,
+    scope: RequestScope,
     playbook_version_id: uuid.UUID | None,
     request_id: uuid.UUID | None = None,
     status: str = "complete",
     error_type: str | None = None,
 ) -> ConversationTurn:
-    scope = _legacy_scope(scope)
     if status not in {"pending", "complete", "partial", "failed"}:
         raise ValueError("invalid conversation turn status")
     if error_type is not None and status not in {"partial", "failed"}:
@@ -207,12 +192,11 @@ def update_turn_outcome(
     db: Session,
     turn: ConversationTurn,
     *,
-    scope: RequestScope | None = None,
+    scope: RequestScope,
     status: str,
     error_type: str | None = None,
 ) -> ConversationTurn:
     """Finalize one persisted request turn without rewriting its original content."""
-    scope = _legacy_scope(scope)
     if status not in {"complete", "partial", "failed"}:
         raise ValueError("turn outcome must be complete, partial, or failed")
     if error_type is not None and status == "complete":
@@ -230,11 +214,10 @@ def conversation_history(
     db: Session,
     conversation: ConversationSession,
     *,
-    scope: RequestScope | None = None,
+    scope: RequestScope,
     playbook_version_id: uuid.UUID | None,
     limit: int = 20,
 ) -> list[dict[str, str]]:
-    scope = _legacy_scope(scope)
     validate_strategy_scope(db, scope, playbook_version_id)
     _validate_conversation_scope(conversation, scope)
     strategy_scope = (
@@ -264,11 +247,10 @@ def conversation_transcript(
     db: Session,
     conversation: ConversationSession,
     *,
-    scope: RequestScope | None = None,
+    scope: RequestScope,
     limit: int = 100,
 ) -> list[dict[str, str]]:
     """Return the complete audit transcript without using it as model context."""
-    scope = _legacy_scope(scope)
     validate_scope(db, scope)
     _validate_conversation_scope(conversation, scope)
     recent = list(

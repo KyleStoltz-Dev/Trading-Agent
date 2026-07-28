@@ -6,7 +6,6 @@ from decimal import Decimal
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
-from app.db import LEGACY_UNASSIGNED_ACCOUNT_ID, LEGACY_WORKSPACE_ID
 from app.models import (
     EconomicEvent,
     Observation,
@@ -39,13 +38,6 @@ class ReflectionExistsError(ValueError):
     pass
 
 
-def _legacy_scope(scope: RequestScope | None) -> RequestScope:
-    return scope or RequestScope(
-        workspace_id=uuid.UUID(LEGACY_WORKSPACE_ID),
-        account_id=uuid.UUID(LEGACY_UNASSIGNED_ACCOUNT_ID),
-    )
-
-
 def _reference_part(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
 
@@ -63,10 +55,8 @@ def next_trade_reference(
     db: Session,
     request: TradePlanCreate,
     *,
-    scope: RequestScope | None = None,
+    scope: RequestScope,
 ) -> str:
-    explicit_scope = scope is not None
-    scope = _legacy_scope(scope)
     validate_scope(db, scope)
     occurred_at = request.market_time or datetime.now(UTC)
     prefix = "-".join(
@@ -79,11 +69,7 @@ def next_trade_reference(
     )
     # The transaction-scoped PostgreSQL advisory lock serializes allocation within
     # one account/reference prefix without blocking unrelated accounts or sessions.
-    lock_scope = (
-        f"{scope.workspace_id}:{scope.account_id}:{prefix}"
-        if explicit_scope
-        else prefix
-    )
+    lock_scope = f"{scope.workspace_id}:{scope.account_id}:{prefix}"
     db.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:prefix, 0))"),
         {"prefix": lock_scope},
@@ -107,14 +93,13 @@ def create_trade_plan(
     db: Session,
     request: TradePlanCreate,
     *,
-    scope: RequestScope | None = None,
+    scope: RequestScope,
     policy_hash: str | None = None,
     source: str = "manual",
     maximum_risk_percent: Decimal = Decimal("1"),
     playbook_version_id: uuid.UUID | None = None,
     commit: bool = True,
 ) -> TradePlan:
-    scope = _legacy_scope(scope)
     validate_scope(db, scope)
     playbook_version = None
     minimum_planned_r = None
@@ -285,10 +270,9 @@ def list_trade_plans(
     db: Session,
     limit: int | None = None,
     *,
-    scope: RequestScope | None = None,
+    scope: RequestScope,
     playbook_version_id: uuid.UUID | None = None,
 ) -> list[TradePlan]:
-    scope = _legacy_scope(scope)
     validate_strategy_scope(db, scope, playbook_version_id)
     statement = (
         select(TradePlan)
@@ -311,10 +295,9 @@ def get_trade_plan(
     db: Session,
     trade_reference: str | uuid.UUID,
     *,
-    scope: RequestScope | None = None,
+    scope: RequestScope,
     playbook_version_id: uuid.UUID | None = None,
 ) -> TradePlan:
-    scope = _legacy_scope(scope)
     validate_strategy_scope(db, scope, playbook_version_id)
     try:
         trade_id = (
@@ -351,10 +334,9 @@ def create_reflection(
     trade_id: str | uuid.UUID,
     request: ReflectionCreate,
     *,
-    scope: RequestScope | None = None,
+    scope: RequestScope,
     playbook_version_id: uuid.UUID | None = None,
 ) -> TradeReflection:
-    scope = _legacy_scope(scope)
     trade = get_trade_plan(
         db,
         trade_id,

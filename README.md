@@ -7,19 +7,24 @@ execution. It does not autonomously place trades.
 ## What works in this MVP
 
 - Migration-backed PostgreSQL plans, executions, snapshots, evidence, and reviews.
-- Provider-neutral, read-only live-data contracts, a working OANDA v20 adapter, and MT5
-  normalization examples.
+- Workspace/account isolation for every decision, conversation, memory, evidence query, test,
+  profile, and broker-ingestion record, with composite database constraints that reject
+  cross-account relationships.
+- Provider-neutral, read-only live-data contracts, a working OANDA v20 adapter, and a
+  secured MT4/MT5 bridge client with an included Windows MT5 companion service.
 - Bounded in-memory quotes/candles; the database does not retain every tick.
 - Broker-contract-aware position sizing including spread, slippage, commission, quantity
   increments, margin, currency conversion, and a configured maximum risk.
 - Context-timeframe and trigger-timeframe separation.
 - Chart screenshot analysis through an optional OpenAI, Anthropic, or local Ollama adapter.
 - Explicit separation of visible facts, hypotheses, missing evidence, and questions.
+- Experience-adjusted guided, flexible, or on-demand education with durable curriculum progress,
+  tiered sources, natural-language questions, and strict separation from execution strategies.
 - Content-addressed chart evidence and provider/model/policy/prompt/input/output provenance.
 - Idempotent fill imports, transaction cursors, account/position snapshots, and reconciliation.
 - Immutable playbook versions, normalized rule evaluations, and sample-aware edge reports.
-- Persistent, trade-linkable mindset check-ins for readiness, risk acceptance, emotion tags,
-  and pre-session, pre-trade, during-trade, or post-trade process notes.
+- Persistent, trade-linkable mindset check-ins for readiness, risk acceptance, normalized
+  emotion tags, exact free-form emotional state (including profanity), and process notes.
 - Trader profiles plus isolated per-strategy knowledge indexes for Discord, Telegram,
   X/Twitter, generic files, directories, and pasted notes.
 - A manual backtest/forward-test evidence ledger with frozen strategy rules, explicit
@@ -61,12 +66,13 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\install-trading-agent.ps1
 ```
 
-Each installer creates an isolated `.venv`, installs the same Python package with pip, and
-starts the guided setup. Setup configures the provider, starts Ollama when selected, and
-downloads the configured local model. It installs `trade` under `~/.local/bin` on macOS/Linux
-and as a command file under `%LOCALAPPDATA%\TradingAgent\bin` on Windows; it never collects
-API keys, broker tokens, or database passwords. The default installer includes both hosted
-model adapters, so choosing OpenAI or Anthropic does not leave a missing SDK.
+Each installer creates an isolated `.venv`, bootstraps the pinned `uv` installer, synchronizes
+the checked-in lock file, and starts the guided setup. Windows also installs the locked MT5
+bridge extra. Setup configures the provider, starts Ollama when selected, and downloads the
+configured local model. It installs `trade` under `~/.local/bin` on macOS/Linux and as a
+command file under `%LOCALAPPDATA%\TradingAgent\bin` on Windows; it never collects API keys,
+broker tokens, or database passwords. The default installer includes both hosted model
+adapters, so choosing OpenAI or Anthropic does not leave a missing SDK.
 The former `install.command`, `install.sh`, and `install.ps1` names remain thin compatibility
 wrappers.
 After that, start the agent from any directory:
@@ -80,6 +86,8 @@ instructions. The longer manual installation remains available:
 
 ```bash
 cp .env.example .env
+# Edit .env and set POSTGRES_PASSWORD to a new random value first.
+chmod 600 .env
 docker compose up -d postgres
 python -m venv .venv
 source .venv/bin/activate
@@ -143,7 +151,9 @@ OLLAMA_UNLOAD_ON_EXIT=true
 ```
 
 Keep only one active `MODEL_PROVIDER` line. Ollama is restricted to the local machine by
-default; using a remote host requires the explicit `OLLAMA_ALLOW_REMOTE=true` opt-in. On a
+default. A remote host requires HTTPS plus the explicit `OLLAMA_ALLOW_REMOTE=true` disclosure
+opt-in. Plain HTTP additionally requires `OLLAMA_ALLOW_INSECURE_REMOTE=true` and should be
+limited to a separately protected private network. On a
 48 GB Apple Silicon Mac, use 9B for economy/routine work and the 24-GB 35B-A3B model for
 balanced/deep analysis when its extra latency is worthwhile:
 
@@ -166,8 +176,62 @@ when chat exits. The startup smoke test validates inference without leaving a mo
 
 `trade setup` can safely change the selected provider later. It rewrites only non-secret
 provider settings, collapses duplicate provider entries, and never reads or writes API keys.
-Configuration is discovered from `TRADING_AGENT_CONFIG`, the editable installation, the
-standard user configuration directory, or the current directory.
+Configuration is loaded from exactly one trusted file: an absolute `TRADING_AGENT_CONFIG`,
+the standard user configuration directory, or the editable installation. A current-directory
+`.env` is never loaded. On POSIX systems, the selected file must be owned by the current user,
+must not be a symlink, and must have mode `0600`.
+
+Setup and onboarding are guided rather than slug-dependent: each choice is numbered and
+explained, human names such as `Trading Economics` are accepted, invalid input is retried with
+feedback, common market/session typos receive suggested corrections, and a review screen is
+shown before anything is saved. Rerunning onboarding does not silently reuse prior answers:
+it identifies the existing PostgreSQL profile and asks whether to load it, defaulting to clean
+examples. Domain spelling suggestions such as `Retext` → `Retest` are offered for the descriptive
+trading-style field and can be declined; they do not create or validate strategy rules. Choosing
+No at the final review opens a numbered field-edit menu and returns to the complete review.
+Discarding the wizard is a separate action with its own confirmation.
+
+Onboarding also asks whether the active trading account is personal, prop, or not configured.
+For a configured account it records a readable account name, starting size, and currency. Prop
+accounts additionally record the firm, program, and evaluation/verification/funded phase. The
+guided rule review accepts known daily-loss, total-loss, profit-target, trading-day,
+consistency, drawdown, news, overnight, weekend, reset-timezone, and custom restrictions.
+Unknown rules stay explicitly unknown rather than being guessed.
+
+At startup, the active account and its most important limits appear in `Recall`. Every guided
+preflight repeats all stored constraints, converts percentage limits to amounts using the
+recorded starting size, and flags important missing rules for verification. The agent can answer
+“What are my active challenge rules?” through a read-only database query. These are reminders:
+without fresh broker equity, daily P&L, and firm-side state, the agent never claims that an
+account is currently compliant.
+
+Every new CLI session and account-owned database operation is scoped to one workspace and
+one trading account. Verify or change it before importing, synchronizing, planning, or
+reviewing:
+
+```bash
+trade account list
+trade account use "MT5 Demo"
+```
+
+`account use` accepts an account label, broker account ID, or internal UUID, requires explicit
+confirmation, and updates the defaults for new sessions. Existing sessions remain tied to the
+account under which they were created; restart `trade` after switching rather than carrying a
+conversation into another account. This keeps personal, prop, practice, scalp, intraday, and
+swing histories from being blended accidentally. `account list` also prints the selected
+account's full internal UUID and TradingView webhook path.
+
+The corresponding non-secret settings are:
+
+```text
+TRADING_WORKSPACE=legacy-local
+TRADING_ACCOUNT=
+```
+
+`TRADING_WORKSPACE` accepts a workspace slug or UUID. `TRADING_ACCOUNT` accepts the selected
+account UUID; when blank, resolution succeeds only when exactly one active account exists or
+exactly one account is marked as the workspace default. Multiple accounts with no explicit
+default fail closed instead of guessing.
 
 The default model remains the fallback for every route. Optionally give each effort profile
 a different model:
@@ -192,12 +256,16 @@ python -c 'import secrets; print(secrets.token_urlsafe(32))'
 Save it as `TRADING_AGENT_API_KEY` in `.env`. The optional API will not start with a key
 shorter than 32 characters.
 
-API journal reads and writes require `X-Strategy-Version` with one immutable strategy-version
-UUID. Before a mutating request, an authenticated client requests a short-lived token from
-`POST /api/confirmations/challenge`, binding it to the exact method, path, and request-body
-SHA-256. Send that token once as `X-Trader-Confirmation`; replay and request substitution are
-rejected. This protects request intent but is not a second identity factor, so keep the API
-on loopback unless separate TLS and network controls are configured.
+Normal API routes require `X-Workspace-ID` and `X-Account-ID`; those UUIDs must identify one
+real relationship. Journal reads and writes also require `X-Strategy-Version` with one
+immutable strategy-version UUID owned by the selected workspace. Before a mutating request,
+an authenticated client requests a short-lived token from
+`POST /api/confirmations/challenge`, binding it to the exact method, path, request-body
+SHA-256, workspace, and account. Send that token once as `X-Trader-Confirmation`; replay,
+request substitution, and reuse under another account are rejected. These selectors are not
+user authentication and PostgreSQL row-level security is not enabled, so keep the API on
+loopback unless separate identity, TLS, network controls, and database authorization have
+been deliberately deployed.
 
 Open:
 
@@ -222,9 +290,22 @@ The agent can calculate risk, inspect the journal, create a confirmed plan or re
 analyze a local chart path, and report system health. Journal mutations always require a
 terminal confirmation. There are no broker execution tools.
 
-Replies render as normal terminal Markdown with one compact status line. Before a model call,
-the CLI shows one concise route/context/cost preview, then displays a thinking/tool-activity
-spinner. The default reply footer shows route, local performance, cost, and source count.
+For a chart already copied as an image, `trade chart --clipboard` avoids saving it manually.
+Clipboard capture accepts only PNG, JPEG, or WebP bytes up to 10 MB and never treats clipboard
+text as a path. Hosted-provider analysis still requires an exact outbound disclosure
+confirmation, and accepted clipboard images use the same content-addressed evidence storage as
+path-based charts.
+
+Replies render through a terminal-safe presentation layer: accidental document code fences are
+unwrapped, wide Markdown tables become stacked fields that wrap on narrow terminals, terminal
+control characters are removed, and actual command/code fences remain intact. During a model
+call, one transient thinking line shows route, model, context, and estimated cost without leaving
+duplicate status lines behind. The compact reply footer shows model, mode, local performance or
+API cost, and source count.
+Hosted-provider output budgets match the displayed estimate (400 economy, 900 balanced, 1,800
+deep tokens). Ollama receives additional hidden-reasoning headroom; if a local model consumes that
+headroom without producing an answer, the same request is retried once with thinking disabled and
+the visible answer cap. This prevents both empty replies and unconstrained terminal floods.
 Full token usage, performance, and audit metadata remain available through `/details`;
 provenance and harness material remain available through `/sources` and `/context`.
 Useful chat commands are:
@@ -235,6 +316,9 @@ Useful chat commands are:
 /details              show the full response audit and performance
 /sources              show references used for the last response
 /context              show selected local harness files
+/memory               show the bounded, source-backed recall for this strategy scope
+/memory use           confirm recall disclosure for the next model request only
+/memory off           cancel a pending recall disclosure
 /mode auto|economy|balanced|deep
 /model                show installed/configured local models
 /model use NAME       override the local model for this session
@@ -246,10 +330,17 @@ Conversation turns are stored in PostgreSQL so a session can be resumed. Strateg
 conversations are tagged with the exact immutable playbook version that was active when each
 turn was created. Only general history or history from the host-selected strategy version is
 eligible for a new prompt; changing from ICT to Wyckoff does not carry ICT turns into the
-Wyckoff context. Relevant journal/tool results are also scoped before they are sent to the
-selected provider. OpenAI requests use `store=false`; Anthropic uses the stateless Messages
-API; local Ollama requests remain on the configured Ollama host. Do not enter broker
-credentials or secrets into the conversation.
+Wyckoff context.
+
+Startup also displays a local recall of saved goals, exact active strategy, prior-session
+metadata, unresolved plans, recent review scores, and structured mindset fields. It does not
+copy raw prior chat, journal notes, or free-form emotional prose. Displaying recall locally does
+not send it to a model. `/memory use` names the current provider and asks for confirmation before
+including that bounded recall in the next request only; `/sources` then identifies every stored
+record used. Relevant journal/tool results are likewise scoped before they are sent to the
+selected provider. OpenAI requests use `store=false`; Anthropic uses the stateless Messages API;
+local Ollama requests remain on the configured Ollama host. Do not enter broker credentials or
+secrets into the conversation.
 
 Every capability also remains available as an individual command:
 
@@ -260,18 +351,25 @@ trading-agent health --model-smoke-test
 trading-agent setup --help
 trading-agent onboard
 trading-agent integrations
+trading-agent integrations --verify-live
 trading-agent risk --help
 trading-agent plan
 trading-agent preflight --help
 trading-agent chart /absolute/path/to/chart.png
+trading-agent chart --clipboard
 trading-agent journal list
 trading-agent review TRADE_ID
+trading-agent account list
+trading-agent account use ACCOUNT
 trading-agent mindset check --help
 trading-agent mindset list
 trading-agent sessions list
+trading-agent data status
+trading-agent data schema
 trading-agent db status
 trading-agent db upgrade
 trading-agent broker configure-oanda --help
+trading-agent broker configure-metatrader --help
 trading-agent broker quote XAU_USD
 trading-agent broker sync --help
 trading-agent instrument configure --help
@@ -298,6 +396,38 @@ matches with short `knowledge-…` references and source previews. It can change
 exact returned item after terminal confirmation. “Remove” quarantines the item from model
 retrieval; it does not delete the source or audit record. The model cannot select a strategy
 UUID, use a wildcard, or change an item outside the session’s active immutable strategy.
+
+`trade data status` gives a grouped row count and latest-record time for trader, strategy,
+journal, broker, market/news/chart, and conversation data. `trade data schema` shows every
+application table and column in plain language. These commands inspect PostgreSQL through the
+application; they do not give the model arbitrary SQL access.
+
+### Define your own trading rules
+
+A strategy is a trader-authored checklist, not a claim that the setup is profitable. You can
+describe a new strategy or a change to the active strategy in normal chat:
+
+```text
+you> Create a strategy named gold-ny-reclaim. Require a declared 4-hour thesis,
+     a sweep and 5-minute reclaim, no high-impact news inside 15 minutes, at
+     least 3R, and no more than 0.5% risk.
+```
+
+The agent converts that description into the supported rule schema and shows the complete
+canonical proposal. Saving is a separate mutating action: the terminal displays the exact
+change and asks for confirmation. Declining creates no database row. Changing an existing
+strategy always appends a new immutable version; it never edits the version used by earlier
+trades or tests, and the new version is not silently activated for the current session.
+
+Rules are isolated to one strategy. Concepts from another framework must be placed in a
+separately named combined strategy with an explicit conflict rule. Imported notes and web
+pages are evidence only and cannot alter a strategy definition, runtime policy, risk ceiling,
+or broker permissions.
+
+The guided preflight asks the trader whether each text rule is met, not met, or unknown.
+That records adherence to the trader’s definition; it is not automated proof that a chart
+condition occurred and is not a win-probability score. See
+[Custom strategies and rules](docs/custom-strategies.md) for the schema and JSON fallback.
 
 Sessions have predictable names. The default new-session name is the date, such as
 `daily-2026-07-23`; duplicates receive `-2`, `-3`, and so on.
@@ -327,12 +457,24 @@ Inside `trade`, explicit near-term requests such as “Should I take this trade?
 launch the same workflow with a default-yes prompt. Declining returns to normal chat without
 creating an assessment. A validation error is contained and also returns to chat.
 
-It requires a named session with one exact active strategy version, then walks through the
-planned entry, stop, target, thesis, invalidation, direct observations, labeled hypotheses,
-the selected setup's requirements and exclusions, deterministic risk sizing, readiness,
-predefined-risk acceptance, emotion tags, and current news/calendar freshness. Add
+If the named session has no exact strategy, the CLI shows saved strategies or walks through
+building, reviewing, saving, and activating a new immutable definition before automatically
+resuming the original preflight. The builder captures the methodology, setup, observable
+requirements, stand-aside rules, risk limits, mindset cautions, cross-strategy exclusions,
+and evidence sample required before calling the setup an edge.
+
+The preflight then walks through the planned entry, stop, target, thesis, invalidation,
+direct observations, labeled hypotheses, the selected setup's requirements and exclusions,
+deterministic risk sizing, readiness, predefined-risk acceptance, emotion tags, and current
+news/calendar freshness. Add
 `--live-market` to include a read-only OANDA quote and measured recent-candle features when
 OANDA is configured.
+
+Before asking those questions, it shows bounded comparable-decision recall from the exact
+account-constraint profile, immutable strategy version, and setup. The recall includes
+prior proceed/stand-aside choices, reviewed R and process scores, repeated blockers, and
+whether the configured evidence sample is sufficient. It does not mix another account or
+strategy, copy free-form journal prose, or convert historical outcomes into a trade signal.
 
 The result is `eligible`, `conditional`, `stand aside`, or `blocked`, with separate strategy,
 risk, mindset, evidence, and news completeness scores. These scores grade adherence to the
@@ -359,13 +501,18 @@ is:
 /develop add a command that compares two playbook versions
 ```
 
-The coding run edits and tests after that one scope confirmation. It does not receive
-`.env`, broker, database, OpenAI API, or Anthropic API credentials, and it cannot push,
-merge, deploy, restart the running process, or add autonomous order execution.
-It runs with isolated ephemeral home/configuration directories outside the repository, copies
-only the Codex authentication needed for the run, deletes that copy afterward, and rejects
-tracked private environment files. A host-side diff scan rejects known broker-order methods
-and write endpoints before the change can reach review or approval.
+The coding run may edit and test inside Codex's workspace sandbox after that scope
+confirmation. The host application never runs generated project code as a validation step.
+The launcher removes known broker, database, and model API credentials from the child
+environment and uses separate ephemeral home/configuration directories. These are
+risk-reduction measures, not confidential isolation: `workspace-write` limits writes but is
+not a filesystem-read or container boundary. Codex and tools it launches may read other
+host-accessible paths, and the staged Codex authentication file may be readable by those
+child tools. Use development mode only on a trusted machine, repository, and request.
+It still cannot push, merge, deploy, restart the running process, or add autonomous order
+execution through the product workflow. A host-side diff scan rejects known broker-order
+methods and write endpoints, credential-shaped additions, sensitive files, binary patches,
+and symlinks before the change can reach review or approval.
 
 Install and sign in to Codex separately, then set the repository path when the agent may be
 started from another directory:
@@ -376,8 +523,14 @@ trading-agent health
 ```
 
 ```text
+APP_ENV=development
+DEVELOPMENT_ENABLED=true
+DEVELOPMENT_ACKNOWLEDGE_HOST_FILESYSTEM_READ_RISK=true
 DEVELOPMENT_REPOSITORY=/absolute/path/to/Trading-Agent
 ```
+
+The acknowledgment is deliberately verbose. Enabling development without it, or enabling it
+outside `APP_ENV=development`, fails closed. Do not set it on shared or production hosts.
 
 Codex CLI can reuse a ChatGPT sign-in for this local coding workflow; trading chat and chart
 analysis still use their separately configured API provider. Results stay on an isolated
@@ -390,11 +543,22 @@ trading-agent develop diff SESSION_ID
 trading-agent develop approve SESSION_ID --yes
 ```
 
-`approve` commits only on the isolated local branch. It never pushes or merges.
+`approve` reruns non-executing security scans and commits only on the isolated local branch.
+It never pushes or merges. Review the complete diff and run executable validation in a
+disposable environment when generated code changes dependencies, build hooks, or tests.
 For a one-confirmation personal workflow, set
 `DEVELOPMENT_APPROVAL_FLOW=scope_only`; validated changes are then committed to the
 isolated branch automatically. The safer default, `scope_and_diff`, waits for the explicit
 `develop approve` command.
+
+For a stronger host-filesystem boundary, use the repository's
+[secure development container](docs/secure-development.md) from an independent no-hardlink
+clone. It follows OpenAI's secure Dev Container pattern, installs from locked dependencies,
+and routes model calls through a fixed-upstream Responses API proxy that keeps the key out of
+Codex-launched subprocesses while denying direct workspace egress. Its outer sandbox is
+deliberately relaxed to support Codex's inner
+Bubblewrap sandbox, so it still requires a trusted repository, patched Docker runtime, and a
+dedicated, tightly budgeted credential.
 
 ## Runtime policy and hooks
 
@@ -480,11 +644,13 @@ query.
 
 ## Model cost display
 
-`/cost` shows configured economy, balanced, and deep models. The CLI estimates the first
-response before sending it and reports provider-supplied usage after all model/tool rounds.
+`/cost` shows configured economy, balanced, and deep models. Before sending a request, the CLI
+shows a planning range from one model pass through the policy-bounded tool-call rounds,
+including growing conversation/tool-result context. It reports provider-supplied usage after
+all completed rounds.
 The built-in price table uses the official
 [OpenAI model comparison](https://developers.openai.com/api/docs/models/compare) and
-[Claude Sonnet 5 announcement](https://www.anthropic.com/news/claude-sonnet-5), and currently
+[Claude pricing documentation](https://platform.claude.com/docs/en/about-claude/pricing), and currently
 covers GPT-5.6 Sol, Terra, Luna, and Claude Sonnet 5. Unknown models display
 `pricing unavailable` rather than guessing.
 Provider billing remains authoritative; Brave Search billing, hardware, and electricity are
@@ -511,9 +677,42 @@ version. `knowledge exclude` quarantines a suspect item from retrieval without d
 audit record; `knowledge restore` returns it only to that same strategy version. This keeps
 the journal useful without turning PostgreSQL into a tick database.
 
-OANDA is currently the only complete live connector. It is read-only by construction. On a
-new connection, `broker sync` starts at the current transaction cursor unless you explicitly
-request a one-time historical start with `--from-transaction-id`.
+All account-owned rows and service queries carry the current `(workspace_id, account_id)`.
+Workspace-owned immutable strategies may be reused deliberately, but profiles, constraints,
+conversations, preflight decisions, experiments, plans, executions, alerts, evidence,
+mindset, and recall remain account-specific. Composite foreign keys reject cross-scope
+attachments even if application code passes the wrong related UUID.
+
+OANDA and the MetaTrader bridge are read-only by construction. On a new connection,
+`broker sync` starts at the current event cursor unless you explicitly request a one-time
+historical start with `--from-cursor`. The included MetaTrader companion supports an official
+Windows MT5 terminal; MT4 uses the documented contract and still needs its terminal-side
+bridge.
+
+Broker tokens are account-specific. The local default stores each token in the operating
+system credential vault and keeps only an opaque `keyring:` reference in PostgreSQL:
+
+```bash
+trade broker credential-rotate --provider oanda-v20
+trade broker credential-remove --provider oanda-v20
+```
+
+The token prompt does not echo and the token is never accepted as a command-line argument.
+`BROKER_SECRET_BACKEND=legacy-env` is an explicit local-only migration mode for older
+single-account installs. Hosted mode requires an injected external secret backend.
+
+Every broker sync reports its cursor before/after, whether another page is available, and
+whether ledger coverage is baseline, incremental, or complete. Baseline and incremental
+history still store snapshots but never claim that imported fills fully explain an
+already-open position. Same-ID/same-content events are idempotent; same-ID/changed-content
+events hold the cursor and degrade the connection for review.
+
+`trade integrations` reports four different states instead of calling every coded adapter
+"ready": whether code is implemented, whether settings are complete, whether a real
+connection has been tested, and whether authenticated provider evidence has ever been
+accepted. `trade integrations --verify-live` performs bounded read-only account, news, and
+search checks after warning about API quota. It does not persist the returned data. An
+inbound TradingView webhook can be verified only by a real authenticated test delivery.
 
 ### Database schema upgrades
 
@@ -531,12 +730,20 @@ The upgrade applies only pending structural changes and preserves existing journ
 Changing from local PostgreSQL to Neon is a separate, explicit configuration and data-transfer
 decision.
 
-Load the measurable starting strategy as an immutable version:
+The multi-account isolation upgrade creates a deterministic `legacy-local` workspace,
+preserves known account ownership, assigns only truly unscoped legacy data to an inactive
+`Legacy / unassigned` account, validates existing relationships, and then makes scope
+mandatory. It leaves no workspace/account server defaults on new rows. Back up first: the
+account-isolation revision intentionally cannot downgrade automatically because merging
+account-specific profiles, decisions, and evidence would lose ownership information.
+
+Load the measurable starting strategy as an immutable, isolated version:
 
 ```bash
-trading-agent playbook version \
+trading-agent strategy create \
   --name wyckoff-smc-fractal \
   --file docs/playbook-schema-v1.json \
+  --description "Context plus lower-timeframe confirmation research strategy" \
   --hypothesis "Context plus lower-timeframe confirmation improves expectancy" \
   --minimum-sample 30
 ```
@@ -549,8 +756,8 @@ Create a Neon project and replace `DATABASE_URL` in `.env` with its SQLAlchemy p
 postgresql+psycopg://USER:PASSWORD@HOST/DATABASE?sslmode=require
 ```
 
-Never commit `.env`. Use a restricted development database until authentication and
-per-user data isolation exist.
+Remote database URLs without encrypted transport are rejected. Prefer `sslmode=verify-full`
+when the provider supports certificate and hostname verification. Never commit `.env`.
 
 ## Tests
 
@@ -559,29 +766,46 @@ ruff check .
 pytest
 ```
 
+Release candidates additionally require cross-platform clean-install checks, a real PostgreSQL
+migration/backup/temporary-restore drill, byte-reproducible wheel and source archives, SBOM and
+checksum/provenance generation, archive contamination checks, and an installed-wheel smoke test.
+See [`docs/release.md`](docs/release.md) for the release checklist and non-destructive rollback
+procedure. No workflow currently tags or publishes a release.
+
 ## Implemented boundaries
 
 Implemented now:
 
 - PostgreSQL journaling, strategy-scoped conversations and knowledge, mindset check-ins,
   an auditable guided pre-trade assessment, deterministic risk sizing, screenshot analysis,
-  OANDA read-only market/account data, Trading Economics calendar metadata, and tiered cited
+  OANDA or bridged MT4/MT5 read-only market/account data, Trading Economics calendar
+  metadata, account-scoped verified replay-safe TradingView alert evidence, and tiered cited
   research.
+- Application-, foreign-key-, and PostgreSQL-RLS workspace/account isolation. Hosted API
+  access uses exact principal grants and starts only with a dedicated least-privilege runtime
+  database role plus an external secret backend. Principal bootstrap metadata is outside RLS
+  and must be SELECT-only to that runtime role; see `docs/security.md`.
 - Frozen manual experiment records for backtest and forward-test observations. These records
   calculate reports from entered samples; they are not an automated historical replay engine
   or paper-trading monitor.
 
 Adapter-only or planned:
 
-- MT5 currently provides normalization examples, not a live terminal or Expert Advisor
-  bridge. cTrader, Interactive Brokers, and Finnhub are planned integrations.
+- The MT5 companion bridge is implemented for a Windows-hosted official terminal. MT4 uses
+  the same documented read-only HTTP contract but still needs a terminal-side EA/bridge
+  implementation. cTrader, Interactive Brokers, and Finnhub are planned integrations.
 - Bulk attachment downloading, OCR, video/PDF ingestion, automatic screenshot captioning,
-  background desktop notifications, and hosted multi-user isolation are not implemented.
+  background desktop notifications, and hosted TradingView delivery are not implemented.
 - There is no broker order endpoint and no autonomous execution. Any future order workflow
   must be separately reviewed, previewed, explicitly confirmed by the trader, constrained by
   deterministic risk limits, and recorded in an audit log.
 
 See [the data model](docs/data-model.md), [the starting playbook](docs/playbook-v0.md),
 [the knowledge, strategy, and testing guide](docs/knowledge-strategies-testing.md), and
+[the learning guide](docs/learning.md), [the research landscape](docs/research/trading-agent-landscape-2026-07.md),
+[the product roadmap](docs/roadmap.md), [the future autonomous-execution boundary](docs/autonomous-execution-boundary.md),
+the [data-ingestion guide](docs/data-ingestion.md), the
+[MetaTrader bridge guide](docs/metatrader-bridge.md), and
+[TradingView webhook guide](docs/tradingview-webhooks.md), plus
 [architecture notes](docs/architecture.md). Before connecting accounts, read
 [operations](docs/operations.md) and the [security model](docs/security.md).

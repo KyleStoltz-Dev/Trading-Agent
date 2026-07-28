@@ -1,8 +1,10 @@
+import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from app.services.journal import next_trade_reference
+from app.services.workspaces import RequestScope
 
 
 def test_trade_reference_allocation_takes_database_lock_and_uses_max_suffix() -> None:
@@ -18,10 +20,19 @@ def test_trade_reference_allocation_takes_database_lock_and_uses_max_suffix() ->
         direction="long",
     )
 
-    reference = next_trade_reference(db, request)
+    scope = RequestScope(
+        workspace_id=uuid.uuid4(),
+        account_id=uuid.uuid4(),
+    )
+    reference = next_trade_reference(db, request, scope=scope)
 
     assert reference == "xauusd-20260725-ny-long-4"
     statement = str(db.execute.call_args.args[0])
     assert "pg_advisory_xact_lock" in statement
-    assert db.execute.call_args.args[1] == {"prefix": "xauusd-20260725-ny-long"}
+    assert db.execute.call_args.args[1] == {
+        "prefix": (
+            f"{scope.workspace_id}:{scope.account_id}:"
+            "xauusd-20260725-ny-long"
+        )
+    }
     db.scalars.assert_called_once()

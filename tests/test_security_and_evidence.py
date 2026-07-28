@@ -17,6 +17,7 @@ from app.config import Settings
 from app.models import AnalysisRun, EvidenceItem, Observation
 from app.schemas import ChartAnalysis, PlaybookCheck
 from app.services.evidence import record_chart_analysis, store_evidence_file
+from app.services.workspaces import RequestScope
 
 
 def _request(
@@ -55,7 +56,7 @@ def _request(
 
 def test_api_authentication_fail_closed(monkeypatch) -> None:
     settings = Settings(
-        database_url="postgresql+psycopg://ignored",
+        database_url="postgresql+psycopg://ignored@localhost/ignored",
         trading_agent_api_key="x" * 32,
         openai_api_key=None,
         anthropic_api_key=None,
@@ -73,25 +74,32 @@ def test_api_authentication_fail_closed(monkeypatch) -> None:
     main_module.require_api_key("x" * 32)
 
 
-def test_mutation_confirmation_is_one_time_and_request_bound() -> None:
+def test_mutation_confirmation_is_one_time_and_request_bound(request_scope) -> None:
     body = b'{"instrument":"XAUUSD"}'
     store = main_module.ConfirmationStore(ttl_seconds=60)
     token = store.issue(
         method="POST",
         path="/api/trades",
         body_sha256=hashlib.sha256(body).hexdigest(),
+        scope=request_scope,
     )
     request = _request(body, store)
 
-    asyncio.run(main_module.require_trader_confirmation(request, token))
+    asyncio.run(
+        main_module.require_trader_confirmation(request, request_scope, token)
+    )
 
     with pytest.raises(HTTPException) as replay:
-        asyncio.run(main_module.require_trader_confirmation(request, token))
+        asyncio.run(
+            main_module.require_trader_confirmation(request, request_scope, token)
+        )
     assert replay.value.status_code == 428
     assert "already used" in replay.value.detail
 
 
-def test_confirmation_token_is_random_bounded_and_atomically_consumed() -> None:
+def test_confirmation_token_is_random_bounded_and_atomically_consumed(
+    request_scope,
+) -> None:
     body_hash = hashlib.sha256(b"{}").hexdigest()
     store = main_module.ConfirmationStore(ttl_seconds=60)
     tokens = {
@@ -99,6 +107,7 @@ def test_confirmation_token_is_random_bounded_and_atomically_consumed() -> None:
             method="POST",
             path="/api/trades",
             body_sha256=body_hash,
+            scope=request_scope,
         )
         for _ in range(32)
     }
@@ -114,6 +123,7 @@ def test_confirmation_token_is_random_bounded_and_atomically_consumed() -> None:
                     method="POST",
                     path="/api/trades",
                     body_sha256=body_hash,
+                    scope=request_scope,
                 ),
                 range(32),
             )
@@ -124,30 +134,70 @@ def test_confirmation_token_is_random_bounded_and_atomically_consumed() -> None:
         method="POST",
         path="/api/trades",
         body_sha256=body_hash,
+        scope=request_scope,
     ) is False
+
+
+def test_confirmation_token_cannot_cross_account_boundary(request_scope) -> None:
+    body_hash = hashlib.sha256(b"{}").hexdigest()
+    other_scope = RequestScope(
+        workspace_id=request_scope.workspace_id,
+        account_id=main_module.uuid.uuid4(),
+    )
+    store = main_module.ConfirmationStore(ttl_seconds=60)
+    token = store.issue(
+        method="POST",
+        path="/api/trades",
+        body_sha256=body_hash,
+        scope=request_scope,
+    )
+
+    assert (
+        store.consume(
+            token,
+            method="POST",
+            path="/api/trades",
+            body_sha256=body_hash,
+            scope=other_scope,
+        )
+        is False
+    )
 
 
 def test_authenticated_client_can_issue_short_lived_bound_challenge(
     monkeypatch,
+    db_session,
+    request_scope,
 ) -> None:
     settings = Settings(
-        database_url="postgresql+psycopg://ignored",
+        database_url="postgresql+psycopg://ignored@localhost/ignored",
         database_auto_migrate=False,
         trading_agent_api_key="x" * 32,
     )
     monkeypatch.setattr(main_module, "get_settings", lambda: settings)
     body_sha256 = hashlib.sha256(b"{}").hexdigest()
 
-    with TestClient(main_module.app) as client:
-        response = client.post(
-            "/api/confirmations/challenge",
-            headers={"X-API-Key": "x" * 32},
-            json={
-                "method": "POST",
-                "path": "/api/trades",
-                "body_sha256": body_sha256,
-            },
-        )
+    def database_override():
+        yield db_session
+
+    main_module.app.dependency_overrides[main_module.get_db] = database_override
+    try:
+        with TestClient(main_module.app) as client:
+            response = client.post(
+                "/api/confirmations/challenge",
+                headers={
+                    "X-API-Key": "x" * 32,
+                    "X-Workspace-ID": str(request_scope.workspace_id),
+                    "X-Account-ID": str(request_scope.account_id),
+                },
+                json={
+                    "method": "POST",
+                    "path": "/api/trades",
+                    "body_sha256": body_sha256,
+                },
+            )
+    finally:
+        main_module.app.dependency_overrides.clear()
 
     assert response.status_code == 200
     payload = response.json()
@@ -156,11 +206,57 @@ def test_authenticated_client_can_issue_short_lived_bound_challenge(
     assert payload["token"] != "confirmed"
 
 
+def test_authenticated_api_requests_are_rate_limited_before_route_work(
+    monkeypatch,
+    db_session,
+    request_scope,
+) -> None:
+    settings = Settings(
+        database_url="postgresql+psycopg://ignored@localhost/ignored",
+        database_auto_migrate=False,
+        trading_agent_api_key="x" * 32,
+        api_requests_per_minute=1,
+    )
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+
+    def database_override():
+        yield db_session
+
+    main_module.app.dependency_overrides[main_module.get_db] = database_override
+    body = {
+        "method": "POST",
+        "path": "/api/trades",
+        "body_sha256": hashlib.sha256(b"{}").hexdigest(),
+    }
+    headers = {
+        "X-API-Key": "x" * 32,
+        "X-Workspace-ID": str(request_scope.workspace_id),
+        "X-Account-ID": str(request_scope.account_id),
+    }
+    try:
+        with TestClient(main_module.app) as client:
+            first = client.post(
+                "/api/confirmations/challenge",
+                headers=headers,
+                json=body,
+            )
+            limited = client.post(
+                "/api/confirmations/challenge",
+                headers=headers,
+                json=body,
+            )
+    finally:
+        main_module.app.dependency_overrides.clear()
+
+    assert first.status_code == 200
+    assert limited.status_code == 429
+
+
 def test_api_rejects_oversized_body_before_parsing_and_authenticates_first(
     monkeypatch,
 ) -> None:
     settings = Settings(
-        database_url="postgresql+psycopg://ignored",
+        database_url="postgresql+psycopg://ignored@localhost/ignored",
         database_auto_migrate=False,
         trading_agent_api_key="x" * 32,
         api_max_request_bytes=1024,
@@ -184,7 +280,9 @@ def test_api_rejects_oversized_body_before_parsing_and_authenticates_first(
     }
 
 
-def test_multipart_confirmation_binds_exact_boundary_and_bytes() -> None:
+def test_multipart_confirmation_binds_exact_boundary_and_bytes(
+    request_scope,
+) -> None:
     first = (
         b"--boundary-a\r\nContent-Disposition: form-data; name=\"context\"\r\n\r\n"
         b"private context\r\n--boundary-a--\r\n"
@@ -195,6 +293,7 @@ def test_multipart_confirmation_binds_exact_boundary_and_bytes() -> None:
         method="POST",
         path="/api/charts/analyze",
         body_sha256=hashlib.sha256(first).hexdigest(),
+        scope=request_scope,
     )
 
     assert not store.consume(
@@ -202,16 +301,20 @@ def test_multipart_confirmation_binds_exact_boundary_and_bytes() -> None:
         method="POST",
         path="/api/charts/analyze",
         body_sha256=hashlib.sha256(second).hexdigest(),
+        scope=request_scope,
     )
     assert not store.consume(
         token,
         method="POST",
         path="/api/charts/analyze",
         body_sha256=hashlib.sha256(first).hexdigest(),
+        scope=request_scope,
     )
 
 
-def test_mutation_confirmation_rejects_body_substitution_and_consumes_token() -> None:
+def test_mutation_confirmation_rejects_body_substitution_and_consumes_token(
+    request_scope,
+) -> None:
     approved_body = b'{"risk_percent":"0.5"}'
     substituted_body = b'{"risk_percent":"5"}'
     store = main_module.ConfirmationStore(ttl_seconds=60)
@@ -219,12 +322,14 @@ def test_mutation_confirmation_rejects_body_substitution_and_consumes_token() ->
         method="POST",
         path="/api/trades",
         body_sha256=hashlib.sha256(approved_body).hexdigest(),
+        scope=request_scope,
     )
 
     with pytest.raises(HTTPException) as substituted:
         asyncio.run(
             main_module.require_trader_confirmation(
                 _request(substituted_body, store),
+                request_scope,
                 token,
             )
         )
@@ -234,12 +339,13 @@ def test_mutation_confirmation_rejects_body_substitution_and_consumes_token() ->
         asyncio.run(
             main_module.require_trader_confirmation(
                 _request(approved_body, store),
+                request_scope,
                 token,
             )
         )
 
 
-def test_mutation_confirmation_expires() -> None:
+def test_mutation_confirmation_expires(request_scope) -> None:
     clock = iter((100.0, 111.0))
     body = b"{}"
     store = main_module.ConfirmationStore(
@@ -250,6 +356,7 @@ def test_mutation_confirmation_expires() -> None:
         method="POST",
         path="/api/trades",
         body_sha256=hashlib.sha256(body).hexdigest(),
+        scope=request_scope,
     )
 
     assert not store.consume(
@@ -257,29 +364,45 @@ def test_mutation_confirmation_expires() -> None:
         method="POST",
         path="/api/trades",
         body_sha256=hashlib.sha256(body).hexdigest(),
+        scope=request_scope,
     )
 
 
-def test_strategy_facing_api_requires_explicit_immutable_scope() -> None:
+def test_strategy_facing_api_requires_explicit_immutable_scope(
+    monkeypatch,
+    request_scope,
+) -> None:
     db = Mock()
     with pytest.raises(HTTPException) as missing:
-        main_module.require_strategy_version(db, None)
+        main_module.require_strategy_version(db, request_scope, None)
     assert missing.value.status_code == 428
     identifier = main_module.uuid.UUID("11111111-1111-1111-1111-111111111111")
-    db.get.return_value = SimpleNamespace(id=identifier)
-    strategy_version = main_module.require_strategy_version(db, identifier)
+    monkeypatch.setattr(
+        main_module,
+        "validate_strategy_scope",
+        Mock(return_value=SimpleNamespace(id=identifier)),
+    )
+    strategy_version = main_module.require_strategy_version(
+        db,
+        request_scope,
+        identifier,
+    )
     assert str(strategy_version) == "11111111-1111-1111-1111-111111111111"
 
-    db.get.return_value = None
+    monkeypatch.setattr(
+        main_module,
+        "validate_strategy_scope",
+        Mock(side_effect=LookupError),
+    )
     with pytest.raises(HTTPException) as unknown:
-        main_module.require_strategy_version(db, identifier)
+        main_module.require_strategy_version(db, request_scope, identifier)
     assert unknown.value.status_code == 404
     assert str(identifier) not in unknown.value.detail
 
 
 def test_short_api_key_is_rejected_even_when_it_matches(monkeypatch) -> None:
     settings = Settings(
-        database_url="postgresql+psycopg://ignored",
+        database_url="postgresql+psycopg://ignored@localhost/ignored",
         trading_agent_api_key="short",
         openai_api_key=None,
         anthropic_api_key=None,
@@ -306,7 +429,7 @@ def test_evidence_storage_rejects_symlinked_or_tampered_targets(tmp_path) -> Non
 
 
 def test_chart_evidence_is_content_addressed_private_and_auditable(
-    db_session, tmp_path
+    db_session, request_scope, tmp_path
 ) -> None:
     analysis = ChartAnalysis(
         visible_facts=["Price reclaimed the marked low."],
@@ -329,6 +452,7 @@ def test_chart_evidence_is_content_addressed_private_and_auditable(
 
     evidence, run = record_chart_analysis(
         db_session,
+        scope=request_scope,
         image_bytes=image,
         content_type="image/png",
         evidence_directory=tmp_path / "evidence",
@@ -344,6 +468,7 @@ def test_chart_evidence_is_content_addressed_private_and_auditable(
     )
     duplicate, second_run = record_chart_analysis(
         db_session,
+        scope=request_scope,
         image_bytes=image,
         content_type="image/png",
         evidence_directory=tmp_path / "evidence",
@@ -358,7 +483,14 @@ def test_chart_evidence_is_content_addressed_private_and_auditable(
         timeframe="M5",
     )
 
-    evidence_path = tmp_path / "evidence" / evidence.sha256[:2] / f"{evidence.sha256}.png"
+    evidence_path = (
+        tmp_path
+        / "evidence"
+        / str(request_scope.workspace_id)
+        / str(request_scope.account_id)
+        / evidence.sha256[:2]
+        / f"{evidence.sha256}.png"
+    )
     mode = stat.S_IMODE(evidence_path.stat().st_mode)
     evidence_count = db_session.scalar(
         select(func.count())
