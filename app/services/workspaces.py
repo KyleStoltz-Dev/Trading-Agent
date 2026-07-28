@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from app.db import LEGACY_UNASSIGNED_ACCOUNT_ID, LEGACY_WORKSPACE_ID
 from app.models import PlaybookVersion, TradingAccount, Workspace
 
 BOOTSTRAP_ACCOUNT_EXTERNAL_ID = "local-journal"
@@ -266,6 +267,10 @@ def validate_scope(db: Session, scope: RequestScope) -> TradingAccount:
     """Fail closed unless both scope identities exist and belong together."""
     if not isinstance(scope, RequestScope):
         raise TypeError("scope must be an explicit RequestScope")
+    legacy_scope = (
+        scope.workspace_id == uuid.UUID(LEGACY_WORKSPACE_ID)
+        and scope.account_id == uuid.UUID(LEGACY_UNASSIGNED_ACCOUNT_ID)
+    )
     account = db.scalar(
         select(TradingAccount)
         .join(Workspace, Workspace.id == TradingAccount.workspace_id)
@@ -273,7 +278,11 @@ def validate_scope(db: Session, scope: RequestScope) -> TradingAccount:
             Workspace.active.is_(True),
             TradingAccount.workspace_id == scope.workspace_id,
             TradingAccount.id == scope.account_id,
-            TradingAccount.active.is_(True),
+            (
+                TradingAccount.id == scope.account_id
+                if legacy_scope
+                else TradingAccount.active.is_(True)
+            ),
         )
     )
     if account is None:

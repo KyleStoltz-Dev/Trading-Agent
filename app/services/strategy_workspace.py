@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from app.db import LEGACY_UNASSIGNED_ACCOUNT_ID, LEGACY_WORKSPACE_ID
 from app.models import (
     ConversationSession,
     Playbook,
@@ -23,17 +24,37 @@ from app.schemas import (
     TraderProfileRead,
     TraderProfileUpsert,
 )
+from app.services.catalog import verify_playbook_version_integrity
+from app.services.workspaces import (
+    RequestScope,
+    validate_scope,
+    validate_strategy_scope,
+)
 
 SEARCH_TERM = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{1,63}")
 KNOWLEDGE_REFERENCE = re.compile(r"^knowledge-([0-9a-f]{12})$")
 
 
+def _legacy_scope(scope: RequestScope | None) -> RequestScope:
+    return scope or RequestScope(
+        workspace_id=uuid.UUID(LEGACY_WORKSPACE_ID),
+        account_id=uuid.UUID(LEGACY_UNASSIGNED_ACCOUNT_ID),
+    )
+
+
 def get_trader_profile(
     db: Session,
     profile_key: str = "local",
+    *,
+    scope: RequestScope,
 ) -> TraderProfile | None:
+    validate_scope(db, scope)
     return db.scalar(
-        select(TraderProfile).where(TraderProfile.profile_key == profile_key)
+        select(TraderProfile).where(
+            TraderProfile.workspace_id == scope.workspace_id,
+            TraderProfile.account_id == scope.account_id,
+            TraderProfile.profile_key == profile_key,
+        )
     )
 
 
@@ -41,15 +62,26 @@ def upsert_trader_profile(
     db: Session,
     request: TraderProfileUpsert,
     profile_key: str = "local",
+    *,
+    scope: RequestScope,
+    commit: bool = True,
 ) -> TraderProfile:
-    profile = get_trader_profile(db, profile_key)
+    validate_scope(db, scope)
+    profile = get_trader_profile(db, profile_key, scope=scope)
     if profile is None:
-        profile = TraderProfile(profile_key=profile_key)
+        profile = TraderProfile(
+            workspace_id=scope.workspace_id,
+            account_id=scope.account_id,
+            profile_key=profile_key,
+        )
         db.add(profile)
     for key, value in request.model_dump().items():
         setattr(profile, key, value)
-    db.commit()
-    db.refresh(profile)
+    if commit:
+        db.commit()
+        db.refresh(profile)
+    else:
+        db.flush()
     return profile
 
 
@@ -57,14 +89,22 @@ def resolve_strategy_version(
     db: Session,
     strategy: str,
     version: int | None = None,
+    *,
+    scope: RequestScope | None = None,
 ) -> tuple[Playbook, PlaybookVersion]:
+    scope = _legacy_scope(scope)
+    validate_scope(db, scope)
     normalized = strategy.strip().lower()
     playbook = db.scalar(
-        select(Playbook).where(func.lower(Playbook.name) == normalized)
+        select(Playbook).where(
+            Playbook.workspace_id == scope.workspace_id,
+            func.lower(Playbook.name) == normalized,
+        )
     )
     if playbook is None:
         raise LookupError(f"strategy was not found: {strategy}")
     statement = select(PlaybookVersion).where(
+        PlaybookVersion.workspace_id == scope.workspace_id,
         PlaybookVersion.playbook_id == playbook.id
     )
     if version is not None:
@@ -74,18 +114,34 @@ def resolve_strategy_version(
     playbook_version = db.scalar(statement)
     if playbook_version is None:
         raise LookupError(f"strategy version was not found: {strategy}")
+    verify_playbook_version_integrity(playbook_version)
     return playbook, playbook_version
 
 
-def list_strategy_summaries(db: Session) -> list[StrategySummary]:
+def list_strategy_summaries(
+    db: Session,
+    *,
+    scope: RequestScope | None = None,
+) -> list[StrategySummary]:
+    validate_scope(db, scope)
     playbooks = list(
-        db.scalars(select(Playbook).where(Playbook.active.is_(True)).order_by(Playbook.name))
+        db.scalars(
+            select(Playbook)
+            .where(
+                Playbook.workspace_id == scope.workspace_id,
+                Playbook.active.is_(True),
+            )
+            .order_by(Playbook.name)
+        )
     )
     summaries: list[StrategySummary] = []
     for playbook in playbooks:
         version = db.scalar(
             select(PlaybookVersion)
-            .where(PlaybookVersion.playbook_id == playbook.id)
+            .where(
+                PlaybookVersion.workspace_id == scope.workspace_id,
+                PlaybookVersion.playbook_id == playbook.id,
+            )
             .order_by(PlaybookVersion.version.desc())
             .limit(1)
         )
@@ -96,6 +152,7 @@ def list_strategy_summaries(db: Session) -> list[StrategySummary]:
             .select_from(StrategyKnowledgeItem)
             .where(
                 StrategyKnowledgeItem.playbook_version_id == version.id,
+                StrategyKnowledgeItem.workspace_id == scope.workspace_id,
                 StrategyKnowledgeItem.excluded.is_(False),
             )
         )
@@ -118,12 +175,22 @@ def set_session_strategy(
     db: Session,
     conversation: ConversationSession,
     strategy: str | None,
+    *,
+    scope: RequestScope | None = None,
+    version: int | None = None,
 ) -> tuple[Playbook, PlaybookVersion] | None:
+    scope = _legacy_scope(scope)
+    validate_scope(db, scope)
+    if (
+        conversation.workspace_id != scope.workspace_id
+        or conversation.account_id != scope.account_id
+    ):
+        raise LookupError("conversation was not found in the requested account scope")
     if strategy is None:
         conversation.active_playbook_version_id = None
         db.commit()
         return None
-    resolved = resolve_strategy_version(db, strategy)
+    resolved = resolve_strategy_version(db, strategy, version, scope=scope)
     conversation.active_playbook_version_id = resolved[1].id
     db.commit()
     db.refresh(conversation)
@@ -133,26 +200,59 @@ def set_session_strategy(
 def active_session_strategy(
     db: Session,
     conversation: ConversationSession,
+    *,
+    scope: RequestScope,
 ) -> tuple[Playbook, PlaybookVersion] | None:
+    validate_scope(db, scope)
+    if (
+        conversation.workspace_id != scope.workspace_id
+        or conversation.account_id != scope.account_id
+    ):
+        raise LookupError("conversation was not found in the requested account scope")
     if conversation.active_playbook_version_id is None:
         return None
-    version = db.get(PlaybookVersion, conversation.active_playbook_version_id)
+    version = validate_strategy_scope(
+        db,
+        scope,
+        conversation.active_playbook_version_id,
+    )
     if version is None:
         return None
-    playbook = db.get(Playbook, version.playbook_id)
+    verify_playbook_version_integrity(version)
+    playbook = db.scalar(
+        select(Playbook).where(
+            Playbook.workspace_id == scope.workspace_id,
+            Playbook.id == version.playbook_id,
+        )
+    )
     return (playbook, version) if playbook is not None else None
 
 
 def strategy_by_version_id(
     db: Session,
     playbook_version_id: uuid.UUID | None,
+    *,
+    scope: RequestScope | None = None,
 ) -> tuple[Playbook, PlaybookVersion] | None:
     if playbook_version_id is None:
         return None
-    version = db.get(PlaybookVersion, playbook_version_id)
+    if scope is None:
+        version = db.get(PlaybookVersion, playbook_version_id)
+        if version is None:
+            return None
+        playbook = db.get(Playbook, version.playbook_id)
+        return (playbook, version) if playbook is not None else None
+    validate_scope(db, scope)
+    version = validate_strategy_scope(db, scope, playbook_version_id)
     if version is None:
         return None
-    playbook = db.get(Playbook, version.playbook_id)
+    verify_playbook_version_integrity(version)
+    playbook = db.scalar(
+        select(Playbook).where(
+            Playbook.workspace_id == scope.workspace_id,
+            Playbook.id == version.playbook_id,
+        )
+    )
     return (playbook, version) if playbook is not None else None
 
 
@@ -161,7 +261,11 @@ def search_strategy_knowledge(
     playbook_version_id: uuid.UUID,
     query: str,
     limit: int = 8,
+    *,
+    scope: RequestScope | None = None,
 ) -> list[StrategyKnowledgeItem]:
+    if scope is not None:
+        validate_strategy_scope(db, scope, playbook_version_id)
     if not 1 <= limit <= 25:
         raise ValueError("knowledge result limit must be between 1 and 25")
     terms = tuple(dict.fromkeys(term.lower() for term in SEARCH_TERM.findall(query)))
@@ -171,14 +275,18 @@ def search_strategy_knowledge(
         func.lower(StrategyKnowledgeItem.content).contains(term)
         for term in terms[:8]
     ]
+    statement = select(StrategyKnowledgeItem).where(
+        StrategyKnowledgeItem.playbook_version_id == playbook_version_id,
+        StrategyKnowledgeItem.excluded.is_(False),
+        or_(*predicates),
+    )
+    if scope is not None:
+        statement = statement.where(
+            StrategyKnowledgeItem.workspace_id == scope.workspace_id
+        )
     return list(
         db.scalars(
-            select(StrategyKnowledgeItem)
-            .where(
-                StrategyKnowledgeItem.playbook_version_id == playbook_version_id,
-                StrategyKnowledgeItem.excluded.is_(False),
-                or_(*predicates),
-            )
+            statement
             .order_by(
                 StrategyKnowledgeItem.occurred_at.desc().nullslast(),
                 StrategyKnowledgeItem.created_at.desc(),
@@ -198,10 +306,13 @@ def search_strategy_knowledge_for_management(
     playbook_version_id: uuid.UUID,
     query: str,
     *,
+    scope: RequestScope | None = None,
     status: str,
     limit: int = 8,
 ) -> list[StrategyKnowledgeItem]:
     """Find bounded candidates within one immutable strategy version."""
+    scope = _legacy_scope(scope)
+    validate_strategy_scope(db, scope, playbook_version_id)
     if status not in {"active", "quarantined"}:
         raise ValueError("knowledge status must be active or quarantined")
     if not 1 <= limit <= 20:
@@ -218,6 +329,7 @@ def search_strategy_knowledge_for_management(
             select(StrategyKnowledgeItem)
             .where(
                 StrategyKnowledgeItem.playbook_version_id == playbook_version_id,
+                StrategyKnowledgeItem.workspace_id == scope.workspace_id,
                 StrategyKnowledgeItem.excluded.is_(status == "quarantined"),
                 or_(*predicates),
             )
@@ -234,8 +346,12 @@ def resolve_strategy_knowledge_reference(
     db: Session,
     playbook_version_id: uuid.UUID,
     reference: str,
+    *,
+    scope: RequestScope | None = None,
 ) -> StrategyKnowledgeItem:
     """Resolve one human reference, failing closed on malformed or ambiguous values."""
+    scope = _legacy_scope(scope)
+    validate_strategy_scope(db, scope, playbook_version_id)
     match = KNOWLEDGE_REFERENCE.fullmatch(reference.strip().lower())
     if match is None:
         raise ValueError(
@@ -247,6 +363,7 @@ def resolve_strategy_knowledge_reference(
             select(StrategyKnowledgeItem)
             .where(
                 StrategyKnowledgeItem.playbook_version_id == playbook_version_id,
+                StrategyKnowledgeItem.workspace_id == scope.workspace_id,
                 StrategyKnowledgeItem.content_hash.startswith(prefix),
             )
             .limit(2)
@@ -268,13 +385,16 @@ def set_active_strategy_knowledge_excluded(
     playbook_version_id: uuid.UUID,
     reference: str,
     *,
+    scope: RequestScope | None = None,
     excluded: bool,
 ) -> StrategyKnowledgeItem:
     """Reversibly change one item already scoped by the host's active strategy."""
+    scope = _legacy_scope(scope)
     item = resolve_strategy_knowledge_reference(
         db,
         playbook_version_id,
         reference,
+        scope=scope,
     )
     if item.excluded is excluded:
         state = "quarantined" if excluded else "active"
@@ -290,10 +410,17 @@ def set_strategy_knowledge_excluded(
     strategy: str,
     item_id: uuid.UUID,
     *,
+    scope: RequestScope | None = None,
     excluded: bool,
 ) -> StrategyKnowledgeItem:
-    _, version = resolve_strategy_version(db, strategy)
-    item = db.get(StrategyKnowledgeItem, item_id)
+    scope = _legacy_scope(scope)
+    _, version = resolve_strategy_version(db, strategy, scope=scope)
+    item = db.scalar(
+        select(StrategyKnowledgeItem).where(
+            StrategyKnowledgeItem.workspace_id == scope.workspace_id,
+            StrategyKnowledgeItem.id == item_id,
+        )
+    )
     if item is None or item.playbook_version_id != version.id:
         raise LookupError(
             f"knowledge item was not found in {strategy}: {item_id}"
@@ -307,9 +434,13 @@ def set_strategy_knowledge_excluded(
 def create_strategy_experiment(
     db: Session,
     request: StrategyExperimentCreate,
+    *,
+    scope: RequestScope,
 ) -> StrategyExperiment:
-    _, version = resolve_strategy_version(db, request.strategy)
+    _, version = resolve_strategy_version(db, request.strategy, scope=scope)
     experiment = StrategyExperiment(
+        workspace_id=scope.workspace_id,
+        account_id=scope.account_id,
         playbook_version_id=version.id,
         name=request.name,
         mode=request.mode,
@@ -331,8 +462,11 @@ def resolve_strategy_experiment(
     db: Session,
     reference: str | uuid.UUID,
     *,
+    scope: RequestScope | None = None,
     playbook_version_id: uuid.UUID | None = None,
 ) -> StrategyExperiment:
+    if scope is not None:
+        validate_strategy_scope(db, scope, playbook_version_id)
     try:
         identifier = (
             reference if isinstance(reference, uuid.UUID) else uuid.UUID(reference)
@@ -341,6 +475,11 @@ def resolve_strategy_experiment(
         statement = select(StrategyExperiment).where(
             func.lower(StrategyExperiment.name) == str(reference).strip().lower()
         )
+        if scope is not None:
+            statement = statement.where(
+                StrategyExperiment.workspace_id == scope.workspace_id,
+                StrategyExperiment.account_id == scope.account_id,
+            )
         if playbook_version_id is not None:
             statement = statement.where(
                 StrategyExperiment.playbook_version_id == playbook_version_id
@@ -355,7 +494,16 @@ def resolve_strategy_experiment(
                 f"experiment name is ambiguous: {reference}; use its internal UUID"
             ) from None
         return matches[0]
-    experiment = db.get(StrategyExperiment, identifier)
+    if scope is None:
+        experiment = db.get(StrategyExperiment, identifier)
+    else:
+        experiment = db.scalar(
+            select(StrategyExperiment).where(
+                StrategyExperiment.workspace_id == scope.workspace_id,
+                StrategyExperiment.account_id == scope.account_id,
+                StrategyExperiment.id == identifier,
+            )
+        )
     if experiment is None:
         raise LookupError(f"strategy experiment was not found: {reference}")
     if (
@@ -372,11 +520,15 @@ def add_strategy_test_sample(
     db: Session,
     experiment_id: str | uuid.UUID,
     request: StrategyTestSampleCreate,
+    *,
+    scope: RequestScope,
 ) -> StrategyTestSample:
-    experiment = resolve_strategy_experiment(db, experiment_id)
+    experiment = resolve_strategy_experiment(db, experiment_id, scope=scope)
     if experiment.status != "running":
         raise ValueError("samples can only be added to a running experiment")
     sample = StrategyTestSample(
+        workspace_id=scope.workspace_id,
+        account_id=scope.account_id,
         experiment_id=experiment.id,
         **request.model_dump(),
     )
@@ -389,8 +541,10 @@ def add_strategy_test_sample(
 def complete_strategy_experiment(
     db: Session,
     experiment_id: str | uuid.UUID,
+    *,
+    scope: RequestScope,
 ) -> StrategyExperiment:
-    experiment = resolve_strategy_experiment(db, experiment_id)
+    experiment = resolve_strategy_experiment(db, experiment_id, scope=scope)
     experiment.status = "completed"
     experiment.completed_at = datetime.now(UTC)
     db.commit()

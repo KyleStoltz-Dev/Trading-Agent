@@ -1,102 +1,83 @@
 {
-  "name": "wyckoff-smc-fractal-v1",
-  "status": "hypothesis",
-  "minimum_sample": 30,
-  "principles": [
-    "Anything can happen.",
-    "Risk is defined and accepted before entry.",
-    "Facts, hypotheses, and outcomes are recorded separately."
+  "methodology": "wyckoff-smc-fractal",
+  "objective": "Test whether declared higher-timeframe context plus a measurable lower-timeframe trigger improves expectancy without changing the thesis after invalidation.",
+  "requirements": [
+    "The instrument, venue, market time with timezone, session, context timeframe, and trigger timeframe are recorded.",
+    "The higher-timeframe thesis and its invalidation are declared before examining the lower-timeframe trigger.",
+    "Entry, stop, target, predefined risk, and news proximity are recorded before entry.",
+    "Direct chart observations are recorded separately from Wyckoff or smart-money interpretations."
+  ],
+  "exclusions": [
+    "The original higher-timeframe thesis has invalidated.",
+    "A lower timeframe is being used to invent a replacement thesis after invalidation.",
+    "The setup depends on a label that cannot be mapped to an observable condition.",
+    "A high-impact event is inside the configured pre-trade window."
   ],
   "context": {
     "required": [
-      "instrument",
-      "market_time_with_timezone",
-      "venue",
-      "context_timeframe",
-      "trigger_timeframe",
-      "session",
-      "regime",
-      "nearest_high_impact_event_minutes"
+      "A market regime is declared as trend, range, expansion, compression, transition, or unclear.",
+      "The relevant range, protected swing, or liquidity reference is marked before the trigger occurs.",
+      "Accumulation, distribution, reaccumulation, or redistribution is labeled as a hypothesis with an invalidation condition."
     ],
-    "regime_values": [
-      "trend",
-      "range",
-      "expansion",
-      "compression",
-      "transition",
-      "unclear"
+    "exclusions": [
+      "The range anchors or protected swing were selected after the outcome was visible."
     ]
   },
-  "operational_definitions": {
-    "equal_highs_or_lows": {
-      "fact": "Two or more swing prices fall within a declared tolerance.",
-      "parameters": ["swing_lookback", "tolerance_ticks", "minimum_touches"]
+  "setups": [
+    {
+      "key": "liquidity_sweep_reclaim",
+      "requirements": [
+        "Price trades beyond a predeclared reference extreme.",
+        "A trigger-timeframe close returns through the reference within the declared maximum reclaim bars.",
+        "The minimum penetration and reclaim thresholds are stated before entry.",
+        "The trigger agrees with the declared higher-timeframe thesis."
+      ],
+      "exclusions": [
+        "The liquidity reference was not declared before price crossed it.",
+        "The reclaim occurs outside the declared maximum reclaim bars.",
+        "The lower-timeframe trigger conflicts with the higher-timeframe thesis."
+      ]
     },
-    "liquidity_sweep": {
-      "fact": "Price trades beyond a declared reference extreme.",
-      "confirmation": "A trigger-timeframe close returns through the reference within max_reclaim_bars.",
-      "parameters": ["reference_id", "minimum_penetration_ticks", "max_reclaim_bars"]
-    },
-    "break_of_structure": {
-      "fact": "A candle body closes beyond a predeclared protected swing.",
-      "parameters": ["protected_swing_id", "minimum_close_distance_ticks"]
-    },
-    "fair_value_gap": {
-      "fact": "In a three-candle sequence, candle one and candle three wicks do not overlap.",
-      "parameters": ["minimum_gap_ticks", "minimum_displacement_atr"]
-    },
-    "poi_mitigation": {
-      "fact": "Price revisits the declared origin range after displacement.",
-      "parameters": ["poi_low", "poi_high", "maximum_prior_touches"]
-    },
-    "accumulation_or_distribution": {
-      "classification": "hypothesis",
-      "requires": ["declared_range", "event_sequence", "invalidation_condition"]
-    },
-    "range_location_80_percent": {
-      "fact": "For low L and high H, bullish location=(H-price)/(H-L); bearish location=(price-L)/(H-L).",
-      "threshold": 0.8
+    {
+      "key": "displacement_mitigation",
+      "requirements": [
+        "Displacement exceeds the declared body-to-median or ATR threshold.",
+        "Any three-candle imbalance exceeds the declared minimum gap.",
+        "The point-of-interest range and maximum prior touches are declared before the revisit.",
+        "Entry occurs only after the declared mitigation or retest condition."
+      ],
+      "exclusions": [
+        "Displacement or imbalance thresholds were selected after the outcome.",
+        "The point of interest exceeded its declared maximum prior touches.",
+        "The mitigation entry would violate the declared invalidation."
+      ]
     }
-  },
-  "entry_gate": {
-    "all_required": [
-      "risk_within_limit",
-      "invalidation_declared",
-      "broker_contract_loaded",
-      "news_proximity_known",
-      "context_hypothesis_recorded",
-      "trigger_confirmation_recorded"
+  ],
+  "allowed_vocabulary": [
+    "accumulation",
+    "distribution",
+    "reaccumulation",
+    "redistribution",
+    "liquidity sweep",
+    "reclaim",
+    "displacement",
+    "imbalance",
+    "mitigation",
+    "break of structure",
+    "point of interest"
+  ],
+  "forbidden_cross_strategy_concepts": [],
+  "mindset": {
+    "caution_emotion_tags": [
+      "fear",
+      "hesitation",
+      "fomo",
+      "revenge"
     ]
   },
-  "management": {
-    "predeclare": [
-      "partial_targets",
-      "runner_condition",
-      "stop_change_condition",
-      "time_stop",
-      "hedge_is_separate_trade_thesis"
-    ]
-  },
-  "review": {
-    "required": [
-      "realized_r",
-      "mfe_r",
-      "mae_r",
-      "fees",
-      "slippage",
-      "process_score",
-      "outcome_score",
-      "rule_evaluations"
-    ],
-    "segment_by": [
-      "setup",
-      "instrument",
-      "regime",
-      "context_timeframe",
-      "trigger_timeframe",
-      "session",
-      "playbook_version",
-      "news_proximity"
-    ]
+  "risk": {
+    "maximum_risk_percent": 1.0,
+    "minimum_planned_r": 3.0,
+    "human_confirms_every_trade": true
   }
 }

@@ -21,7 +21,9 @@ remain in the private `.env` file, never in the profile or imported material.
 Current integration status:
 
 - OANDA v20: ready and read-only.
-- MetaTrader 5: normalization examples exist; the live terminal bridge is not implemented.
+- MetaTrader 5: read-only bridge client plus an included Windows terminal companion service.
+- MetaTrader 4: the same bridge protocol is supported; a terminal-side EA/bridge is still
+  required.
 - cTrader and Interactive Brokers: planned.
 - Trading Economics: ready for economic calendar/news metadata.
 - Finnhub: planned.
