@@ -8,8 +8,12 @@ from sqlalchemy import select
 from app.models import StrategyKnowledgeItem
 from app.services.catalog import create_playbook_version
 from app.services.knowledge_import import (
+    MAX_ITEM_CHARACTERS,
+    ImportedRecord,
+    _clean_pasted_content,
     _json_records,
     _path_records,
+    _record_parts,
     _records_from_bytes,
     import_knowledge_text,
 )
@@ -21,6 +25,9 @@ from app.services.strategy_workspace import (
     set_active_strategy_knowledge_excluded,
     set_strategy_knowledge_excluded,
 )
+from app.services.workspaces import RequestScope
+
+TEST_SCOPE = RequestScope(workspace_id=uuid.uuid4(), account_id=uuid.uuid4())
 
 
 def test_discord_message_export_is_normalized() -> None:
@@ -143,6 +150,50 @@ def test_archive_member_count_and_directory_total_size_are_bounded(
         _path_records(directory)
 
 
+def test_single_files_and_archives_are_rejected_before_unbounded_reads(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr("app.services.knowledge_import.MAX_FILE_BYTES", 4)
+    source = tmp_path / "oversized.txt"
+    source.write_bytes(b"12345")
+    with pytest.raises(ValueError, match="20 MB"):
+        _path_records(source)
+
+    monkeypatch.setattr("app.services.knowledge_import.MAX_ARCHIVE_BYTES", 4)
+    archive = tmp_path / "oversized.zip"
+    archive.write_bytes(b"12345")
+    with pytest.raises(ValueError, match="100 MB"):
+        _path_records(archive)
+
+
+def test_pasted_knowledge_is_chunked_without_silent_character_truncation() -> None:
+    text = "a" * 25_000
+    assert _clean_pasted_content(text) == text
+
+
+def test_long_message_records_are_split_without_silent_truncation() -> None:
+    content = "a" * (MAX_ITEM_CHARACTERS + 123)
+
+    parts = _record_parts(
+        ImportedRecord(
+            content=content,
+            source_reference="discord.json#message-1",
+            kind="message",
+            author="Kyle",
+            metadata={"attachments": ["chart.png"]},
+        )
+    )
+
+    assert "".join(part.content for part in parts) == content
+    assert [part.source_reference for part in parts] == [
+        "discord.json#message-1#part-1",
+        "discord.json#message-1#part-2",
+    ]
+    assert all(part.author == "Kyle" for part in parts)
+    assert all(part.metadata == {"attachments": ["chart.png"]} for part in parts)
+
+
 class CapturingSession:
     def __init__(self) -> None:
         self.statement = None
@@ -152,23 +203,39 @@ class CapturingSession:
         return []
 
 
-def test_strategy_search_always_filters_exact_version_and_exclusions() -> None:
+def test_strategy_search_always_filters_exact_version_and_exclusions(
+    monkeypatch,
+) -> None:
     strategy_version = uuid.uuid4()
     db = CapturingSession()
+    monkeypatch.setattr(
+        "app.services.strategy_workspace.validate_strategy_scope",
+        lambda *args, **kwargs: None,
+    )
 
-    assert search_strategy_knowledge(db, strategy_version, "spring reclaim") == []
+    assert search_strategy_knowledge(
+        db,
+        strategy_version,
+        "spring reclaim",
+        scope=TEST_SCOPE,
+    ) == []
 
     compiled = db.statement.compile()
     assert strategy_version in compiled.params.values()
+    assert TEST_SCOPE.workspace_id in compiled.params.values()
     sql = str(compiled)
     assert "strategy_knowledge_items.playbook_version_id" in sql
     assert "strategy_knowledge_items.excluded" in sql
 
 
-def test_knowledge_item_can_be_quarantined_and_restored(db_session) -> None:
+def test_knowledge_item_can_be_quarantined_and_restored(
+    db_session,
+    request_scope,
+) -> None:
     name = f"knowledge-quarantine-{uuid.uuid4().hex[:10]}"
     version = create_playbook_version(
         db_session,
+        workspace_id=request_scope.workspace_id,
         name=name,
         definition={"methodology": "wyckoff"},
     )
@@ -177,6 +244,7 @@ def test_knowledge_item_can_be_quarantined_and_restored(db_session) -> None:
         "Spring below support followed by a reclaim.",
         name,
         "test-note",
+        scope=request_scope,
     )
     item_id = db_session.scalar(
         select(StrategyKnowledgeItem.id).where(
@@ -189,27 +257,43 @@ def test_knowledge_item_can_be_quarantined_and_restored(db_session) -> None:
         db_session,
         name,
         item_id,
+        scope=request_scope,
         excluded=True,
     )
     assert item.excluded is True
-    assert search_strategy_knowledge(db_session, version.id, "spring") == []
+    assert search_strategy_knowledge(
+        db_session,
+        version.id,
+        "spring",
+        scope=request_scope,
+    ) == []
 
     restored = set_strategy_knowledge_excluded(
         db_session,
         name,
         item_id,
+        scope=request_scope,
         excluded=False,
     )
     assert restored.excluded is False
-    assert [item.id for item in search_strategy_knowledge(db_session, version.id, "spring")] == [
+    assert [item.id for item in search_strategy_knowledge(
+        db_session,
+        version.id,
+        "spring",
+        scope=request_scope,
+    )] == [
         item_id
     ]
 
 
-def test_human_reference_management_is_version_scoped_and_reversible(db_session) -> None:
+def test_human_reference_management_is_version_scoped_and_reversible(
+    db_session,
+    request_scope,
+) -> None:
     strategy = f"knowledge-reference-{uuid.uuid4().hex[:10]}"
     version = create_playbook_version(
         db_session,
+        workspace_id=request_scope.workspace_id,
         name=strategy,
         definition={"methodology": "wyckoff"},
     )
@@ -218,11 +302,13 @@ def test_human_reference_management_is_version_scoped_and_reversible(db_session)
         "An ICT fair value gap note that does not belong in this workspace.",
         strategy,
         "discord-export",
+        scope=request_scope,
     )
     candidates = search_strategy_knowledge_for_management(
         db_session,
         version.id,
         "ICT fair value",
+        scope=request_scope,
         status="active",
     )
     assert len(candidates) == 1
@@ -233,12 +319,14 @@ def test_human_reference_management_is_version_scoped_and_reversible(db_session)
         db_session,
         version.id,
         reference,
+        scope=request_scope,
     ).id == candidates[0].id
 
     quarantined = set_active_strategy_knowledge_excluded(
         db_session,
         version.id,
         reference,
+        scope=request_scope,
         excluded=True,
     )
     assert quarantined.excluded is True
@@ -246,6 +334,7 @@ def test_human_reference_management_is_version_scoped_and_reversible(db_session)
         db_session,
         version.id,
         "ICT fair value",
+        scope=request_scope,
         status="active",
     ) == []
     assert [
@@ -254,6 +343,7 @@ def test_human_reference_management_is_version_scoped_and_reversible(db_session)
             db_session,
             version.id,
             "ICT fair value",
+            scope=request_scope,
             status="quarantined",
         )
     ] == [quarantined.id]
@@ -262,29 +352,42 @@ def test_human_reference_management_is_version_scoped_and_reversible(db_session)
         db_session,
         version.id,
         reference,
+        scope=request_scope,
         excluded=False,
     )
     assert restored.excluded is False
 
 
-def test_human_reference_cannot_cross_strategy_versions(db_session) -> None:
+def test_human_reference_cannot_cross_strategy_versions(
+    db_session,
+    request_scope,
+) -> None:
     first = f"knowledge-first-{uuid.uuid4().hex[:10]}"
     second = f"knowledge-second-{uuid.uuid4().hex[:10]}"
     first_version = create_playbook_version(
         db_session,
+        workspace_id=request_scope.workspace_id,
         name=first,
         definition={"methodology": "wyckoff"},
     )
     second_version = create_playbook_version(
         db_session,
+        workspace_id=request_scope.workspace_id,
         name=second,
         definition={"methodology": "ict"},
     )
-    import_knowledge_text(db_session, "First strategy note.", first, "first.txt")
+    import_knowledge_text(
+        db_session,
+        "First strategy note.",
+        first,
+        "first.txt",
+        scope=request_scope,
+    )
     first_item = search_strategy_knowledge_for_management(
         db_session,
         first_version.id,
         "strategy note",
+        scope=request_scope,
         status="active",
     )[0]
 
@@ -293,4 +396,5 @@ def test_human_reference_cannot_cross_strategy_versions(db_session) -> None:
             db_session,
             second_version.id,
             knowledge_item_reference(first_item),
+            scope=request_scope,
         )

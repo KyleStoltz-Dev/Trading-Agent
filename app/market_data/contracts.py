@@ -2,12 +2,18 @@ from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Protocol
+from typing import Literal, Protocol
 
 
 def _require_aware(value: datetime, field: str) -> None:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field} must be timezone-aware")
+
+
+def _require_finite(value: Decimal | None, field: str) -> None:
+    """Reject NaN/Infinity at the provider-normalization boundary."""
+    if value is not None and not value.is_finite():
+        raise ValueError(f"{field} must be finite")
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +29,8 @@ class Quote:
     def __post_init__(self) -> None:
         _require_aware(self.market_time, "market_time")
         _require_aware(self.retrieved_at, "retrieved_at")
+        _require_finite(self.bid, "bid")
+        _require_finite(self.ask, "ask")
         if self.ask < self.bid:
             raise ValueError("ask cannot be below bid")
 
@@ -53,6 +61,11 @@ class Candle:
     def __post_init__(self) -> None:
         _require_aware(self.started_at, "started_at")
         _require_aware(self.retrieved_at, "retrieved_at")
+        _require_finite(self.open, "open")
+        _require_finite(self.high, "high")
+        _require_finite(self.low, "low")
+        _require_finite(self.close, "close")
+        _require_finite(self.volume, "volume")
         if self.high < max(self.open, self.close, self.low):
             raise ValueError("high must contain the candle prices")
         if self.low > min(self.open, self.close, self.high):
@@ -75,6 +88,9 @@ class PositionState:
     def __post_init__(self) -> None:
         _require_aware(self.market_time, "market_time")
         _require_aware(self.retrieved_at, "retrieved_at")
+        _require_finite(self.net_quantity, "net_quantity")
+        _require_finite(self.average_price, "average_price")
+        _require_finite(self.unrealized_pnl, "unrealized_pnl")
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +108,24 @@ class AccountState:
     def __post_init__(self) -> None:
         _require_aware(self.market_time, "market_time")
         _require_aware(self.retrieved_at, "retrieved_at")
+        _require_finite(self.balance, "balance")
+        _require_finite(self.equity, "equity")
+        _require_finite(self.margin_used, "margin_used")
+        _require_finite(self.margin_available, "margin_available")
+
+
+@dataclass(frozen=True, slots=True)
+class BrokerTradeEffect:
+    """One provider-normalized lifecycle effect contained in a broker transaction."""
+
+    external_trade_id: str
+    effect: Literal["opened", "reduced", "closed"]
+    quantity: Decimal
+    realized_pnl: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        _require_finite(self.quantity, "trade_effect.quantity")
+        _require_finite(self.realized_pnl, "trade_effect.realized_pnl")
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,9 +140,36 @@ class BrokerEvent:
     price: Decimal | None
     realized_pnl: Decimal | None
     source: str
+    commission: Decimal | None = None
+    financing: Decimal | None = None
+    guaranteed_execution_fee: Decimal | None = None
+    half_spread_cost: Decimal | None = None
+    trade_effects: tuple[BrokerTradeEffect, ...] = ()
+    infer_trade_open: bool = True
 
     def __post_init__(self) -> None:
         _require_aware(self.occurred_at, "occurred_at")
+        _require_finite(self.quantity, "quantity")
+        _require_finite(self.price, "price")
+        _require_finite(self.realized_pnl, "realized_pnl")
+        _require_finite(self.commission, "commission")
+        _require_finite(self.financing, "financing")
+        _require_finite(self.guaranteed_execution_fee, "guaranteed_execution_fee")
+        _require_finite(self.half_spread_cost, "half_spread_cost")
+
+
+SyncCoverage = Literal["baseline", "incremental", "complete"]
+
+
+@dataclass(frozen=True, slots=True)
+class SyncPage:
+    """One broker event page with explicit cursor and ledger coverage semantics."""
+
+    events: tuple[BrokerEvent, ...]
+    cursor_before: str | None
+    cursor_after: str | None
+    has_more: bool
+    coverage: SyncCoverage
 
 
 class MarketDataConnector(Protocol):
@@ -139,6 +200,4 @@ class ReadOnlyBrokerConnector(Protocol):
 
     async def positions(self) -> Sequence[PositionState]: ...
 
-    async def events_since(
-        self, cursor: str | None
-    ) -> tuple[Sequence[BrokerEvent], str | None]: ...
+    async def events_since(self, cursor: str | None) -> SyncPage: ...

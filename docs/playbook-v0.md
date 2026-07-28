@@ -49,10 +49,12 @@ used to invent a new thesis after the original invalidates.
 
 ## Operational definitions
 
-The machine-readable starting definition is `docs/playbook-schema-v1.json`. It declares
-measurable parameters for equal levels, sweeps/reclaims, body-close structure breaks,
-three-candle gaps, POI revisits, and 80% range location. Accumulation/distribution remains
-explicitly a hypothesis requiring a declared range, event sequence, and invalidation.
+The machine-readable starting definition is `docs/playbook-schema-v1.json`. It turns the
+current research ideas into supported preflight requirements and exclusions. Numeric
+parameters for equal levels, sweeps/reclaims, structure breaks, three-candle gaps, POI
+revisits, and range location still need to be declared and frozen in each test protocol.
+Accumulation/distribution remains explicitly a hypothesis requiring a declared range,
+event sequence, and invalidation.
 
 The following labels remain research questions whose parameter values must be selected and
 tested:

@@ -85,6 +85,7 @@ def select_harness_context(
     max_resources: int = 5,
     max_characters: int = 12_000,
     excluded_prefixes: tuple[str, ...] = (),
+    required_paths: tuple[str, ...] = (),
 ) -> HarnessContext:
     resolved_root = root.resolve()
     entrypoint = resolved_root / "HARNESS.md"
@@ -92,6 +93,33 @@ def select_harness_context(
         return HarnessContext(())
 
     selected = [_resource(entrypoint, resolved_root, score=10_000)]
+    selected_paths = {selected[0].path}
+    used = len(selected[0].content)
+    for relative in dict.fromkeys(required_paths):
+        candidate_path = resolved_root / relative
+        resolved = candidate_path.resolve()
+        if (
+            not relative
+            or Path(relative).is_absolute()
+            or ".." in Path(relative).parts
+            or candidate_path.is_symlink()
+            or not resolved.is_relative_to(resolved_root)
+            or not candidate_path.is_file()
+            or candidate_path.suffix != ".md"
+            or any(relative.startswith(prefix) for prefix in excluded_prefixes)
+        ):
+            raise ValueError(f"invalid required harness resource: {relative}")
+        candidate = _resource(candidate_path, resolved_root, score=9_000)
+        if candidate.path in selected_paths:
+            continue
+        if len(selected) >= max_resources:
+            break
+        if used + len(candidate.content) > max_characters:
+            raise ValueError(f"required harness resources exceed context limit: {relative}")
+        selected.append(candidate)
+        selected_paths.add(candidate.path)
+        used += len(candidate.content)
+
     candidates: list[HarnessResource] = []
     for path in sorted(resolved_root.rglob("*.md")):
         resolved = path.resolve()
@@ -106,12 +134,14 @@ def select_harness_context(
             candidates.append(_resource(path, resolved_root, score))
 
     candidates.sort(key=lambda item: (-item.score, item.path))
-    used = len(selected[0].content)
     for candidate in candidates:
         if len(selected) >= max_resources:
             break
+        if candidate.path in selected_paths:
+            continue
         if used + len(candidate.content) > max_characters:
             continue
         selected.append(candidate)
+        selected_paths.add(candidate.path)
         used += len(candidate.content)
     return HarnessContext(tuple(selected))

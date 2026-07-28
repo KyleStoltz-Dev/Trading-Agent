@@ -2,8 +2,10 @@ import csv
 import hashlib
 import io
 import json
+import os
+import stat
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -14,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.models import KnowledgeImport, StrategyKnowledgeItem
 from app.schemas import KnowledgeImportResult
 from app.services.strategy_workspace import resolve_strategy_version
+from app.services.workspaces import RequestScope
 
 SUPPORTED_SUFFIXES = frozenset({".txt", ".md", ".json", ".jsonl", ".csv", ".js"})
 MAX_FILE_BYTES = 20 * 1024 * 1024
@@ -22,6 +25,8 @@ MAX_ARCHIVE_MEMBERS = 10_000
 MAX_DIRECTORY_BYTES = 250 * 1024 * 1024
 MAX_IMPORT_ITEMS = 50_000
 MAX_ITEM_CHARACTERS = 20_000
+MAX_METADATA_CHARACTERS = 2_000
+MAX_ATTACHMENTS_PER_ITEM = 50
 MAX_JSON_DEPTH = 100
 MAX_JSON_NODES = 250_000
 TEXT_CHUNK_CHARACTERS = 4_000
@@ -59,7 +64,39 @@ def _clean_content(value: Any) -> str:
         )
     if not isinstance(value, str):
         return ""
-    return value.replace("\x00", "").strip()[:MAX_ITEM_CHARACTERS]
+    return value.replace("\x00", "").strip()
+
+
+def _clean_pasted_content(value: str) -> str:
+    cleaned = value.replace("\x00", "").strip()
+    if len(cleaned.encode("utf-8")) > MAX_FILE_BYTES:
+        raise ValueError("pasted knowledge exceeds 20 MB")
+    return cleaned
+
+
+def _bounded_attachment_metadata(value: Any) -> list[str | dict[str, str]]:
+    """Retain useful attachment labels without persisting arbitrary nested exports."""
+    if not isinstance(value, list):
+        return []
+    bounded: list[str | dict[str, str]] = []
+    for item in value[:MAX_ATTACHMENTS_PER_ITEM]:
+        if isinstance(item, str) and item.strip():
+            bounded.append(
+                item.replace("\x00", "").strip()[:MAX_METADATA_CHARACTERS]
+            )
+            continue
+        if not isinstance(item, dict):
+            continue
+        safe: dict[str, str] = {}
+        for key in ("id", "filename", "fileName", "url", "content_type", "contentType"):
+            raw = item.get(key)
+            if isinstance(raw, str) and raw.strip():
+                safe[key] = (
+                    raw.replace("\x00", "").strip()[:MAX_METADATA_CHARACTERS]
+                )
+        if safe:
+            bounded.append(safe)
+    return bounded
 
 
 def _chunks(text: str, source_reference: str) -> list[ImportedRecord]:
@@ -85,6 +122,26 @@ def _chunks(text: str, source_reference: str) -> list[ImportedRecord]:
             source_reference=f"{source_reference}#chunk-{index}",
         )
         for index, chunk in enumerate(chunks, start=1)
+    ]
+
+
+def _record_parts(record: ImportedRecord) -> list[ImportedRecord]:
+    """Bound retrieved rows without silently discarding long imported messages."""
+    content = _clean_content(record.content)
+    if not content:
+        return []
+    if len(content) <= MAX_ITEM_CHARACTERS:
+        return [replace(record, content=content)]
+    return [
+        replace(
+            record,
+            content=content[offset : offset + MAX_ITEM_CHARACTERS],
+            source_reference=(
+                f"{record.source_reference}#part-"
+                f"{offset // MAX_ITEM_CHARACTERS + 1}"
+            ),
+        )
+        for offset in range(0, len(content), MAX_ITEM_CHARACTERS)
     ]
 
 
@@ -133,7 +190,7 @@ def _message_record(item: dict[str, Any], source_reference: str) -> ImportedReco
             or item.get("created_at")
             or item.get("createdAt")
         ),
-        metadata={"attachments": attachments[:50] if isinstance(attachments, list) else []},
+        metadata={"attachments": _bounded_attachment_metadata(attachments)},
     )
 
 
@@ -188,23 +245,40 @@ def _json_records(payload: Any, source_reference: str) -> list[ImportedRecord]:
 
 def _csv_records(text: str, source_reference: str) -> list[ImportedRecord]:
     reader = csv.DictReader(io.StringIO(text))
-    return [
-        record
-        for index, item in enumerate(reader, start=1)
-        if (
-            record := _message_record(
-                dict(item),
-                f"{source_reference}#row-{index}",
-            )
-        )
-        is not None
-    ]
+    records: list[ImportedRecord] = []
+    for index, item in enumerate(reader, start=1):
+        if index > MAX_IMPORT_ITEMS:
+            raise ValueError("knowledge import exceeds 50,000 items")
+        record = _message_record(dict(item), f"{source_reference}#row-{index}")
+        if record is not None:
+            records.append(record)
+    return records
 
 
 def _decode(data: bytes) -> str:
     if len(data) > MAX_FILE_BYTES:
         raise ValueError("import file exceeds 20 MB")
     return data.decode("utf-8-sig")
+
+
+def _read_bounded_file(path: Path, maximum_bytes: int, error: str) -> bytes:
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0),
+    )
+    try:
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise ValueError("knowledge import path must be a regular file")
+        if file_stat.st_size > maximum_bytes:
+            raise ValueError(error)
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            data = handle.read(maximum_bytes + 1)
+        if len(data) > maximum_bytes:
+            raise ValueError(error)
+        return data
+    finally:
+        os.close(descriptor)
 
 
 def _records_from_bytes(
@@ -223,8 +297,23 @@ def _records_from_bytes(
             text = text[marker + 1 :].strip().removesuffix(";")
         return _json_records(json.loads(text), source_reference)
     if suffix == ".jsonl":
-        payload = [json.loads(line) for line in text.splitlines() if line.strip()]
-        return _json_records(payload, source_reference)
+        records: list[ImportedRecord] = []
+        parsed_lines = 0
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if not line.strip():
+                continue
+            parsed_lines += 1
+            if parsed_lines > MAX_IMPORT_ITEMS:
+                raise ValueError("knowledge import exceeds 50,000 items")
+            payload = json.loads(line)
+            line_records = _json_records(
+                payload,
+                f"{source_reference}#line-{line_number}",
+            )
+            if len(records) + len(line_records) > MAX_IMPORT_ITEMS:
+                raise ValueError("knowledge import exceeds 50,000 items")
+            records.extend(line_records)
+        return records
     if suffix == ".csv":
         return _csv_records(text, source_reference)
     raise ValueError(f"unsupported import type: {suffix}")
@@ -236,9 +325,11 @@ def _path_records(path: Path) -> tuple[list[ImportedRecord], bytes, str]:
         raise ValueError("knowledge import does not follow symlinks")
     resolved = expanded.resolve()
     if resolved.is_file() and resolved.suffix.lower() == ".zip":
-        archive_data = resolved.read_bytes()
-        if len(archive_data) > MAX_ARCHIVE_BYTES:
-            raise ValueError("knowledge archive exceeds 100 MB")
+        archive_data = _read_bounded_file(
+            resolved,
+            MAX_ARCHIVE_BYTES,
+            "knowledge archive exceeds 100 MB",
+        )
         records: list[ImportedRecord] = []
         total_size = 0
         member_names: list[str] = []
@@ -285,7 +376,11 @@ def _path_records(path: Path) -> tuple[list[ImportedRecord], bytes, str]:
             raise ValueError(
                 "supported imports are TXT, Markdown, JSON, CSV, Discord ZIP, or a directory"
             )
-        data = resolved.read_bytes()
+        data = _read_bounded_file(
+            resolved,
+            MAX_FILE_BYTES,
+            "import file exceeds 20 MB",
+        )
         records = _records_from_bytes(data, suffix, resolved.name)
         lowered_name = resolved.name.lower()
         if "telegram" in lowered_name or lowered_name == "result.json":
@@ -315,7 +410,11 @@ def _path_records(path: Path) -> tuple[list[ImportedRecord], bytes, str]:
             total_size += item.stat().st_size
             if total_size > MAX_DIRECTORY_BYTES:
                 raise ValueError("knowledge directory exceeds 250 MB")
-            data = item.read_bytes()
+            data = _read_bounded_file(
+                item_resolved,
+                MAX_FILE_BYTES,
+                "import file exceeds 20 MB",
+            )
             relative = item.relative_to(resolved).as_posix()
             digest.update(relative.encode())
             digest.update(hashlib.sha256(data).digest())
@@ -331,6 +430,7 @@ def _path_records(path: Path) -> tuple[list[ImportedRecord], bytes, str]:
 def _persist_records(
     db: Session,
     *,
+    scope: RequestScope,
     strategy: str,
     source_name: str,
     source_locator: str | None,
@@ -338,9 +438,10 @@ def _persist_records(
     source_hash: str,
     records: list[ImportedRecord],
 ) -> KnowledgeImportResult:
-    playbook, version = resolve_strategy_version(db, strategy)
+    playbook, version = resolve_strategy_version(db, strategy, scope=scope)
     existing = db.scalar(
         select(KnowledgeImport).where(
+            KnowledgeImport.workspace_id == scope.workspace_id,
             KnowledgeImport.playbook_version_id == version.id,
             KnowledgeImport.source_hash == source_hash,
         )
@@ -356,6 +457,7 @@ def _persist_records(
             skipped=existing.skipped_count,
         )
     knowledge_import = KnowledgeImport(
+        workspace_id=scope.workspace_id,
         playbook_version_id=version.id,
         source_type=source_type,
         source_name=source_name[:255],
@@ -368,36 +470,43 @@ def _persist_records(
     existing_hashes = set(
         db.scalars(
             select(StrategyKnowledgeItem.content_hash).where(
+                StrategyKnowledgeItem.workspace_id == scope.workspace_id,
                 StrategyKnowledgeItem.playbook_version_id == version.id
             )
         )
     )
     imported = 0
     skipped = 0
+    item_count = 0
     for record in records:
-        content = _clean_content(record.content)
-        if not content:
+        parts = _record_parts(record)
+        if not parts:
             skipped += 1
             continue
-        content_hash = hashlib.sha256(content.encode()).hexdigest()
-        if content_hash in existing_hashes:
-            skipped += 1
-            continue
-        db.add(
-            StrategyKnowledgeItem(
-                import_id=knowledge_import.id,
-                playbook_version_id=version.id,
-                kind=record.kind,
-                source_reference=record.source_reference,
-                author=record.author,
-                occurred_at=record.occurred_at,
-                content=content,
-                content_hash=content_hash,
-                metadata_json=record.metadata or {},
+        for part in parts:
+            item_count += 1
+            if item_count > MAX_IMPORT_ITEMS:
+                raise ValueError("knowledge import exceeds 50,000 items after safe chunking")
+            content_hash = hashlib.sha256(part.content.encode()).hexdigest()
+            if content_hash in existing_hashes:
+                skipped += 1
+                continue
+            db.add(
+                StrategyKnowledgeItem(
+                    workspace_id=scope.workspace_id,
+                    import_id=knowledge_import.id,
+                    playbook_version_id=version.id,
+                    kind=part.kind,
+                    source_reference=part.source_reference,
+                    author=part.author,
+                    occurred_at=part.occurred_at,
+                    content=part.content,
+                    content_hash=content_hash,
+                    metadata_json=part.metadata or {},
+                )
             )
-        )
-        existing_hashes.add(content_hash)
-        imported += 1
+            existing_hashes.add(content_hash)
+            imported += 1
     knowledge_import.item_count = imported
     knowledge_import.skipped_count = skipped
     knowledge_import.status = "partial" if skipped else "completed"
@@ -418,12 +527,15 @@ def import_knowledge_path(
     db: Session,
     path: Path,
     strategy: str,
+    *,
+    scope: RequestScope,
 ) -> KnowledgeImportResult:
     expanded = path.expanduser()
     records, source_bytes, source_type = _path_records(expanded)
     resolved = expanded.resolve()
     return _persist_records(
         db,
+        scope=scope,
         strategy=strategy,
         source_name=resolved.name,
         source_locator=str(resolved),
@@ -438,12 +550,15 @@ def import_knowledge_text(
     text: str,
     strategy: str,
     name: str = "pasted-notes",
+    *,
+    scope: RequestScope,
 ) -> KnowledgeImportResult:
-    cleaned = _clean_content(text)
+    cleaned = _clean_pasted_content(text)
     if not cleaned:
         raise ValueError("pasted knowledge cannot be empty")
     return _persist_records(
         db,
+        scope=scope,
         strategy=strategy,
         source_name=name,
         source_locator=None,

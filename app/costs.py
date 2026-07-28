@@ -13,12 +13,16 @@ class TokenUsage:
     input_tokens: int = 0
     output_tokens: int = 0
     cached_input_tokens: int = 0
+    cache_write_input_tokens: int = 0
 
     def __add__(self, other: "TokenUsage") -> "TokenUsage":
         return TokenUsage(
             input_tokens=self.input_tokens + other.input_tokens,
             output_tokens=self.output_tokens + other.output_tokens,
             cached_input_tokens=self.cached_input_tokens + other.cached_input_tokens,
+            cache_write_input_tokens=(
+                self.cache_write_input_tokens + other.cache_write_input_tokens
+            ),
         )
 
 
@@ -31,6 +35,7 @@ class ModelPricing:
     cached_input_per_million: Decimal | None
     source_url: str
     note: str = ""
+    cache_write_input_per_million: Decimal | None = None
 
 
 OPENAI_PRICES = {
@@ -40,7 +45,7 @@ OPENAI_PRICES = {
     "gpt-5.6-luna": ("1.00", "6.00", "0.10"),
 }
 OPENAI_PRICING_URL = "https://developers.openai.com/api/docs/models/compare"
-ANTHROPIC_PRICING_URL = "https://www.anthropic.com/news/claude-sonnet-5"
+ANTHROPIC_PRICING_URL = "https://platform.claude.com/docs/en/about-claude/pricing"
 
 
 def model_pricing(
@@ -79,12 +84,17 @@ def model_pricing(
             model=model,
             input_per_million=Decimal("2" if introductory else "3"),
             output_per_million=Decimal("10" if introductory else "15"),
-            cached_input_per_million=None,
+            cached_input_per_million=(
+                Decimal("0.2") if introductory else Decimal("0.3")
+            ),
             source_url=ANTHROPIC_PRICING_URL,
             note=(
                 "introductory pricing through 2026-08-31"
                 if introductory
                 else "standard pricing after 2026-08-31"
+            ),
+            cache_write_input_per_million=(
+                Decimal("2.5") if introductory else Decimal("3.75")
             ),
         )
     return None
@@ -120,13 +130,42 @@ def output_budget_for_mode(mode: str) -> int:
     }.get(mode, 900)
 
 
+def estimated_multi_round_usage(
+    *,
+    initial_input_tokens: int,
+    output_tokens_per_round: int,
+    rounds: int,
+    tool_result_tokens_per_round: int = 1000,
+) -> TokenUsage:
+    """Estimate growing-context usage for a bounded tool-calling request."""
+    bounded_rounds = max(1, rounds)
+    prior_round_context = (
+        output_tokens_per_round + max(0, tool_result_tokens_per_round)
+    )
+    growing_context = (
+        prior_round_context * bounded_rounds * (bounded_rounds - 1) // 2
+    )
+    return TokenUsage(
+        input_tokens=(initial_input_tokens * bounded_rounds) + growing_context,
+        output_tokens=output_tokens_per_round * bounded_rounds,
+    )
+
+
 def calculate_cost(pricing: ModelPricing, usage: TokenUsage) -> Decimal:
     cached = min(usage.cached_input_tokens, usage.input_tokens)
-    regular = usage.input_tokens - cached
+    cache_write = min(
+        usage.cache_write_input_tokens,
+        usage.input_tokens - cached,
+    )
+    regular = usage.input_tokens - cached - cache_write
     cached_rate = pricing.cached_input_per_million or pricing.input_per_million
+    cache_write_rate = (
+        pricing.cache_write_input_per_million or pricing.input_per_million
+    )
     return (
         Decimal(regular) * pricing.input_per_million
         + Decimal(cached) * cached_rate
+        + Decimal(cache_write) * cache_write_rate
         + Decimal(usage.output_tokens) * pricing.output_per_million
     ) / MILLION
 

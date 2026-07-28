@@ -11,7 +11,6 @@ from app.models import (
     Observation,
     RuleEvaluation,
     Trade,
-    TradingAccount,
 )
 from app.schemas import (
     BrokerPositionSizeRequest,
@@ -109,9 +108,47 @@ def test_mindset_schema_enforces_bounded_non_diagnostic_inputs() -> None:
             accepted_risk=False,
             emotion_tags=["x" * 41],
         )
+    exact_state = "I’m fucking terrified and pissed off."
+    request = MindsetCheckInCreate(
+        phase="pre_trade",
+        readiness=3,
+        accepted_risk=False,
+        emotion_tags=["fear", "anger"],
+        emotional_state=f"  {exact_state}  ",
+    )
+    assert request.emotional_state == exact_state
 
 
-def test_broker_contract_drives_plan_sizing_and_normalized_observations(db_session) -> None:
+def test_mindset_reflective_text_is_bounded_and_rejects_credentials() -> None:
+    normalized = MindsetCheckInCreate(
+        phase="pre_trade",
+        readiness=3,
+        accepted_risk=False,
+        emotional_state="angry\r\nbut still aware of my plan",
+    )
+    assert normalized.emotional_state == "angry\nbut still aware of my plan"
+    with pytest.raises(ValueError, match="control or directionality"):
+        MindsetCheckInCreate(
+            phase="pre_trade",
+            readiness=3,
+            accepted_risk=False,
+            emotional_state="calm\u200b",
+        )
+    secret = "OPENAI_API_KEY=sk-abcdefghijklmnop"
+    with pytest.raises(ValueError, match="cannot contain credentials") as exc:
+        MindsetCheckInCreate(
+            phase="pre_trade",
+            readiness=3,
+            accepted_risk=False,
+            emotional_state=secret,
+        )
+    assert secret not in str(exc.value)
+
+
+def test_broker_contract_drives_plan_sizing_and_normalized_observations(
+    db_session,
+    request_scope,
+) -> None:
     configure_instrument_specification(db_session, _specification_request())
     specification = active_instrument_specification(
         db_session,
@@ -136,11 +173,10 @@ def test_broker_contract_drives_plan_sizing_and_normalized_observations(db_sessi
         _plan_request(),
         policy_hash="a" * 64,
         source="test",
+        scope=request_scope,
     )
     observations = list(
-        db_session.scalars(
-            select(Observation).where(Observation.trade_plan_id == plan.id)
-        )
+        db_session.scalars(select(Observation).where(Observation.trade_plan_id == plan.id))
     )
 
     assert sizing.quantity == Decimal("9.0000000000")
@@ -148,12 +184,19 @@ def test_broker_contract_drives_plan_sizing_and_normalized_observations(db_sessi
     assert sizing.estimated_costs == Decimal("4.50")
     assert plan.instrument_specification_id == specification.id
     assert plan.reference.startswith("xauusd-20260723-ny-long-")
-    assert get_trade_plan(db_session, plan.reference).id == plan.id
+    assert get_trade_plan(
+        db_session,
+        plan.reference,
+        scope=request_scope,
+    ).id == plan.id
     assert plan.risk_amount == Decimal("94.5000")
     assert {item.kind for item in observations} == {"fact", "hypothesis"}
 
 
-def test_trade_plan_event_proximity_ignores_unrelated_currencies(db_session) -> None:
+def test_trade_plan_event_proximity_ignores_unrelated_currencies(
+    db_session,
+    request_scope,
+) -> None:
     configure_instrument_specification(db_session, _specification_request())
     request = _plan_request()
     market_time = request.market_time
@@ -183,16 +226,25 @@ def test_trade_plan_event_proximity_ignores_unrelated_currencies(db_session) -> 
     )
     db_session.commit()
 
-    plan = create_trade_plan(db_session, request, source="test")
+    plan = create_trade_plan(
+        db_session,
+        request,
+        source="test",
+        scope=request_scope,
+    )
 
     assert plan.minutes_to_high_impact_event == 60
 
 
-def test_mindset_check_in_resolves_human_trade_reference_and_filters(db_session) -> None:
+def test_mindset_check_in_resolves_human_trade_reference_and_filters(
+    db_session,
+    request_scope,
+) -> None:
     configure_instrument_specification(db_session, _specification_request())
     request = _plan_request()
     version = create_playbook_version(
         db_session,
+        workspace_id=request_scope.workspace_id,
         name=request.setup_name,
         definition={"requirements": ["Trade follows the defined setup."]},
     )
@@ -201,6 +253,7 @@ def test_mindset_check_in_resolves_human_trade_reference_and_filters(db_session)
         request,
         source="test",
         playbook_version_id=version.id,
+        scope=request_scope,
     )
 
     created = create_mindset_check_in(
@@ -210,27 +263,90 @@ def test_mindset_check_in_resolves_human_trade_reference_and_filters(db_session)
             readiness=4,
             accepted_risk=True,
             emotion_tags=[" Focused ", "focused", "Patient"],
+            emotional_state="I’m fucking focused and calm.",
             note="The stop is predefined and the loss is acceptable.",
             trade_reference=plan.reference,
         ),
         playbook_version_id=version.id,
+        scope=request_scope,
     )
     results = list_mindset_check_ins(
         db_session,
         playbook_version_id=version.id,
         limit=5,
         phase="pre_trade",
+        scope=request_scope,
     )
 
     assert created.trade_plan_id == plan.id
     assert created.trade_reference == plan.reference
     assert created.emotion_tags == ["focused", "patient"]
+    assert created.emotional_state == "I’m fucking focused and calm."
     assert results[0] == created
 
 
-def test_mindset_check_in_fails_closed_for_unknown_trade(db_session) -> None:
+def test_active_strategy_risk_rules_apply_to_direct_journal_creation(
+    db_session,
+    request_scope,
+) -> None:
+    name = f"strict-risk-{uuid.uuid4().hex[:12]}"
     version = create_playbook_version(
         db_session,
+        workspace_id=request_scope.workspace_id,
+        name=name,
+        definition={
+            "requirements": ["Trade follows the defined setup."],
+            "risk": {
+                "maximum_risk_percent": "0.25",
+                "minimum_planned_r": "3",
+                "human_confirms_every_trade": True,
+            },
+        },
+    )
+    request = _plan_request().model_copy(
+        update={
+            "setup_name": name,
+            "risk_percent": Decimal("0.5"),
+            "sizing_provider": None,
+            "sizing_symbol": None,
+            "available_margin": None,
+        }
+    )
+
+    with pytest.raises(ValueError, match="effective strategy maximum"):
+        create_trade_plan(
+            db_session,
+            request,
+            source="test",
+            maximum_risk_percent=Decimal("1"),
+            playbook_version_id=version.id,
+            scope=request_scope,
+        )
+
+    low_r = request.model_copy(
+        update={
+            "risk_percent": Decimal("0.25"),
+            "target": Decimal("2420"),
+        }
+    )
+    with pytest.raises(ValueError, match="planned R must be at least 3"):
+        create_trade_plan(
+            db_session,
+            low_r,
+            source="test",
+            maximum_risk_percent=Decimal("1"),
+            playbook_version_id=version.id,
+            scope=request_scope,
+        )
+
+
+def test_mindset_check_in_fails_closed_for_unknown_trade(
+    db_session,
+    request_scope,
+) -> None:
+    version = create_playbook_version(
+        db_session,
+        workspace_id=request_scope.workspace_id,
         name=f"mindset-{uuid.uuid4()}",
         definition={"requirements": ["Trade follows the defined setup."]},
     )
@@ -244,20 +360,26 @@ def test_mindset_check_in_fails_closed_for_unknown_trade(db_session) -> None:
                 trade_reference="missing-trade",
             ),
             playbook_version_id=version.id,
+            scope=request_scope,
         )
 
 
-def test_mindset_check_ins_cannot_cross_strategy_versions(db_session) -> None:
+def test_mindset_check_ins_cannot_cross_strategy_versions(
+    db_session,
+    request_scope,
+) -> None:
     configure_instrument_specification(db_session, _specification_request())
     strategy_a = f"strategy-a-{uuid.uuid4()}"
     strategy_b = f"strategy-b-{uuid.uuid4()}"
     version_a = create_playbook_version(
         db_session,
+        workspace_id=request_scope.workspace_id,
         name=strategy_a,
         definition={"requirements": ["A rule."]},
     )
     version_b = create_playbook_version(
         db_session,
+        workspace_id=request_scope.workspace_id,
         name=strategy_b,
         definition={"requirements": ["B rule."]},
     )
@@ -265,6 +387,7 @@ def test_mindset_check_ins_cannot_cross_strategy_versions(db_session) -> None:
         db_session,
         _plan_request().model_copy(update={"setup_name": strategy_a}),
         playbook_version_id=version_a.id,
+        scope=request_scope,
     )
     check_in_a = create_mindset_check_in(
         db_session,
@@ -275,16 +398,22 @@ def test_mindset_check_ins_cannot_cross_strategy_versions(db_session) -> None:
             trade_reference=plan_a.reference,
         ),
         playbook_version_id=version_a.id,
+        scope=request_scope,
     )
 
     assert list_mindset_check_ins(
         db_session,
         playbook_version_id=version_a.id,
+        scope=request_scope,
     ) == [check_in_a]
-    assert list_mindset_check_ins(
-        db_session,
-        playbook_version_id=version_b.id,
-    ) == []
+    assert (
+        list_mindset_check_ins(
+            db_session,
+            playbook_version_id=version_b.id,
+            scope=request_scope,
+        )
+        == []
+    )
     with pytest.raises(TradeNotFoundError):
         create_mindset_check_in(
             db_session,
@@ -295,19 +424,25 @@ def test_mindset_check_ins_cannot_cross_strategy_versions(db_session) -> None:
                 trade_reference=plan_a.reference,
             ),
             playbook_version_id=version_b.id,
+            scope=request_scope,
         )
 
 
-def test_strategy_scoped_journal_pins_the_exact_active_version(db_session) -> None:
+def test_strategy_scoped_journal_pins_the_exact_active_version(
+    db_session,
+    request_scope,
+) -> None:
     configure_instrument_specification(db_session, _specification_request())
     name = f"wyckoff-pure-{uuid.uuid4().hex[:10]}"
     version_one = create_playbook_version(
         db_session,
+        workspace_id=request_scope.workspace_id,
         name=name,
         definition={"trigger": "spring"},
     )
     version_two = create_playbook_version(
         db_session,
+        workspace_id=request_scope.workspace_id,
         name=name,
         definition={"trigger": "spring and reclaim"},
     )
@@ -317,6 +452,7 @@ def test_strategy_scoped_journal_pins_the_exact_active_version(db_session) -> No
         db_session,
         request,
         playbook_version_id=version_one.id,
+        scope=request_scope,
     )
 
     assert plan.playbook_version_id == version_one.id
@@ -324,33 +460,39 @@ def test_strategy_scoped_journal_pins_the_exact_active_version(db_session) -> No
     assert list_trade_plans(
         db_session,
         playbook_version_id=version_one.id,
+        scope=request_scope,
     ) == [plan]
     with pytest.raises(TradeNotFoundError):
         get_trade_plan(
             db_session,
             plan.reference,
             playbook_version_id=version_two.id,
+            scope=request_scope,
         )
     with pytest.raises(ValueError, match="active"):
         create_trade_plan(
             db_session,
             request.model_copy(update={"setup_name": "different-strategy"}),
             playbook_version_id=version_one.id,
+            scope=request_scope,
         )
 
 
 def test_unscoped_plan_does_not_silently_roll_forward_to_latest_strategy(
     db_session,
+    request_scope,
 ) -> None:
     configure_instrument_specification(db_session, _specification_request())
     name = f"no-silent-roll-forward-{uuid.uuid4().hex[:10]}"
     create_playbook_version(
         db_session,
+        workspace_id=request_scope.workspace_id,
         name=name,
         definition={"trigger": "version one"},
     )
     create_playbook_version(
         db_session,
+        workspace_id=request_scope.workspace_id,
         name=name,
         definition={"trigger": "version two"},
     )
@@ -358,14 +500,23 @@ def test_unscoped_plan_does_not_silently_roll_forward_to_latest_strategy(
     plan = create_trade_plan(
         db_session,
         _plan_request().model_copy(update={"setup_name": name}),
+        scope=request_scope,
     )
 
     assert plan.playbook_version_id is None
 
 
-def test_review_normalizes_rules_and_edge_report_keeps_process_separate(db_session) -> None:
+def test_review_normalizes_rules_and_edge_report_keeps_process_separate(
+    db_session,
+    request_scope,
+) -> None:
     configure_instrument_specification(db_session, _specification_request())
-    plan = create_trade_plan(db_session, _plan_request(), policy_hash="b" * 64)
+    plan = create_trade_plan(
+        db_session,
+        _plan_request(),
+        policy_hash="b" * 64,
+        scope=request_scope,
+    )
     reflection = create_reflection(
         db_session,
         plan.id,
@@ -381,35 +532,32 @@ def test_review_normalizes_rules_and_edge_report_keeps_process_separate(db_sessi
             ],
             notes="Process and outcome are scored independently.",
         ),
+        scope=request_scope,
     )
     evaluations = list(
         db_session.scalars(
-            select(RuleEvaluation).where(
-                RuleEvaluation.reflection_id == reflection.id
-            )
+            select(RuleEvaluation).where(RuleEvaluation.reflection_id == reflection.id)
         )
     )
-    report = build_edge_report(db_session, minimum_sample=30)
+    report = build_edge_report(
+        db_session,
+        minimum_sample=30,
+        scope=request_scope,
+    )
 
     assert {item.result for item in evaluations} == {"met", "not_met"}
-    segment = next(
-        item for item in report.segments if item.setup_name == plan.setup_name
-    )
+    segment = next(item for item in report.segments if item.setup_name == plan.setup_name)
     assert segment.expectancy_r == Decimal("2.0000")
     assert segment.process_score_average == Decimal("92.0000")
     assert segment.validated_sample is False
 
 
-def test_management_and_approval_ledger_are_append_only(db_session) -> None:
-    account = TradingAccount(
-        broker="test",
-        external_account_id=str(uuid.uuid4()),
-        label="test",
-        currency="USD",
-        mode="practice",
-    )
-    db_session.add(account)
-    db_session.flush()
+def test_management_and_approval_ledger_are_append_only(
+    db_session,
+    workspace_account,
+    request_scope,
+) -> None:
+    _, account = workspace_account
     configure_instrument_specification(db_session, _specification_request())
     specification = active_instrument_specification(
         db_session,
@@ -420,6 +568,7 @@ def test_management_and_approval_ledger_are_append_only(db_session) -> None:
         InstrumentMapping, specification.instrument_mapping_id
     ).instrument_id
     trade = Trade(
+        workspace_id=request_scope.workspace_id,
         account_id=account.id,
         instrument_id=instrument_id,
         direction="short",
@@ -440,9 +589,11 @@ def test_management_and_approval_ledger_are_append_only(db_session) -> None:
             reason="Paid 3/4 at the predefined objective.",
             occurred_at=datetime.now(UTC),
         ),
+        scope=request_scope,
     )
     intent = propose_order_intent(
         db_session,
+        scope=request_scope,
         trade_id=trade.id,
         action="modify_stop",
         side="buy",
@@ -462,6 +613,7 @@ def test_management_and_approval_ledger_are_append_only(db_session) -> None:
         decided_by="trader",
         channel="cli",
         expected_intent_hash=intent_hash(intent),
+        scope=request_scope,
     )
 
     assert event.realized_r_at_event == Decimal("4.0000")
@@ -474,4 +626,5 @@ def test_management_and_approval_ledger_are_append_only(db_session) -> None:
             decided_by="trader",
             channel="cli",
             expected_intent_hash=intent_hash(intent),
+            scope=request_scope,
         )

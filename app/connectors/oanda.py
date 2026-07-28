@@ -7,9 +7,11 @@ prompts or journal records.
 
 import asyncio
 import json
+import math
 from collections.abc import AsyncIterator, Callable, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -17,19 +19,42 @@ import httpx
 from app.market_data.contracts import (
     AccountState,
     BrokerEvent,
+    BrokerTradeEffect,
     Candle,
     PositionState,
     Quote,
+    SyncPage,
 )
 
 PRACTICE_REST_URL = "https://api-fxpractice.oanda.com"
 LIVE_REST_URL = "https://api-fxtrade.oanda.com"
 PRACTICE_STREAM_URL = "https://stream-fxpractice.oanda.com"
 LIVE_STREAM_URL = "https://stream-fxtrade.oanda.com"
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+MAX_TRANSACTION_ID_RANGE = 1_000
 
 
 class OandaConnectorError(RuntimeError):
     pass
+
+
+def _retry_delay(value: str | None, attempt: int) -> float:
+    fallback = 0.25 * 2**attempt
+    if not value:
+        return fallback
+    try:
+        delay = float(value)
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=UTC)
+            delay = (retry_at - datetime.now(UTC)).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            return fallback
+    if not math.isfinite(delay) or delay < 0:
+        return fallback
+    return min(delay, 5.0)
 
 
 def normalize_quote(
@@ -80,23 +105,88 @@ def normalize_candle(
     )
 
 
+def _optional_decimal(payload: dict[str, Any], key: str) -> Decimal | None:
+    value = payload.get(key)
+    return Decimal(str(value)) if value is not None else None
+
+
+def _trade_effect(
+    payload: dict[str, Any],
+    effect: str,
+) -> BrokerTradeEffect | None:
+    trade_id = payload.get("tradeID")
+    units = payload.get("units")
+    if trade_id is None or units is None:
+        return None
+    return BrokerTradeEffect(
+        external_trade_id=str(trade_id),
+        effect=effect,
+        quantity=Decimal(str(units)),
+        realized_pnl=_optional_decimal(payload, "realizedPL"),
+    )
+
+
 def normalize_transaction(payload: dict[str, Any]) -> BrokerEvent:
-    trade = payload.get("tradeOpened") or payload.get("tradeReduced")
-    closed = payload.get("tradesClosed") or []
-    nested_trade_id = trade.get("tradeID") if trade else None
-    if nested_trade_id is None and closed:
-        nested_trade_id = closed[0].get("tradeID")
+    effects: list[BrokerTradeEffect] = []
+    opened = payload.get("tradeOpened")
+    reduced = payload.get("tradeReduced")
+    if isinstance(opened, dict) and (effect := _trade_effect(opened, "opened")):
+        effects.append(effect)
+    if isinstance(reduced, dict) and (effect := _trade_effect(reduced, "reduced")):
+        effects.append(effect)
+    for closed in payload.get("tradesClosed") or []:
+        if isinstance(closed, dict) and (effect := _trade_effect(closed, "closed")):
+            effects.append(effect)
+    nested_trade_id = next(
+        (
+            str(item["tradeID"])
+            for item in (
+                opened,
+                reduced,
+                *((payload.get("tradesClosed") or [])),
+            )
+            if isinstance(item, dict) and item.get("tradeID") is not None
+        ),
+        None,
+    )
+    primary_trade_id = (
+        next(
+            (
+                effect.external_trade_id
+                for effect in effects
+                if effect.effect == "opened"
+            ),
+            None,
+        )
+        or next(
+            (
+                effect.external_trade_id
+                for effect in effects
+                if effect.effect == "reduced"
+            ),
+            None,
+        )
+        or (effects[0].external_trade_id if effects else nested_trade_id)
+    )
     return BrokerEvent(
         external_id=str(payload["id"]),
         event_type=str(payload["type"]).lower(),
         occurred_at=datetime.fromisoformat(str(payload["time"]).replace("Z", "+00:00")),
         instrument=payload.get("instrument"),
         external_order_id=payload.get("orderID"),
-        external_trade_id=payload.get("tradeID") or nested_trade_id,
-        quantity=Decimal(str(payload["units"])) if payload.get("units") is not None else None,
-        price=Decimal(str(payload["price"])) if payload.get("price") is not None else None,
-        realized_pnl=(Decimal(str(payload["pl"])) if payload.get("pl") is not None else None),
+        external_trade_id=payload.get("tradeID") or primary_trade_id,
+        quantity=_optional_decimal(payload, "units"),
+        price=_optional_decimal(payload, "price"),
+        realized_pnl=_optional_decimal(payload, "pl"),
         source="oanda-v20",
+        commission=_optional_decimal(payload, "commission"),
+        financing=_optional_decimal(payload, "financing"),
+        guaranteed_execution_fee=_optional_decimal(
+            payload,
+            "guaranteedExecutionFee",
+        ),
+        half_spread_cost=_optional_decimal(payload, "halfSpreadCost"),
+        trade_effects=tuple(effects),
     )
 
 
@@ -113,6 +203,7 @@ class OandaReadOnlyConnector:
         account_id: str,
         environment: str = "practice",
         timeout_seconds: float = 10,
+        maximum_response_bytes: int = MAX_RESPONSE_BYTES,
         client: httpx.AsyncClient | None = None,
         stream_client: httpx.AsyncClient | None = None,
     ) -> None:
@@ -120,8 +211,11 @@ class OandaReadOnlyConnector:
             raise ValueError("OANDA token and account id are required")
         if environment not in {"practice", "live"}:
             raise ValueError("OANDA environment must be practice or live")
+        if maximum_response_bytes < 1:
+            raise ValueError("OANDA maximum response size must be positive")
         self.account_id = account_id
         self.environment = environment
+        self.maximum_response_bytes = maximum_response_bytes
         self.last_heartbeat_at: datetime | None = None
         self._heartbeat_handler: Callable[[datetime], None] | None = None
         headers = {"Authorization": f"Bearer {token}"}
@@ -156,18 +250,27 @@ class OandaReadOnlyConnector:
     ) -> dict[str, Any]:
         for attempt in range(3):
             try:
-                response = await self._client.get(path, params=params)
-                if response.status_code == 429 or response.status_code >= 500:
-                    if attempt == 2:
-                        raise OandaConnectorError(
-                            f"OANDA request failed with status {response.status_code}"
+                async with self._client.stream("GET", path, params=params) as response:
+                    if response.status_code == 429 or response.status_code >= 500:
+                        if attempt == 2:
+                            raise OandaConnectorError(
+                                f"OANDA request failed with status {response.status_code}"
+                            )
+                        await asyncio.sleep(
+                            _retry_delay(response.headers.get("retry-after"), attempt)
                         )
-                    retry_after = response.headers.get("retry-after")
-                    delay = min(float(retry_after), 5.0) if retry_after else 0.25 * 2**attempt
-                    await asyncio.sleep(delay)
-                    continue
-                response.raise_for_status()
-                payload = response.json()
+                        continue
+                    response.raise_for_status()
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in response.aiter_bytes():
+                        total += len(chunk)
+                        if total > self.maximum_response_bytes:
+                            raise OandaConnectorError(
+                                "OANDA response exceeded the configured limit"
+                            )
+                        chunks.append(chunk)
+                payload = json.loads(b"".join(chunks))
                 if not isinstance(payload, dict):
                     raise OandaConnectorError("OANDA returned an invalid JSON object")
                 return payload
@@ -181,6 +284,8 @@ class OandaReadOnlyConnector:
                 raise OandaConnectorError(
                     f"OANDA request failed with status {exc.response.status_code}"
                 ) from exc
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise OandaConnectorError("OANDA returned invalid JSON") from exc
         raise OandaConnectorError("OANDA request failed")
 
     async def latest_quote(self, instrument: str) -> Quote:
@@ -267,18 +372,50 @@ class OandaReadOnlyConnector:
     async def events_since(
         self,
         cursor: str | None,
-    ) -> tuple[Sequence[BrokerEvent], str | None]:
+    ) -> SyncPage:
         if cursor is None:
             payload = await self._get_json(f"/v3/accounts/{self.account_id}/summary")
-            return (), str(payload["lastTransactionID"])
+            return SyncPage(
+                events=(),
+                cursor_before=None,
+                cursor_after=str(payload["lastTransactionID"]),
+                has_more=False,
+                coverage="baseline",
+            )
+        if not cursor.isdigit():
+            raise ValueError("OANDA event cursor must contain only digits")
+        summary = await self._get_json(f"/v3/accounts/{self.account_id}/summary")
+        latest = int(summary["lastTransactionID"])
+        current = int(cursor)
+        if current > latest:
+            raise ValueError("OANDA event cursor is ahead of the account transaction stream")
+        if current == latest:
+            return SyncPage(
+                events=(),
+                cursor_before=cursor,
+                cursor_after=cursor,
+                has_more=False,
+                coverage="complete" if current == 0 else "incremental",
+            )
+        page_end = min(current + MAX_TRANSACTION_ID_RANGE, latest)
         payload = await self._get_json(
-            f"/v3/accounts/{self.account_id}/transactions/sinceid",
-            params={"id": cursor},
+            f"/v3/accounts/{self.account_id}/transactions/idrange",
+            params={"from": current + 1, "to": page_end},
         )
-        events = tuple(
-            normalize_transaction(item) for item in payload.get("transactions") or []
+        raw_events = payload.get("transactions") or []
+        if not isinstance(raw_events, list):
+            raise OandaConnectorError("OANDA returned an invalid transaction list")
+        if len(raw_events) > MAX_TRANSACTION_ID_RANGE:
+            raise OandaConnectorError("OANDA returned too many transactions for one page")
+        events = tuple(normalize_transaction(item) for item in raw_events)
+        has_more = page_end < latest
+        return SyncPage(
+            events=events,
+            cursor_before=cursor,
+            cursor_after=str(page_end),
+            has_more=has_more,
+            coverage="complete" if current == 0 and not has_more else "incremental",
         )
-        return events, str(payload.get("lastTransactionID") or cursor)
 
     async def stream_quotes(
         self,

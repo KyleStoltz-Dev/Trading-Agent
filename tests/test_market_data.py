@@ -8,6 +8,7 @@ from app.connectors.mt5 import normalize_rate, normalize_tick
 from app.connectors.oanda import normalize_candle, normalize_quote, normalize_transaction
 from app.market_data.cache import LiveMarketCache, StaleMarketDataError
 from app.market_data.contracts import (
+    BrokerTradeEffect,
     Candle,
     MarketDataConnector,
     Quote,
@@ -149,6 +150,53 @@ def test_oanda_payloads_are_normalized_without_persisting_ticks() -> None:
     assert event.quantity == Decimal("-2.5")
 
 
+def test_oanda_fill_normalizes_all_trade_effects_and_costs() -> None:
+    event = normalize_transaction(
+        {
+            "id": "9002",
+            "type": "ORDER_FILL",
+            "time": "2026-07-23T16:05:00Z",
+            "instrument": "XAU_USD",
+            "orderID": "8002",
+            "units": "-3",
+            "price": "2401",
+            "pl": "42.50",
+            "commission": "-1.25",
+            "financing": "-0.35",
+            "guaranteedExecutionFee": "-0.10",
+            "halfSpreadCost": "0.80",
+            "tradeOpened": {
+                "tradeID": "7002",
+                "units": "-1",
+                "price": "2401",
+            },
+            "tradeReduced": {
+                "tradeID": "7001",
+                "units": "1",
+                "realizedPL": "12.50",
+            },
+            "tradesClosed": [
+                {
+                    "tradeID": "6999",
+                    "units": "1",
+                    "realizedPL": "30",
+                }
+            ],
+        }
+    )
+
+    assert event.external_trade_id == "7002"
+    assert event.commission == Decimal("-1.25")
+    assert event.financing == Decimal("-0.35")
+    assert event.guaranteed_execution_fee == Decimal("-0.10")
+    assert event.half_spread_cost == Decimal("0.80")
+    assert event.trade_effects == (
+        BrokerTradeEffect("7002", "opened", Decimal("-1"), None),
+        BrokerTradeEffect("7001", "reduced", Decimal("1"), Decimal("12.50")),
+        BrokerTradeEffect("6999", "closed", Decimal("1"), Decimal("30")),
+    )
+
+
 def test_mt5_terminal_values_are_normalized() -> None:
     tick = normalize_tick(
         "XAUUSD",
@@ -185,3 +233,17 @@ def test_connector_protocols_do_not_define_execution_methods() -> None:
     protocol_names = set(vars(MarketDataConnector)) | set(vars(ReadOnlyBrokerConnector))
 
     assert forbidden.isdisjoint(protocol_names)
+
+
+@pytest.mark.parametrize("value", ("NaN", "Infinity", "-Infinity"))
+def test_market_contracts_reject_nonfinite_provider_values(value: str) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        Quote(
+            instrument="XAU_USD",
+            bid=Decimal(value),
+            ask=Decimal("2400"),
+            market_time=NOW,
+            retrieved_at=NOW,
+            source="test",
+            venue="TEST",
+        )

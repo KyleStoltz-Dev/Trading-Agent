@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.market_data.contracts import Candle
 from app.models import StrategyTestSample
 from app.services.strategy_workspace import resolve_strategy_experiment
+from app.services.workspaces import RequestScope, validate_scope
 
 
 def _decimal(value: Decimal) -> str:
@@ -169,11 +170,15 @@ def experiment_feature_correlations(
     db: Session,
     experiment_id,
     *,
+    scope: RequestScope,
     minimum_samples: int = 10,
 ) -> dict[str, Any]:
+    validate_scope(db, scope)
     samples = list(
         db.scalars(
             select(StrategyTestSample).where(
+                StrategyTestSample.workspace_id == scope.workspace_id,
+                StrategyTestSample.account_id == scope.account_id,
                 StrategyTestSample.experiment_id == experiment_id,
                 StrategyTestSample.classification == "eligible",
                 StrategyTestSample.outcome_r.is_not(None),
@@ -220,18 +225,24 @@ def strategy_experiment_report(
     db: Session,
     experiment_id,
     *,
+    scope: RequestScope,
     active_playbook_version_id=None,
 ) -> dict[str, Any]:
     experiment = resolve_strategy_experiment(
         db,
         experiment_id,
+        scope=scope,
         playbook_version_id=active_playbook_version_id,
     )
     experiment_id = experiment.id
     samples = list(
         db.scalars(
             select(StrategyTestSample)
-            .where(StrategyTestSample.experiment_id == experiment_id)
+            .where(
+                StrategyTestSample.workspace_id == scope.workspace_id,
+                StrategyTestSample.account_id == scope.account_id,
+                StrategyTestSample.experiment_id == experiment_id,
+            )
             .order_by(StrategyTestSample.occurred_at)
         )
     )
@@ -277,6 +288,7 @@ def strategy_experiment_report(
         "feature_correlations": experiment_feature_correlations(
             db,
             experiment_id,
+            scope=scope,
         ),
         "warning": (
             "This report describes the frozen sample. It does not establish causation "

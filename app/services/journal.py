@@ -10,7 +10,6 @@ from app.models import (
     EconomicEvent,
     Observation,
     Playbook,
-    PlaybookVersion,
     RuleEvaluation,
     TradePlan,
     TradeReflection,
@@ -19,9 +18,16 @@ from app.schemas import BrokerPositionSizeRequest, ReflectionCreate, TradePlanCr
 from app.services.catalog import (
     active_instrument_specification,
     get_or_create_instrument,
+    verify_playbook_version_integrity,
 )
 from app.services.event_relevance import instrument_event_currencies
 from app.services.risk import calculate_broker_position_size, calculate_position_size
+from app.services.strategy_risk import effective_strategy_risk_policy
+from app.services.workspaces import (
+    RequestScope,
+    validate_scope,
+    validate_strategy_scope,
+)
 
 
 class TradeNotFoundError(LookupError):
@@ -45,7 +51,13 @@ def _session_reference(value: str | None) -> str:
     return words[0][:12]
 
 
-def next_trade_reference(db: Session, request: TradePlanCreate) -> str:
+def next_trade_reference(
+    db: Session,
+    request: TradePlanCreate,
+    *,
+    scope: RequestScope,
+) -> str:
+    validate_scope(db, scope)
     occurred_at = request.market_time or datetime.now(UTC)
     prefix = "-".join(
         (
@@ -55,14 +67,19 @@ def next_trade_reference(db: Session, request: TradePlanCreate) -> str:
             request.direction,
         )
     )
-    # The transaction-scoped PostgreSQL advisory lock serializes allocation for one
-    # human-readable prefix without blocking unrelated instruments/sessions.
+    # The transaction-scoped PostgreSQL advisory lock serializes allocation within
+    # one account/reference prefix without blocking unrelated accounts or sessions.
+    lock_scope = f"{scope.workspace_id}:{scope.account_id}:{prefix}"
     db.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:prefix, 0))"),
-        {"prefix": prefix},
+        {"prefix": lock_scope},
     )
     references = db.scalars(
-        select(TradePlan.reference).where(TradePlan.reference.like(f"{prefix}-%"))
+        select(TradePlan.reference).where(
+            TradePlan.workspace_id == scope.workspace_id,
+            TradePlan.account_id == scope.account_id,
+            TradePlan.reference.like(f"{prefix}-%"),
+        )
     )
     suffixes = [
         int(reference.rsplit("-", 1)[-1])
@@ -76,23 +93,59 @@ def create_trade_plan(
     db: Session,
     request: TradePlanCreate,
     *,
+    scope: RequestScope,
     policy_hash: str | None = None,
     source: str = "manual",
     maximum_risk_percent: Decimal = Decimal("1"),
     playbook_version_id: uuid.UUID | None = None,
     commit: bool = True,
 ) -> TradePlan:
+    validate_scope(db, scope)
+    playbook_version = None
+    minimum_planned_r = None
+    if playbook_version_id is not None:
+        playbook_version = validate_strategy_scope(
+            db,
+            scope,
+            playbook_version_id,
+        )
+        if playbook_version is None:
+            raise LookupError("strategy version was not found")
+        verify_playbook_version_integrity(playbook_version)
+        playbook = db.scalar(
+            select(Playbook).where(
+                Playbook.workspace_id == scope.workspace_id,
+                Playbook.id == playbook_version.playbook_id,
+            )
+        )
+        if playbook is None or playbook.name != request.setup_name:
+            raise ValueError(
+                "trade setup_name must match the exact strategy active in this session"
+            )
+        maximum_risk_percent, minimum_planned_r = effective_strategy_risk_policy(
+            playbook_version.definition,
+            maximum_risk_percent=maximum_risk_percent,
+        )
     if request.risk_percent > maximum_risk_percent:
-        raise ValueError("requested risk exceeds the configured maximum")
+        raise ValueError("requested risk exceeds the effective strategy maximum")
     specification = None
     estimated_costs = None
     estimated_margin = None
     if request.sizing_provider and request.sizing_symbol:
-        specification = active_instrument_specification(
-            db,
-            provider=request.sizing_provider,
-            external_symbol=request.sizing_symbol,
-        )
+        try:
+            specification = active_instrument_specification(
+                db,
+                provider=request.sizing_provider,
+                external_symbol=request.sizing_symbol,
+                workspace_id=scope.workspace_id,
+                account_id=scope.account_id,
+            )
+        except LookupError:
+            specification = active_instrument_specification(
+                db,
+                provider=request.sizing_provider,
+                external_symbol=request.sizing_symbol,
+            )
         broker_sizing = calculate_broker_position_size(
             BrokerPositionSizeRequest(
                 account_equity=request.account_equity,
@@ -119,20 +172,13 @@ def create_trade_plan(
         risk_amount = sizing.risk_amount
         quantity = sizing.quantity
         planned_r = sizing.planned_r
+    if minimum_planned_r is not None and (
+        planned_r is None or planned_r < minimum_planned_r
+    ):
+        raise ValueError(
+            f"planned R must be at least {minimum_planned_r} for the active strategy"
+        )
     instrument = get_or_create_instrument(db, request.instrument)
-    if playbook_version_id is not None:
-        playbook_version = db.get(PlaybookVersion, playbook_version_id)
-        if playbook_version is None:
-            raise ValueError("active strategy version no longer exists")
-        playbook = db.get(Playbook, playbook_version.playbook_id)
-        if playbook is None or playbook.name != request.setup_name:
-            raise ValueError(
-                "trade setup_name must match the exact strategy active in this session"
-            )
-    else:
-        # Unscoped callers remain explicitly unscoped. Never attach a mutable
-        # "latest" strategy version behind the caller's back.
-        playbook_version = None
     minutes_to_event = None
     if request.market_time is not None:
         relevant_currencies = instrument_event_currencies(request.instrument)
@@ -160,7 +206,9 @@ def create_trade_plan(
                 (event.scheduled_at - request.market_time).total_seconds() / 60
             )
     trade = TradePlan(
-        reference=next_trade_reference(db, request),
+        workspace_id=scope.workspace_id,
+        account_id=scope.account_id,
+        reference=next_trade_reference(db, request, scope=scope),
         **request.model_dump(
             exclude={
                 "target",
@@ -191,6 +239,8 @@ def create_trade_plan(
     db.add_all(
         [
             Observation(
+                workspace_id=scope.workspace_id,
+                account_id=scope.account_id,
                 trade_plan_id=trade.id,
                 kind="fact",
                 text=value,
@@ -200,6 +250,8 @@ def create_trade_plan(
         ]
         + [
             Observation(
+                workspace_id=scope.workspace_id,
+                account_id=scope.account_id,
                 trade_plan_id=trade.id,
                 kind="hypothesis",
                 text=value,
@@ -218,9 +270,18 @@ def list_trade_plans(
     db: Session,
     limit: int | None = None,
     *,
+    scope: RequestScope,
     playbook_version_id: uuid.UUID | None = None,
 ) -> list[TradePlan]:
-    statement = select(TradePlan).order_by(TradePlan.created_at.desc())
+    validate_strategy_scope(db, scope, playbook_version_id)
+    statement = (
+        select(TradePlan)
+        .where(
+            TradePlan.workspace_id == scope.workspace_id,
+            TradePlan.account_id == scope.account_id,
+        )
+        .order_by(TradePlan.created_at.desc())
+    )
     if playbook_version_id is not None:
         statement = statement.where(
             TradePlan.playbook_version_id == playbook_version_id
@@ -234,8 +295,10 @@ def get_trade_plan(
     db: Session,
     trade_reference: str | uuid.UUID,
     *,
+    scope: RequestScope,
     playbook_version_id: uuid.UUID | None = None,
 ) -> TradePlan:
+    validate_strategy_scope(db, scope, playbook_version_id)
     try:
         trade_id = (
             trade_reference
@@ -244,10 +307,20 @@ def get_trade_plan(
         )
     except ValueError:
         trade = db.scalar(
-            select(TradePlan).where(TradePlan.reference == str(trade_reference).lower())
+            select(TradePlan).where(
+                TradePlan.workspace_id == scope.workspace_id,
+                TradePlan.account_id == scope.account_id,
+                TradePlan.reference == str(trade_reference).lower(),
+            )
         )
     else:
-        trade = db.get(TradePlan, trade_id)
+        trade = db.scalar(
+            select(TradePlan).where(
+                TradePlan.workspace_id == scope.workspace_id,
+                TradePlan.account_id == scope.account_id,
+                TradePlan.id == trade_id,
+            )
+        )
     if not trade or (
         playbook_version_id is not None
         and trade.playbook_version_id != playbook_version_id
@@ -261,11 +334,13 @@ def create_reflection(
     trade_id: str | uuid.UUID,
     request: ReflectionCreate,
     *,
+    scope: RequestScope,
     playbook_version_id: uuid.UUID | None = None,
 ) -> TradeReflection:
     trade = get_trade_plan(
         db,
         trade_id,
+        scope=scope,
         playbook_version_id=playbook_version_id,
     )
     if trade.reflection:
@@ -275,6 +350,8 @@ def create_reflection(
 
     realized_r = (request.realized_pnl / trade.risk_amount).quantize(Decimal("0.0001"))
     reflection = TradeReflection(
+        workspace_id=scope.workspace_id,
+        account_id=scope.account_id,
         trade_id=trade.id,
         realized_r=realized_r,
         outcome_grade=(
@@ -293,6 +370,8 @@ def create_reflection(
         followed = evaluation.get("followed")
         db.add(
             RuleEvaluation(
+                workspace_id=scope.workspace_id,
+                account_id=scope.account_id,
                 reflection_id=reflection.id,
                 playbook_version_id=trade.playbook_version_id,
                 rule_key=str(evaluation.get("rule", "unspecified")),

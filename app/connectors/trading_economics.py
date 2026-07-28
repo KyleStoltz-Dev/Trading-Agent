@@ -1,3 +1,5 @@
+import asyncio
+import json
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from typing import Any
@@ -33,9 +35,13 @@ class TradingEconomicsReadOnlyConnector:
         *,
         client: httpx.AsyncClient | None = None,
         timeout_seconds: float = 10,
+        maximum_response_bytes: int = 4 * 1024 * 1024,
     ) -> None:
         if not api_key:
             raise ValueError("Trading Economics API key is required")
+        if maximum_response_bytes < 1:
+            raise ValueError("Trading Economics maximum response size must be positive")
+        self.maximum_response_bytes = maximum_response_bytes
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             base_url="https://api.tradingeconomics.com",
@@ -44,17 +50,62 @@ class TradingEconomicsReadOnlyConnector:
         )
 
     async def _get(self, path: str, params: dict[str, str | int]) -> list[dict[str, Any]]:
-        try:
-            response = await self._client.get(path, params={**params, "f": "json"})
-            response.raise_for_status()
-            payload = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise TradingEconomicsError(
-                f"Trading Economics request failed: {type(exc).__name__}"
-            ) from exc
-        if not isinstance(payload, list):
-            raise TradingEconomicsError("Trading Economics returned an invalid response")
-        return payload
+        for attempt in range(3):
+            try:
+                async with self._client.stream(
+                    "GET",
+                    path,
+                    params={**params, "f": "json"},
+                ) as response:
+                    if response.status_code == 429 or response.status_code >= 500:
+                        if attempt == 2:
+                            raise TradingEconomicsError(
+                                "Trading Economics request failed with status "
+                                f"{response.status_code}"
+                            )
+                        retry_after = response.headers.get("Retry-After", "")
+                        try:
+                            delay = min(max(float(retry_after), 0), 5)
+                        except ValueError:
+                            delay = 0.25 * 2**attempt
+                        await asyncio.sleep(delay)
+                        continue
+                    response.raise_for_status()
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in response.aiter_bytes():
+                        total += len(chunk)
+                        if total > self.maximum_response_bytes:
+                            raise TradingEconomicsError(
+                                "Trading Economics response exceeded the configured limit"
+                            )
+                        chunks.append(chunk)
+                payload = json.loads(b"".join(chunks))
+            except (httpx.TransportError, httpx.TimeoutException) as exc:
+                if attempt == 2:
+                    raise TradingEconomicsError(
+                        "Trading Economics transport failed: "
+                        f"{type(exc).__name__}"
+                    ) from exc
+                await asyncio.sleep(0.25 * 2**attempt)
+                continue
+            except httpx.HTTPStatusError as exc:
+                raise TradingEconomicsError(
+                    "Trading Economics request failed with status "
+                    f"{exc.response.status_code}"
+                ) from exc
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise TradingEconomicsError(
+                    "Trading Economics returned invalid JSON"
+                ) from exc
+            if not isinstance(payload, list) or not all(
+                isinstance(item, dict) for item in payload
+            ):
+                raise TradingEconomicsError(
+                    "Trading Economics returned an invalid response"
+                )
+            return payload
+        raise TradingEconomicsError("Trading Economics request failed")
 
     async def calendar(
         self,
