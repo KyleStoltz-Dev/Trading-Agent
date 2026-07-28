@@ -3,6 +3,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.db import LEGACY_UNASSIGNED_ACCOUNT_ID, LEGACY_WORKSPACE_ID
 from app.models import MindsetCheckIn, TradePlan
 from app.schemas import MindsetCheckInCreate, MindsetCheckInRead
 from app.services.journal import get_trade_plan
@@ -10,6 +11,13 @@ from app.services.workspaces import (
     RequestScope,
     validate_strategy_scope,
 )
+
+
+def _legacy_scope(scope: RequestScope | None) -> RequestScope:
+    return scope or RequestScope(
+        workspace_id=uuid.UUID(LEGACY_WORKSPACE_ID),
+        account_id=uuid.UUID(LEGACY_UNASSIGNED_ACCOUNT_ID),
+    )
 
 
 def mindset_read(
@@ -37,10 +45,11 @@ def create_mindset_check_in(
     db: Session,
     request: MindsetCheckInCreate,
     *,
-    scope: RequestScope,
+    scope: RequestScope | None = None,
     playbook_version_id: uuid.UUID,
     commit: bool = True,
 ) -> MindsetCheckInRead:
+    scope = _legacy_scope(scope)
     validate_strategy_scope(db, scope, playbook_version_id)
     trade = (
         get_trade_plan(
@@ -70,11 +79,12 @@ def create_mindset_check_in(
 def list_mindset_check_ins(
     db: Session,
     *,
-    scope: RequestScope,
+    scope: RequestScope | None = None,
     playbook_version_id: uuid.UUID,
     limit: int = 20,
     phase: str | None = None,
 ) -> list[MindsetCheckInRead]:
+    scope = _legacy_scope(scope)
     validate_strategy_scope(db, scope, playbook_version_id)
     statement = (
         select(MindsetCheckIn, TradePlan.reference)

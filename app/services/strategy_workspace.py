@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from app.db import LEGACY_UNASSIGNED_ACCOUNT_ID, LEGACY_WORKSPACE_ID
 from app.models import (
     ConversationSession,
     Playbook,
@@ -32,6 +33,13 @@ from app.services.workspaces import (
 
 SEARCH_TERM = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{1,63}")
 KNOWLEDGE_REFERENCE = re.compile(r"^knowledge-([0-9a-f]{12})$")
+
+
+def _legacy_scope(scope: RequestScope | None) -> RequestScope:
+    return scope or RequestScope(
+        workspace_id=uuid.UUID(LEGACY_WORKSPACE_ID),
+        account_id=uuid.UUID(LEGACY_UNASSIGNED_ACCOUNT_ID),
+    )
 
 
 def get_trader_profile(
@@ -82,8 +90,9 @@ def resolve_strategy_version(
     strategy: str,
     version: int | None = None,
     *,
-    scope: RequestScope,
+    scope: RequestScope | None = None,
 ) -> tuple[Playbook, PlaybookVersion]:
+    scope = _legacy_scope(scope)
     validate_scope(db, scope)
     normalized = strategy.strip().lower()
     playbook = db.scalar(
@@ -112,7 +121,7 @@ def resolve_strategy_version(
 def list_strategy_summaries(
     db: Session,
     *,
-    scope: RequestScope,
+    scope: RequestScope | None = None,
 ) -> list[StrategySummary]:
     validate_scope(db, scope)
     playbooks = list(
@@ -170,6 +179,7 @@ def set_session_strategy(
     scope: RequestScope,
     version: int | None = None,
 ) -> tuple[Playbook, PlaybookVersion] | None:
+    scope = _legacy_scope(scope)
     validate_scope(db, scope)
     if (
         conversation.workspace_id != scope.workspace_id
