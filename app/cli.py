@@ -8092,27 +8092,44 @@ def news_upcoming(
     if details:
         for event in events:
             insight = event_insight(event.title, event.currency)
+            local_time = event.scheduled_at.astimezone(local_timezone)
             console.print()
-            console.print(f"[bold]{event.title}[/bold]")
+            console.rule(f"[bold]{event.title}[/bold]", style="dim")
             console.print(
-                f"Actual [bold]{event.actual or 'Pending'}[/bold] · "
-                f"Forecast [bold]{event.forecast or '—'}[/bold] · "
-                f"Previous [bold]{event.previous or '—'}[/bold]"
+                f"[dim]{local_time.strftime('%A, %H:%M %Z')} · "
+                f"{event.currency or '—'} · "
+                f"{impact_names[event.importance]} impact[/dim]"
             )
-            console.print(f"[bold]What it measures[/bold]  {insight.measures}")
-            console.print(
-                f"[bold]Why markets watch it[/bold]  {insight.why_markets_watch}"
+            console.print()
+            values = Table(show_header=True, box=None, pad_edge=False)
+            values.add_column("Actual", min_width=12)
+            values.add_column("Forecast", min_width=12)
+            values.add_column("Previous", min_width=12)
+            values.add_row(
+                f"[bold]{event.actual or 'Pending'}[/bold]",
+                event.forecast or "—",
+                event.previous or "—",
             )
+            console.print(values)
+            console.print()
+            console.print("[bold]What it measures[/bold]")
+            console.print(insight.measures)
+            console.print()
+            console.print("[bold]Why markets watch it[/bold]")
+            console.print(insight.why_markets_watch)
+            console.print()
             if insight.sensitive_markets:
-                console.print(
-                    "[bold]Commonly sensitive[/bold]  "
-                    + " · ".join(insight.sensitive_markets)
-                )
+                console.print("[bold]Commonly sensitive markets[/bold]")
+                console.print(" · ".join(insight.sensitive_markets))
+                console.print()
+            console.print("[bold yellow]Interpret carefully[/bold yellow]")
             console.print(f"[dim]{insight.interpretation_caution}[/dim]")
             if insight.source_label and insight.source_url:
+                console.print()
+                console.print("[bold]Primary reference[/bold]")
+                console.print(insight.source_label)
                 console.print(
-                    f"[dim]Reference: {insight.source_label} · "
-                    f"{insight.source_url}[/dim]"
+                    f"[link={insight.source_url}]{insight.source_url}[/link]"
                 )
 
 
