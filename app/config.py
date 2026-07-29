@@ -157,7 +157,13 @@ class Settings(BaseSettings):
     metatrader_allow_insecure_remote: bool = False
     market_quote_max_age_seconds: float = Field(default=5.0, gt=0, le=300)
     trading_economics_api_key: SecretStr | None = None
-    news_provider: Literal["none", "trading-economics"] = "none"
+    news_provider: Literal["none", "trading-economics", "forex-factory"] = "none"
+    news_request_timeout_seconds: float = Field(default=10.0, gt=0, le=30)
+    news_max_response_bytes: int = Field(
+        default=1_000_000,
+        ge=16_384,
+        le=5_000_000,
+    )
     startup_news_sync: bool = True
     startup_news_horizon_days: int = Field(default=7, ge=1, le=14)
     startup_news_min_refresh_minutes: int = Field(default=15, ge=1, le=1440)

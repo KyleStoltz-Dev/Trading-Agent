@@ -70,8 +70,9 @@ text.
 
 ## 2. News and calendar evidence
 
-Trading Economics imports scheduled events and headline metadata with provider, source time,
-and retrieval time:
+Set `NEWS_PROVIDER=forex-factory` for the free public weekly calendar feed, or select
+`trading-economics` and configure its API key for calendar plus headline metadata. Both
+preserve provider and retrieval timestamps:
 
 ```bash
 trade news sync \
@@ -80,6 +81,16 @@ trade news sync \
   --countries "United States,Euro Area,United Kingdom" \
   --minimum-importance 2
 ```
+
+View a concise stored-event window without another provider request:
+
+```bash
+trade news upcoming --hours 24 --currencies USD,EUR --minimum-importance 2
+```
+
+Forex Factory provides calendar events, not a headline API. Its public export covers the
+current week, so scheduled refreshes update that window and PostgreSQL remains the cache when
+the source is temporarily unavailable.
 
 The database retains metadata rather than copying full articles. The pre-trade workflow uses
 the stored calendar to warn about nearby events. News is evidence for conditional scenarios,

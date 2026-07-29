@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.config import LEGACY_ENV_BACKEND, Settings, secret_value
 from app.connectors.factory import (
     BrokerConfigurationError,
+    news_provider_configured,
     validate_broker_account_selection,
 )
 from app.db import inspect_schema
@@ -279,12 +280,16 @@ def check_health(
                 "news connector intentionally disabled",
             )
         )
-    elif settings.trading_economics_api_key:
+    elif news_provider_configured(settings):
         checks.append(
             HealthCheck(
                 "news",
                 "ok",
-                "Trading Economics read-only connector is configured",
+                (
+                    "Forex Factory read-only calendar is configured"
+                    if settings.news_provider == "forex-factory"
+                    else "Trading Economics read-only connector is configured"
+                ),
             )
         )
     else:

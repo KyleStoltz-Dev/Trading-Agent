@@ -57,6 +57,18 @@ INTEGRATIONS = (
     ),
     IntegrationOption(
         kind="news",
+        key="forex-factory",
+        name="Forex Factory",
+        status="ready",
+        capability=(
+            "free read-only weekly economic calendar with currency, impact, "
+            "forecast, and previous values"
+        ),
+        setup="NEWS_PROVIDER=forex-factory; no API key required",
+        documentation="https://www.forexfactory.com/calendar",
+    ),
+    IntegrationOption(
+        kind="news",
         key="trading-economics",
         name="Trading Economics",
         status="ready",

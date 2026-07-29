@@ -421,15 +421,19 @@ stored specification is versioned, so an old plan keeps the assumptions used at 
 
 ## News and calendar
 
-Set `TRADING_ECONOMICS_API_KEY`, then:
+For the free calendar, set `NEWS_PROVIDER=forex-factory`; no API key is required. For
+Trading Economics, set `NEWS_PROVIDER=trading-economics` and
+`TRADING_ECONOMICS_API_KEY`. Then:
 
 ```bash
 trading-agent news sync --help
+trading-agent news upcoming --hours 24 --currencies USD
 ```
 
 Only provider metadata and summaries are retained: external ID, original timestamps,
 retrieval timestamp, importance, country/category/symbol, values, and source URL. Provider
-entitlements and redistribution terms still apply.
+entitlements and redistribution terms still apply. Forex Factory supplies the current weekly
+economic calendar only; it does not supply headline metadata.
 
 ## Tiered web research
 

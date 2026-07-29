@@ -277,17 +277,22 @@ def integration_verifications(
                 )
             )
             continue
-        if option.key == "trading-economics":
-            api_key = secret_value(settings.trading_economics_api_key)
-            configuration = _credential_state(api_key)
+        if option.key in {"trading-economics", "forex-factory"}:
+            configuration = (
+                _credential_state(secret_value(settings.trading_economics_api_key))
+                if option.key == "trading-economics"
+                else "configured"
+                if settings.news_provider == "forex-factory"
+                else "not configured"
+            )
             calendar_at = db.scalar(
                 select(func.max(EconomicEvent.retrieved_at)).where(
-                    EconomicEvent.source == "trading-economics"
+                    EconomicEvent.source == option.key
                 )
             )
             news_at = db.scalar(
                 select(func.max(NewsItem.retrieved_at)).where(
-                    NewsItem.source == "trading-economics"
+                    NewsItem.source == option.key
                 )
             )
             last_success = max(
@@ -306,13 +311,18 @@ def integration_verifications(
                     evidence="observed" if observed else "not observed",
                     last_success_at=last_success,
                     detail=(
-                        "Calendar/news credentials are complete."
+                        "The public weekly calendar feed is selected; no API key is required."
+                        if option.key == "forex-factory"
+                        and configuration == "configured"
+                        else "Forex Factory is available but is not selected."
+                        if option.key == "forex-factory"
+                        else "Calendar/news credentials are complete."
                         if configuration == "configured"
                         else "Calendar/news credentials are not configured."
                     ),
                     next_action=(
                         None
-                        if observed or settings.news_provider == "none"
+                        if observed or settings.news_provider != option.key
                         else (
                             "Configure the provider, then run "
                             "`trade integrations --verify-live`."
@@ -483,7 +493,7 @@ async def verify_live_integrations(
                     f"Read-only bridge, account, and positions endpoints responded; "
                     f"{len(positions)} open position(s)."
                 )
-            elif report.key == "trading-economics":
+            elif report.key in {"trading-economics", "forex-factory"}:
                 connector = create_news_connector(settings)
                 try:
                     events, headlines = await asyncio.gather(
@@ -498,8 +508,12 @@ async def verify_live_integrations(
                 finally:
                     await connector.aclose()
                 detail = (
-                    f"Calendar and news endpoints responded; "
-                    f"{len(events)} event(s), {len(headlines)} headline(s)."
+                    f"Calendar feed responded; {len(events)} event(s)"
+                    + (
+                        f", {len(headlines)} headline(s)."
+                        if report.key == "trading-economics"
+                        else ". Forex Factory does not provide a headline API."
+                    )
                 )
             elif report.key == "brave":
                 response = await asyncio.to_thread(

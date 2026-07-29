@@ -10,7 +10,7 @@ import unicodedata
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
@@ -48,6 +48,7 @@ from app.connectors import (
     create_metatrader_connector,
     create_news_connector,
     create_oanda_connector,
+    news_provider_configured,
 )
 from app.costs import (
     TokenUsage,
@@ -75,6 +76,7 @@ from app.models import (
     BrokerConnection,
     ConnectorCursor,
     ConversationSession,
+    EconomicEvent,
 )
 from app.policy import ExecutionHooks, PolicyEngine, PolicyViolation, ToolContext
 from app.providers import ProviderConfigurationError, create_model_provider
@@ -473,6 +475,12 @@ NEWS_CHOICES = (
         "No news provider yet",
         "Skip calendar/news data now; this can be changed later.",
         ("no", "skip", "no news", "disabled"),
+    ),
+    GuidedChoice(
+        "forex-factory",
+        "Forex Factory",
+        "Free read-only weekly economic calendar; no API key required.",
+        ("forex factory", "forexfactory", "ff"),
     ),
     GuidedChoice(
         "trading-economics",
@@ -2588,6 +2596,10 @@ def _run_onboarding(db, settings: Settings) -> bool:
             "[yellow]Trading Economics still needs its API key before calendar refreshes. "
             "Ask “help me finish news setup” in chat.[/yellow]"
         )
+    if news == "forex-factory":
+        console.print(
+            "[green]Forex Factory calendar refresh is ready; no API key is required.[/green]"
+        )
     console.print(
         "[green]Setup is complete. Continuing in Trading Agent now.[/green] "
         "[dim]Use natural language or /help; you do not need to leave chat to switch "
@@ -4048,7 +4060,7 @@ def preflight(
                 )
             relevant_currencies = instrument_event_currencies(request.instrument)
 
-            if settings.news_provider == "trading-economics" and settings.trading_economics_api_key:
+            if news_provider_configured(settings):
                 try:
                     asyncio.run(refresh_startup_calendar(settings, db))
                 except Exception as exc:
@@ -4070,8 +4082,7 @@ def preflight(
                 currencies=relevant_currencies,
                 now=now,
                 configured=(
-                    settings.news_provider == "trading-economics"
-                    and bool(settings.trading_economics_api_key)
+                    news_provider_configured(settings)
                 ),
             )
 
@@ -4467,8 +4478,7 @@ def _run_chat(
         scope = _current_scope(db)
         if (
             settings.startup_news_sync
-            and settings.news_provider == "trading-economics"
-            and settings.trading_economics_api_key
+            and news_provider_configured(settings)
         ):
             try:
                 refreshed = asyncio.run(refresh_startup_calendar(settings, db))
@@ -7979,17 +7989,102 @@ def news_sync(
         finally:
             await connector.aclose()
 
-    calendar, headlines = asyncio.run(fetch())
+    try:
+        calendar, headlines = asyncio.run(fetch())
+    except RuntimeError as exc:
+        console.print("[bold red]News sync unavailable[/bold red]")
+        console.print(str(exc))
+        console.print(
+            "[dim]Previously stored calendar data remains available. "
+            "Wait for the provider's retry window, then run this command again.[/dim]"
+        )
+        raise typer.Exit(1) from None
     with SessionLocal() as db:
         calendar_count = store_calendar_events(db, tuple(calendar))
         news_count = store_news_items(db, tuple(headlines))
-    _print_model(
-        {
-            "calendar_received": len(calendar),
-            "calendar_added": calendar_count,
-            "news_received": len(headlines),
-            "news_added": news_count,
-        }
+    provider_name = get_settings().news_provider.replace("-", " ").title()
+    console.print("[bold green]✓ News sync complete[/bold green]")
+    console.print(f"[bold]Source[/bold]  {provider_name}")
+    console.print(
+        f"[bold]Calendar[/bold]  {len(calendar)} received · {calendar_count} new"
+    )
+    if headlines:
+        console.print(
+            f"[bold]Headlines[/bold] {len(headlines)} received · {news_count} new"
+        )
+    elif get_settings().news_provider == "forex-factory":
+        console.print(
+            "[dim]Forex Factory supplies calendar events, not a headline API.[/dim]"
+        )
+    if not calendar and not headlines:
+        console.print(
+            "[yellow]No matching items were found for this date, currency, "
+            "and impact filter.[/yellow]"
+        )
+
+
+@news_app.command("upcoming")
+def news_upcoming(
+    hours: Annotated[int, typer.Option(min=1, max=168)] = 24,
+    currencies: Annotated[str, typer.Option()] = "USD",
+    minimum_importance: Annotated[int, typer.Option(min=0, max=3)] = 2,
+) -> None:
+    """Show concise upcoming events from the stored calendar."""
+    currency_values = tuple(
+        dict.fromkeys(
+            value.strip().upper()
+            for value in currencies.split(",")
+            if value.strip()
+        )
+    )
+    now = datetime.now(UTC)
+    through = now + timedelta(hours=hours)
+    upgrade_database()
+    with SessionLocal() as db:
+        statement = (
+            select(EconomicEvent)
+            .where(
+                EconomicEvent.scheduled_at >= now,
+                EconomicEvent.scheduled_at <= through,
+                EconomicEvent.importance >= minimum_importance,
+            )
+            .order_by(EconomicEvent.scheduled_at, EconomicEvent.importance.desc())
+        )
+        if currency_values:
+            statement = statement.where(
+                EconomicEvent.currency.in_(currency_values)
+            )
+        events = tuple(db.scalars(statement))
+
+    console.print("[bold]Trading Agent: Upcoming economic events[/bold]")
+    if not events:
+        console.print(
+            "[yellow]No stored events match this window and filter.[/yellow]"
+        )
+        console.print(
+            "[dim]Run `trade news sync` to refresh the calendar, then try again.[/dim]"
+        )
+        return
+    local_timezone = datetime.now().astimezone().tzinfo
+    table = Table(show_header=True, box=None, pad_edge=False)
+    table.add_column("Time", no_wrap=True)
+    table.add_column("Currency", no_wrap=True)
+    table.add_column("Impact", no_wrap=True)
+    table.add_column("Event")
+    impact_names = {0: "Info", 1: "Low", 2: "Medium", 3: "High"}
+    for event in events:
+        local_time = event.scheduled_at.astimezone(local_timezone)
+        table.add_row(
+            local_time.strftime("%a %H:%M %Z"),
+            event.currency or "—",
+            impact_names[event.importance],
+            event.title,
+        )
+    console.print(table)
+    console.print(
+        f"[dim]{len(events)} event(s) through "
+        f"{through.astimezone(local_timezone).strftime('%a %H:%M %Z')} · "
+        "stored provider evidence, not trading instructions[/dim]"
     )
 
 

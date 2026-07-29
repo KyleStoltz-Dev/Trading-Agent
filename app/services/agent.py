@@ -20,7 +20,11 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from app.config import Settings, secret_value
-from app.connectors import create_broker_connector, create_news_connector
+from app.connectors import (
+    create_broker_connector,
+    create_news_connector,
+    news_provider_configured,
+)
 from app.costs import output_budget_for_mode
 from app.harness_context import HarnessContext, select_harness_context
 from app.models import BrokerConnection, TradingAccount
@@ -2810,7 +2814,7 @@ class TradingAgent:
                         await broker.aclose()
                 else:
                     result["missing"].append("read-only broker market data is not configured")
-                if self.settings.trading_economics_api_key:
+                if news_provider_configured(self.settings):
                     news_connector = create_news_connector(self.settings)
                     try:
                         today = datetime.now(UTC).date()
@@ -2847,7 +2851,7 @@ class TradingAgent:
                     finally:
                         await news_connector.aclose()
                 else:
-                    result["missing"].append("Trading Economics news/calendar is not configured")
+                    result["missing"].append("news/calendar is not configured")
                 return result
 
             self._reference(

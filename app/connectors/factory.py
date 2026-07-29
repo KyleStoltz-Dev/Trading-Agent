@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING
 
 from app.config import Settings, secret_value
+from app.connectors.forex_factory import ForexFactoryReadOnlyConnector
 from app.connectors.metatrader_bridge import MetaTraderReadOnlyBridgeConnector
 from app.connectors.oanda import OandaReadOnlyConnector
 from app.connectors.trading_economics import TradingEconomicsReadOnlyConnector
@@ -155,7 +156,24 @@ def validate_broker_account_selection(
         )
 
 
-def create_news_connector(settings: Settings) -> TradingEconomicsReadOnlyConnector:
+def news_provider_configured(settings: Settings) -> bool:
+    if settings.news_provider == "forex-factory":
+        return True
+    if settings.news_provider == "trading-economics":
+        return bool(secret_value(settings.trading_economics_api_key))
+    return False
+
+
+def create_news_connector(
+    settings: Settings,
+) -> TradingEconomicsReadOnlyConnector | ForexFactoryReadOnlyConnector:
+    if settings.news_provider == "forex-factory":
+        return ForexFactoryReadOnlyConnector(
+            timeout_seconds=settings.news_request_timeout_seconds,
+            maximum_response_bytes=settings.news_max_response_bytes,
+        )
+    if settings.news_provider != "trading-economics":
+        raise BrokerConfigurationError("NEWS_PROVIDER must select a news connector")
     api_key = secret_value(settings.trading_economics_api_key)
     if not api_key:
         raise BrokerConfigurationError(

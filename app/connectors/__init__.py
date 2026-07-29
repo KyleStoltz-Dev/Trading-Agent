@@ -6,6 +6,7 @@ from app.connectors.factory import (
     create_metatrader_connector,
     create_news_connector,
     create_oanda_connector,
+    news_provider_configured,
 )
 from app.connectors.metatrader_bridge import (
     MetaTraderBridgeError,
@@ -23,4 +24,5 @@ __all__ = [
     "create_metatrader_connector",
     "create_oanda_connector",
     "create_news_connector",
+    "news_provider_configured",
 ]

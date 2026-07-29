@@ -630,7 +630,43 @@ def test_startup_calendar_uses_recent_database_cache(
 
     stored = asyncio.run(
         refresh_startup_calendar(
-            Settings(trading_economics_api_key="test-key"),
+            Settings(
+                news_provider="trading-economics",
+                trading_economics_api_key="test-key",
+            ),
+            db_session,
+        )
+    )
+
+    assert stored == 0
+
+
+def test_startup_calendar_cache_uses_the_selected_provider(
+    db_session,
+    monkeypatch,
+) -> None:
+    now = datetime.now(UTC)
+    db_session.add(
+        EconomicEvent(
+            source="forex-factory",
+            source_event_id=f"recent-{uuid.uuid4()}",
+            scheduled_at=now,
+            country="USD",
+            currency="USD",
+            title="Already refreshed",
+            importance=2,
+            retrieved_at=now,
+        )
+    )
+    db_session.commit()
+    monkeypatch.setattr(
+        "app.services.pretrade.create_news_connector",
+        lambda _settings: pytest.fail("fresh provider cache should avoid an API call"),
+    )
+
+    stored = asyncio.run(
+        refresh_startup_calendar(
+            Settings(news_provider="forex-factory"),
             db_session,
         )
     )
