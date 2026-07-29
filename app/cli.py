@@ -145,6 +145,7 @@ from app.services.development import (
     detect_development_intent,
     development_request,
 )
+from app.services.event_glossary import event_insight
 from app.services.evidence import record_chart_analysis
 from app.services.execution_ledger import record_management_event
 from app.services.health import HealthReport, check_health
@@ -8029,6 +8030,7 @@ def news_upcoming(
     hours: Annotated[int, typer.Option(min=1, max=168)] = 24,
     currencies: Annotated[str, typer.Option()] = "USD",
     minimum_importance: Annotated[int, typer.Option(min=0, max=3)] = 2,
+    details: Annotated[bool, typer.Option("--details")] = False,
 ) -> None:
     """Show concise upcoming events from the stored calendar."""
     currency_values = tuple(
@@ -8087,6 +8089,31 @@ def news_upcoming(
         f"{through.astimezone(local_timezone).strftime('%a %H:%M %Z')} · "
         "stored provider evidence, not trading instructions[/dim]"
     )
+    if details:
+        for event in events:
+            insight = event_insight(event.title, event.currency)
+            console.print()
+            console.print(f"[bold]{event.title}[/bold]")
+            console.print(
+                f"Actual [bold]{event.actual or 'Pending'}[/bold] · "
+                f"Forecast [bold]{event.forecast or '—'}[/bold] · "
+                f"Previous [bold]{event.previous or '—'}[/bold]"
+            )
+            console.print(f"[bold]What it measures[/bold]  {insight.measures}")
+            console.print(
+                f"[bold]Why markets watch it[/bold]  {insight.why_markets_watch}"
+            )
+            if insight.sensitive_markets:
+                console.print(
+                    "[bold]Commonly sensitive[/bold]  "
+                    + " · ".join(insight.sensitive_markets)
+                )
+            console.print(f"[dim]{insight.interpretation_caution}[/dim]")
+            if insight.source_label and insight.source_url:
+                console.print(
+                    f"[dim]Reference: {insight.source_label} · "
+                    f"{insight.source_url}[/dim]"
+                )
 
 
 @news_app.command("watch")

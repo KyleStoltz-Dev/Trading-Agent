@@ -245,6 +245,8 @@ the setup will win, constitute advice, or authorize broker execution.
 - Record feature counts, magnitude, distance, age, session, and timeframe.
 - Join event proximity, actual/forecast surprise, volatility, USD, and yield context where
   licensed and available.
+- Add primary-agency release adapters for post-release actuals; do not depend on the
+  Cloudflare-protected Forex Factory HTML page or infer missing values.
 - Keep news association descriptive; never label unexplained movement “manipulation.”
 - Preserve raw source and as-of timestamps for every derived value.
 

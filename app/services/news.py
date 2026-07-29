@@ -49,13 +49,21 @@ def store_calendar_events(
         if inserted is not None:
             stored += 1
         else:
+            # Some free schedule feeds stop publishing a value after a release or
+            # never publish actuals at all. Do not erase stronger evidence that a
+            # later enrichment source already stored.
+            retained_values = {
+                key: value
+                for key, value in values.items()
+                if key not in {"actual", "forecast", "previous"} or value is not None
+            }
             db.execute(
                 update(EconomicEvent)
                 .where(
                     EconomicEvent.source == event.source,
                     EconomicEvent.source_event_id == event.external_id,
                 )
-                .values(**values)
+                .values(**retained_values)
             )
     db.commit()
     return stored

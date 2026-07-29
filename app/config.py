@@ -179,7 +179,8 @@ class Settings(BaseSettings):
     )
     web_fetch_allowed_domains: str = (
         "oanda.com,tradingview.com,cmegroup.com,federalreserve.gov,"
-        "fred.stlouisfed.org,bls.gov,bea.gov,tradingeconomics.com"
+        "fred.stlouisfed.org,bls.gov,bea.gov,dol.gov,census.gov,"
+        "tradingeconomics.com"
     )
     web_fetch_allowed_paths: str = (
         "oanda.com=/,/us-en/,/rest-live-v20/;"
@@ -188,7 +189,9 @@ class Settings(BaseSettings):
         "federalreserve.gov=/,/newsevents/,/monetarypolicy/;"
         "fred.stlouisfed.org=/,/series/,/categories/,/releases/;"
         "bls.gov=/,/news.release/,/schedule/;"
-        "bea.gov=/,/news/,/data/;"
+        "bea.gov=/,/news/,/data/,/help/,/resources/;"
+        "dol.gov=/,/newsroom/releases/;"
+        "census.gov=/,/manufacturing/;"
         "tradingeconomics.com=/,/calendar/,/articles/"
     )
     chart_allowed_roots: str = ""

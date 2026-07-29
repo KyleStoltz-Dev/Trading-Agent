@@ -7,7 +7,7 @@ import re
 import stat
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -54,6 +54,7 @@ from app.services.account_constraints import (
 from app.services.analytics import build_edge_report
 from app.services.catalog import active_instrument_specification
 from app.services.chart_analysis import SYSTEM_PROMPT, analyze_chart
+from app.services.event_glossary import event_insight
 from app.services.evidence import record_chart_analysis
 from app.services.health import check_health
 from app.services.journal import (
@@ -2086,14 +2087,22 @@ class TradingAgent:
 
             events = asyncio.run(read_calendar())
             store_calendar_events(self.db, tuple(events))
+            evidence = _untrusted_content(
+                "economic_calendar",
+                {"provider": self.settings.news_provider},
+                events,
+            )
+            evidence["reference_context"] = [
+                {
+                    "event_title": event.title,
+                    "reference": asdict(event_insight(event.title, event.currency)),
+                }
+                for event in events
+            ]
             return _json(
                 {
                     "ok": True,
-                    "result": _untrusted_content(
-                        "economic_calendar",
-                        {"provider": self.settings.news_provider},
-                        events,
-                    ),
+                    "result": evidence,
                 }
             )
 
@@ -2835,6 +2844,15 @@ class TradingAgent:
                             provenance,
                             events,
                         )
+                        result["economic_events"]["reference_context"] = [
+                            {
+                                "event_title": event.title,
+                                "reference": asdict(
+                                    event_insight(event.title, event.currency)
+                                ),
+                            }
+                            for event in events
+                        ]
                         result["news"] = _untrusted_content(
                             "market_news",
                             provenance,
