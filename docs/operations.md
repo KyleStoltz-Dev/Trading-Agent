@@ -428,6 +428,7 @@ Trading Economics, set `NEWS_PROVIDER=trading-economics` and
 ```bash
 trading-agent news sync --help
 trading-agent news upcoming --hours 24 --currencies USD
+trading-agent news watch --currencies USD --alert-minutes 60 --yes
 ```
 
 Only provider metadata and summaries are retained: external ID, original timestamps,

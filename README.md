@@ -387,6 +387,7 @@ trading-agent experiment start --help
 trading-agent experiment report EXPERIMENT_ID
 trading-agent news sync --help
 trading-agent news upcoming --hours 24 --currencies USD --minimum-importance 2
+trading-agent news watch --currencies USD --alert-minutes 60 --yes
 trading-agent edge report --minimum-sample 30
 trading-agent develop --help
 ```

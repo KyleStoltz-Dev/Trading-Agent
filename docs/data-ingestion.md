@@ -86,11 +86,13 @@ View a concise stored-event window without another provider request:
 
 ```bash
 trade news upcoming --hours 24 --currencies USD,EUR --minimum-importance 2
+trade news watch --currencies USD,EUR --alert-minutes 60 --yes
 ```
 
 Forex Factory provides calendar events, not a headline API. Its public export covers the
 current week, so scheduled refreshes update that window and PostgreSQL remains the cache when
-the source is temporarily unavailable.
+the source is temporarily unavailable. `news watch` runs until Ctrl-C, refreshes at a bounded
+interval, and prints each newly due event once per running watcher.
 
 The database retains metadata rather than copying full articles. The pre-trade workflow uses
 the stored calendar to warn about nearby events. News is evidence for conditional scenarios,

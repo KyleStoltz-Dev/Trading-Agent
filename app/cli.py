@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import sys
+import time
 import unicodedata
 import uuid
 from contextlib import contextmanager
@@ -8086,6 +8087,126 @@ def news_upcoming(
         f"{through.astimezone(local_timezone).strftime('%a %H:%M %Z')} · "
         "stored provider evidence, not trading instructions[/dim]"
     )
+
+
+@news_app.command("watch")
+def news_watch(
+    interval_seconds: Annotated[int, typer.Option(min=30, max=3600)] = 300,
+    alert_minutes: Annotated[int, typer.Option(min=1, max=1440)] = 60,
+    currencies: Annotated[str, typer.Option()] = "USD",
+    minimum_importance: Annotated[int, typer.Option(min=0, max=3)] = 2,
+    once: Annotated[bool, typer.Option("--once")] = False,
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+) -> None:
+    """Refresh the calendar on a schedule and print newly due event alerts."""
+    settings = get_settings()
+    if not news_provider_configured(settings):
+        console.print(
+            "[red]Select a configured news provider before starting calendar watch.[/red]"
+        )
+        raise typer.Exit(2)
+    currency_values = tuple(
+        dict.fromkeys(
+            value.strip().upper()
+            for value in currencies.split(",")
+            if value.strip()
+        )
+    )
+    _authorize_direct(
+        "synchronize_news",
+        {
+            "mode": "watch",
+            "interval_seconds": interval_seconds,
+            "alert_minutes": alert_minutes,
+            "currencies": currency_values,
+            "minimum_importance": minimum_importance,
+        },
+        mutating=True,
+        assume_yes=yes,
+    )
+    upgrade_database()
+    console.print("[bold]Trading Agent: Economic calendar watch[/bold]")
+    console.print(
+        f"Refreshing every {interval_seconds}s · alert window {alert_minutes}m · "
+        f"currencies {', '.join(currency_values) or 'all'}"
+    )
+    console.print("[dim]Press Ctrl-C to stop. No orders can be placed.[/dim]")
+    notified: set[tuple[str, str]] = set()
+
+    async def refresh():
+        connector = create_news_connector(settings)
+        try:
+            today = datetime.now(UTC).date()
+            return await connector.calendar(
+                start=today,
+                end=today + timedelta(days=settings.startup_news_horizon_days),
+                countries=currency_values,
+                minimum_importance=minimum_importance,
+            )
+        finally:
+            await connector.aclose()
+
+    try:
+        while True:
+            try:
+                fetched = tuple(asyncio.run(refresh()))
+            except RuntimeError as exc:
+                console.print(
+                    f"[yellow]Calendar refresh unavailable: {exc}. "
+                    "Using stored events.[/yellow]"
+                )
+            else:
+                with SessionLocal() as db:
+                    added = store_calendar_events(db, fetched)
+                console.print(
+                    f"[dim]{datetime.now().astimezone().strftime('%H:%M:%S %Z')} · "
+                    f"{len(fetched)} received · {added} new[/dim]"
+                )
+
+            now = datetime.now(UTC)
+            through = now + timedelta(minutes=alert_minutes)
+            with SessionLocal() as db:
+                statement = (
+                    select(EconomicEvent)
+                    .where(
+                        EconomicEvent.scheduled_at >= now,
+                        EconomicEvent.scheduled_at <= through,
+                        EconomicEvent.importance >= minimum_importance,
+                    )
+                    .order_by(
+                        EconomicEvent.scheduled_at,
+                        EconomicEvent.importance.desc(),
+                    )
+                )
+                if currency_values:
+                    statement = statement.where(
+                        EconomicEvent.currency.in_(currency_values)
+                    )
+                due = tuple(db.scalars(statement))
+            new_due = tuple(
+                event
+                for event in due
+                if (event.source, event.source_event_id) not in notified
+            )
+            for event in new_due:
+                local_time = event.scheduled_at.astimezone()
+                console.print()
+                console.print(
+                    f"[bold yellow]Economic event approaching · "
+                    f"{event.currency or '—'} · "
+                    f"{local_time.strftime('%H:%M %Z')}[/bold yellow]"
+                )
+                console.print(event.title)
+                console.print(
+                    f"[dim]Impact {event.importance}/3 · source {event.source} · "
+                    "untrusted calendar evidence[/dim]"
+                )
+                notified.add((event.source, event.source_event_id))
+            if once:
+                return
+            time.sleep(interval_seconds)
+    except KeyboardInterrupt:
+        console.print("\n[dim]Calendar watch stopped.[/dim]")
 
 
 @sessions_app.command("show")
