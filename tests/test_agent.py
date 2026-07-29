@@ -482,6 +482,142 @@ def test_all_function_schemas_are_strict() -> None:
         assert_strict_objects(tool["parameters"])
 
 
+def test_calendar_tools_describe_natural_defaults_and_on_demand_history() -> None:
+    tools = {tool["name"]: tool for tool in TOOLS}
+
+    assert "today's news" in tools["get_economic_calendar"]["description"]
+    assert "minimum importance 0" in tools["get_economic_calendar"]["description"]
+    assert "only when the trader explicitly asks" in (
+        tools["get_economic_event_history"]["description"]
+    )
+
+
+def test_agent_includes_current_local_clock_for_relative_calendar_requests() -> None:
+    agent = TradingAgent(
+        settings=Settings(),
+        db=Mock(),
+        engine=Mock(),
+        confirm_mutation=Mock(return_value=False),
+        provider=StaticProvider("Calendar response."),
+    )
+
+    prepared = agent.prepare("Show me today's news.")
+
+    assert "CURRENT LOCAL CLOCK" in prepared.instructions
+    assert "resolve today, tomorrow, this morning" in prepared.instructions
+
+
+def test_event_history_tool_returns_only_stored_provider_evidence(monkeypatch) -> None:
+    now = datetime.now(UTC)
+    event = CalendarEvent(
+        external_id="historical-core-pce",
+        scheduled_at=now,
+        timing_estimated=False,
+        country="United States",
+        currency="USD",
+        category="Inflation",
+        title="Core PCE Price Index m/m",
+        importance=3,
+        actual="0.2%",
+        forecast="0.2%",
+        previous="0.1%",
+        source_updated_at=now,
+        source_url="https://example.com/core-pce",
+        retrieved_at=now,
+        source="test-calendar",
+    )
+    history = Mock(return_value=(event,))
+    monkeypatch.setattr("app.services.agent.economic_event_history", history)
+    agent = TradingAgent(
+        settings=Settings(),
+        db=Mock(),
+        engine=Mock(),
+        confirm_mutation=Mock(return_value=False),
+        provider=StaticProvider("Historical calendar response."),
+    )
+
+    payload = json.loads(
+        agent._execute_tool(
+            "get_economic_event_history",
+            {
+                "event_query": "Core PCE",
+                "currency": "USD",
+                "limit": 6,
+            },
+        )
+    )
+
+    history.assert_called_once_with(
+        agent.db,
+        "Core PCE",
+        currency="USD",
+        limit=6,
+    )
+    assert payload["result"]["source_kind"] == "stored_economic_event_history"
+    assert payload["result"]["content"][0]["actual"] == "0.2%"
+    assert payload["notice"] is None
+    assert any(reference.kind == "calendar" for reference in agent.last_references)
+
+
+def test_calendar_tool_falls_back_to_retained_evidence(monkeypatch) -> None:
+    now = datetime.now(UTC)
+    event = CalendarEvent(
+        external_id="cached-gdp",
+        scheduled_at=now,
+        timing_estimated=False,
+        country="USD",
+        currency="USD",
+        category="Growth",
+        title="Advance GDP q/q",
+        importance=3,
+        actual=None,
+        forecast="2.1%",
+        previous="2.0%",
+        source_updated_at=None,
+        source_url="https://example.com/gdp",
+        retrieved_at=now,
+        source="forex-factory",
+    )
+
+    class UnavailableCalendar:
+        async def calendar(self, **_kwargs):
+            raise RuntimeError("temporary provider failure")
+
+        async def aclose(self):
+            return None
+
+    cached = Mock(return_value=(event,))
+    monkeypatch.setattr(
+        "app.services.agent.create_news_connector",
+        Mock(return_value=UnavailableCalendar()),
+    )
+    monkeypatch.setattr("app.services.agent.stored_economic_calendar", cached)
+    agent = TradingAgent(
+        settings=Settings(news_provider="forex-factory"),
+        db=Mock(),
+        engine=Mock(),
+        confirm_mutation=Mock(return_value=False),
+        provider=StaticProvider("Cached calendar response."),
+    )
+
+    payload = json.loads(
+        agent._execute_tool(
+            "get_economic_calendar",
+            {
+                "start": now.date().isoformat(),
+                "end": now.date().isoformat(),
+                "countries": [],
+                "minimum_importance": 0,
+            },
+        )
+    )
+
+    assert payload["result"]["provenance"]["evidence_mode"] == "stored_cache"
+    assert payload["result"]["content"][0]["title"] == "Advance GDP q/q"
+    assert "retained provider evidence" in payload["notice"]
+    cached.assert_called_once()
+
+
 def test_allowlisted_web_tool_records_the_exact_page_reference(monkeypatch) -> None:
     page = WebPage(
         url="https://example.com/docs/market-reference",

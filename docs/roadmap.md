@@ -247,6 +247,9 @@ the setup will win, constitute advice, or authorize broker execution.
   licensed and available.
 - Add primary-agency release adapters for post-release actuals; do not depend on the
   Cloudflare-protected Forex Factory HTML page or infer missing values.
+- Add explicit, on-demand historical backfill adapters for supported releases. Keep locally
+  accumulated calendar history as the default and label consensus history unavailable when
+  no licensed or primary source provides it.
 - Keep news association descriptive; never label unexplained movement “manipulation.”
 - Preserve raw source and as-of timestamps for every derived value.
 

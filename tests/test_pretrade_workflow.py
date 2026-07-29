@@ -88,6 +88,18 @@ def test_preflight_intent_requires_explicit_near_term_entry_language() -> None:
         assert not detect_preflight_intent(message), message
 
 
+@pytest.mark.parametrize(
+    "market_text",
+    (
+        "I'm about to enter a gold trade.",
+        "Check this XAU/USD position before entry.",
+        "I plan to enter NAS100.",
+    ),
+)
+def test_common_us_market_names_map_to_usd_news(market_text: str) -> None:
+    assert instrument_event_currencies(market_text) == frozenset({"USD"})
+
+
 def test_pretrade_calendar_text_is_structurally_marked_untrusted() -> None:
     now = datetime.now(UTC)
     rendered = render_pretrade_context(

@@ -177,7 +177,11 @@ from app.services.market_features import (
     strategy_experiment_report,
 )
 from app.services.mindset import create_mindset_check_in, list_mindset_check_ins
-from app.services.news import store_calendar_events, store_news_items
+from app.services.news import (
+    economic_event_history,
+    store_calendar_events,
+    store_news_items,
+)
 from app.services.pretrade import (
     PreflightAssessment,
     assess_preflight,
@@ -362,6 +366,8 @@ def _configured_workspace(db):
 
 
 STARTER_PROMPTS = (
+    "Show me today's economic news.",
+    "Show me the previous six Core PCE releases.",
     "Review this chart: /absolute/path/to/chart.png",
     "Help me build an XAUUSD New York premarket plan.",
     "Size this trade: equity 10000, risk 0.5%, entry 2350, stop 2345, target 2365.",
@@ -4958,10 +4964,16 @@ def _run_chat(
             )
             agent.last_tool_audit = None
             try:
+                recent_user_context = " ".join(
+                    item["content"]
+                    for item in history[-6:]
+                    if item.get("role") == "user"
+                )
+                event_currency_context = f"{recent_user_context} {message}"
                 alerts = pretrade_alerts(
                     db,
-                    message,
-                    currencies=instrument_event_currencies(message),
+                    "trade" if detect_preflight_intent(message) else "",
+                    currencies=instrument_event_currencies(event_currency_context),
                     window_minutes=settings.pretrade_news_window_minutes,
                     minimum_importance=settings.pretrade_minimum_event_importance,
                 )
@@ -4975,12 +4987,22 @@ def _run_chat(
                     for alert in alerts
                 ]
                 if alerts:
-                    console.print("[bold yellow]Upcoming event risk[/bold yellow]")
+                    impact_names = {0: "Info", 1: "Low", 2: "Medium", 3: "High"}
+                    console.print("[bold yellow]News reminder[/bold yellow]")
                     for alert in alerts:
+                        timing = (
+                            f"{abs(alert.minutes_from_now)}m ago"
+                            if alert.minutes_from_now < 0
+                            else (
+                                "now"
+                                if alert.minutes_from_now == 0
+                                else f"in {alert.minutes_from_now}m"
+                            )
+                        )
                         console.print(
                             Text(
-                                f"  {alert.minutes_from_now:+}m · importance "
-                                f"{alert.importance} · {alert.country} · {alert.title}"
+                                f"  {timing} · {impact_names[alert.importance]} · "
+                                f"{alert.currency or alert.country} · {alert.title}"
                             )
                         )
                 evidence_parts: list[str] = []
@@ -8131,6 +8153,60 @@ def news_upcoming(
                 console.print(
                     f"[link={insight.source_url}]{insight.source_url}[/link]"
                 )
+
+
+@news_app.command("history")
+def news_history(
+    event: Annotated[str, typer.Argument(help="Event name, such as Core PCE or GDP.")],
+    currency: Annotated[str | None, typer.Option()] = None,
+    limit: Annotated[int, typer.Option(min=1, max=50)] = 10,
+) -> None:
+    """Show stored past observations for one requested economic event."""
+    upgrade_database()
+    with SessionLocal() as db:
+        try:
+            events = economic_event_history(
+                db,
+                event,
+                currency=currency,
+                limit=limit,
+            )
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(2) from exc
+
+    console.print(f"[bold]Trading Agent: Previous {event.strip()} releases[/bold]")
+    if not events:
+        console.print("[yellow]No matching past releases are stored yet.[/yellow]")
+        console.print(
+            "[dim]The free weekly feed builds history as calendar syncs are retained; "
+            "it is not a complete historical archive.[/dim]"
+        )
+        return
+
+    local_timezone = datetime.now().astimezone().tzinfo
+    impact_names = {0: "Info", 1: "Low", 2: "Medium", 3: "High"}
+    table = Table(show_header=True, box=None, pad_edge=False)
+    table.add_column("Date", no_wrap=True)
+    table.add_column("Event")
+    table.add_column("Impact", no_wrap=True)
+    table.add_column("Actual", no_wrap=True)
+    table.add_column("Forecast", no_wrap=True)
+    table.add_column("Previous", no_wrap=True)
+    for item in events:
+        table.add_row(
+            item.scheduled_at.astimezone(local_timezone).strftime("%Y-%m-%d %H:%M %Z"),
+            item.title,
+            impact_names[item.importance],
+            item.actual or "—",
+            item.forecast or "—",
+            item.previous or "—",
+        )
+    console.print(table)
+    console.print(
+        f"[dim]{len(events)} stored release(s) · "
+        "values are provider evidence, not a directional signal[/dim]"
+    )
 
 
 @news_app.command("watch")

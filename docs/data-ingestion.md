@@ -86,6 +86,7 @@ View a concise stored-event window without another provider request:
 
 ```bash
 trade news upcoming --hours 24 --currencies USD,EUR --minimum-importance 2 --details
+trade news history "Core PCE" --currency USD --limit 6
 trade news watch --currencies USD,EUR --alert-minutes 60 --yes
 ```
 
@@ -101,9 +102,18 @@ previous values but may leave actual unavailable; the CLI labels it `Pending` ra
 inventing a result. Unknown events remain explicitly unclassified instead of receiving a
 generated definition.
 
+Inside `trade chat`, traders can ask naturally: “Show me today’s economic news,” “Show only
+high-impact events for the United States and Euro Area,” or “Show me the previous six Core PCE
+releases.” Current-calendar requests default to every available country and impact level when
+the trader does not narrow the request. Historical rows are retrieved only on explicit request.
+Because the free feed covers the current week, its local release history grows as syncs are
+retained and is not a complete historical archive.
+
 The database retains metadata rather than copying full articles. The pre-trade workflow uses
-the stored calendar to warn about nearby events. News is evidence for conditional scenarios,
-not proof of manipulation or a direction.
+the stored calendar to show a compact nearby-event reminder when the trader expresses explicit
+near-term entry intent and the instrument maps to a relevant currency. The reminder does not
+interrupt the conversation or decide whether to trade. News is evidence for conditional
+scenarios, not proof of manipulation or a direction.
 
 ## 3. TradingView chart alerts
 
