@@ -1,5 +1,8 @@
 import importlib.util
+import re
 from pathlib import Path
+
+SUPPORTED_BOOTSTRAP_UV_VERSIONS = {"0.11.32", "0.12.1"}
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -35,12 +38,14 @@ def test_primary_installers_include_hosted_provider_adapters() -> None:
 
 def test_uv_bootstrap_is_version_and_hash_pinned() -> None:
     bootstrap = _text("requirements-bootstrap.txt")
+    uv_pin = re.search(r"^uv==([0-9]+\.[0-9]+\.[0-9]+)", bootstrap, flags=re.MULTILINE)
+    assert uv_pin is not None
+    assert uv_pin.group(1) in SUPPORTED_BOOTSTRAP_UV_VERSIONS
     hashes = {
         line.split("sha256:", 1)[1].split()[0].rstrip("\\")
         for line in bootstrap.splitlines()
         if "sha256:" in line
     }
-    assert "uv==0.11.32" in bootstrap
     assert len(hashes) == 18
     assert all(len(digest) == 64 for digest in hashes)
     assert all(set(digest) <= set("0123456789abcdef") for digest in hashes)
