@@ -82,6 +82,12 @@ After that, start the agent from any directory:
 trade
 ```
 
+From the repo checkout, you can also run a starter script:
+
+```bash
+bash scripts/start-trading-agent.sh --auto
+```
+
 If the launcher directory is not already on `PATH`, setup prints platform-specific
 instructions. The longer manual installation remains available:
 

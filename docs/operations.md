@@ -8,6 +8,30 @@ Normal daily startup:
 trade
 ```
 
+If you want one-command startup from the repository, run:
+
+```bash
+bash scripts/start-trading-agent.sh --auto
+```
+
+That helper:
+
+1. Creates `.env` from `.env.example` if missing.
+2. Resolves local dependencies and starts PostgreSQL via `docker compose` (if available).
+3. Waits for required local services to be reachable.
+4. Runs `trade quickstart` and opens a fresh Trading Agent chat session.
+5. Fails fast with a clear message if required local `.env` keys are missing (`POSTGRES_PASSWORD` or `DATABASE_URL`).
+
+If your `.env` is already prepared, this is your shortest valid flow.
+
+Use `--help` to see extra switches (`--no-chat`, `--name`, etc.).
+
+You can skip chat and just verify readiness with:
+
+```bash
+bash scripts/start-trading-agent.sh --no-chat
+```
+
 One-time guided setup:
 
 ```bash
