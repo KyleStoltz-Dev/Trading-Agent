@@ -6,14 +6,22 @@ import httpx
 import pytest
 
 from app.config import Settings
-from app.connectors.factory import BrokerConfigurationError, create_broker_connector
+from app.connectors.alpaca import AlpacaReadOnlyConnector
+from app.connectors.factory import (
+    BrokerConfigurationError,
+    create_broker_connector,
+    create_market_data_connector,
+)
+from app.connectors.forex_factory import (
+    ForexFactoryError,
+    ForexFactoryReadOnlyConnector,
+)
+from app.connectors.kraken import KrakenReadOnlyConnector
 from app.connectors.oanda import (
     OandaConnectorError,
     OandaReadOnlyConnector,
 )
-from app.connectors.oanda import (
-    _retry_delay as oanda_retry_delay,
-)
+from app.connectors.oanda import _retry_delay as oanda_retry_delay
 from app.connectors.trading_economics import TradingEconomicsReadOnlyConnector
 from app.models import BrokerConnection, TradingAccount
 
@@ -210,6 +218,64 @@ def test_oanda_invalid_retry_after_falls_back_without_crashing() -> None:
     assert oanda_retry_delay("not-a-delay", 1) == 0.5
 
 
+def test_planned_broker_provider_is_reported_as_not_implemented() -> None:
+    with pytest.raises(
+        BrokerConfigurationError,
+        match="BROKER_PROVIDER=ibkr is planned and not implemented yet",
+    ):
+        create_broker_connector(
+            Settings(
+                _env_file=None,
+                broker_provider="ibkr",
+                oanda_account_id="account-id",
+                oanda_api_token="secret",
+            )
+        )
+
+
+def test_market_data_factory_supports_oanda_kraken_and_alpaca() -> None:
+    oanda = create_market_data_connector(
+        Settings(
+            _env_file=None,
+            oanda_api_token="token",
+            oanda_account_id="account-id",
+        ),
+        provider="oanda",
+    )
+    assert isinstance(oanda, OandaReadOnlyConnector)
+    assert oanda.name == "oanda-v20"
+
+
+    kraken = create_market_data_connector(
+        Settings(_env_file=None),
+        provider="kraken",
+    )
+    assert isinstance(kraken, KrakenReadOnlyConnector)
+    assert kraken.name == "kraken"
+
+    alpaca = create_market_data_connector(
+        Settings(
+            _env_file=None,
+            alpaca_api_key_id="alpaca-key-id",
+            alpaca_api_secret_key="alpaca-secret",
+        ),
+        provider="alpaca",
+    )
+    assert isinstance(alpaca, AlpacaReadOnlyConnector)
+    assert alpaca.name == "alpaca"
+
+
+def test_market_data_factory_requires_alpaca_credentials() -> None:
+    with pytest.raises(
+        BrokerConfigurationError,
+        match="ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY are required",
+    ):
+        create_market_data_connector(
+            Settings(_env_file=None, alpaca_api_key_id=None, alpaca_api_secret_key=None),
+            provider="alpaca",
+        )
+
+
 def test_trading_economics_connector_preserves_provider_timestamps() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.startswith("/calendar/"):
@@ -271,6 +337,89 @@ def test_trading_economics_connector_preserves_provider_timestamps() -> None:
     assert calendar[0].importance == 3
     assert news[0].published_at.utcoffset().total_seconds() == 0
     assert news[0].source_url.startswith("https://tradingeconomics.com/")
+
+
+def test_forex_factory_connector_filters_and_normalizes_weekly_events() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "title": "Federal Funds Rate",
+                    "country": "USD",
+                    "date": "2026-07-29T14:00:00-04:00",
+                    "impact": "High",
+                    "forecast": "3.75%",
+                    "previous": "3.75%",
+                },
+                {
+                    "title": "Crude Oil Inventories",
+                    "country": "USD",
+                    "date": "2026-07-29T10:30:00-04:00",
+                    "impact": "Low",
+                    "forecast": "0.7M",
+                    "previous": "2.0M",
+                },
+                {
+                    "title": "CPI",
+                    "country": "AUD",
+                    "date": "2026-07-29T21:30:00-04:00",
+                    "impact": "High",
+                    "forecast": "0.2%",
+                    "previous": "-0.7%",
+                },
+            ],
+        )
+
+    async def exercise():
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        connector = ForexFactoryReadOnlyConnector(client=client)
+        try:
+            events = await connector.calendar(
+                start=date(2026, 7, 29),
+                end=date(2026, 7, 29),
+                countries=("United States",),
+                minimum_importance=2,
+            )
+            headlines = await connector.news(limit=5)
+            return events, headlines
+        finally:
+            await client.aclose()
+
+    events, headlines = asyncio.run(exercise())
+
+    assert len(events) == 1
+    assert events[0].title == "Federal Funds Rate"
+    assert events[0].currency == "USD"
+    assert events[0].country == "USD"
+    assert events[0].importance == 3
+    assert events[0].scheduled_at.isoformat() == "2026-07-29T18:00:00+00:00"
+    assert len(events[0].external_id) == 64
+    assert headlines == ()
+
+
+def test_forex_factory_rate_limit_has_customer_safe_error() -> None:
+    async def exercise() -> None:
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(
+                    429,
+                    headers={"Retry-After": "0"},
+                )
+            )
+        )
+        connector = ForexFactoryReadOnlyConnector(client=client)
+        try:
+            with pytest.raises(ForexFactoryError, match="temporarily unavailable"):
+                await connector.calendar(
+                    start=date(2026, 7, 29),
+                    end=date(2026, 7, 29),
+                    countries=(),
+                )
+        finally:
+            await client.aclose()
+
+    asyncio.run(exercise())
 
 
 def test_settings_repr_masks_all_credentials() -> None:

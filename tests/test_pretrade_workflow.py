@@ -88,6 +88,18 @@ def test_preflight_intent_requires_explicit_near_term_entry_language() -> None:
         assert not detect_preflight_intent(message), message
 
 
+@pytest.mark.parametrize(
+    "market_text",
+    (
+        "I'm about to enter a gold trade.",
+        "Check this XAU/USD position before entry.",
+        "I plan to enter NAS100.",
+    ),
+)
+def test_common_us_market_names_map_to_usd_news(market_text: str) -> None:
+    assert instrument_event_currencies(market_text) == frozenset({"USD"})
+
+
 def test_pretrade_calendar_text_is_structurally_marked_untrusted() -> None:
     now = datetime.now(UTC)
     rendered = render_pretrade_context(
@@ -630,7 +642,43 @@ def test_startup_calendar_uses_recent_database_cache(
 
     stored = asyncio.run(
         refresh_startup_calendar(
-            Settings(trading_economics_api_key="test-key"),
+            Settings(
+                news_provider="trading-economics",
+                trading_economics_api_key="test-key",
+            ),
+            db_session,
+        )
+    )
+
+    assert stored == 0
+
+
+def test_startup_calendar_cache_uses_the_selected_provider(
+    db_session,
+    monkeypatch,
+) -> None:
+    now = datetime.now(UTC)
+    db_session.add(
+        EconomicEvent(
+            source="forex-factory",
+            source_event_id=f"recent-{uuid.uuid4()}",
+            scheduled_at=now,
+            country="USD",
+            currency="USD",
+            title="Already refreshed",
+            importance=2,
+            retrieved_at=now,
+        )
+    )
+    db_session.commit()
+    monkeypatch.setattr(
+        "app.services.pretrade.create_news_connector",
+        lambda _settings: pytest.fail("fresh provider cache should avoid an API call"),
+    )
+
+    stored = asyncio.run(
+        refresh_startup_calendar(
+            Settings(news_provider="forex-factory"),
             db_session,
         )
     )

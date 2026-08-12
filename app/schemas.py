@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 from math import isfinite
-from typing import Literal
+from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import (
@@ -237,6 +237,54 @@ class TradingViewWebhookReceipt(BaseModel):
     event_id: str
 
 
+class ChatWebhookReceipt(BaseModel):
+    accepted: bool
+    duplicate: bool
+    platform: str
+    message_id: uuid.UUID
+    external_message_id: str
+
+
+class ChatWebhookMessageRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    platform: str
+    external_message_id: str
+    sender_id: str
+    sender_name: str | None
+    channel_id: str | None
+    channel_name: str | None
+    sent_at: datetime | None
+    received_at: datetime
+    text: str
+    verified_source: str | None
+    metadata_json: dict
+    payload_sha256: str
+
+
+class TelegramWebhookCreate(BaseModel):
+    """Raw Telegram webhook payload + account-scoped secret."""
+
+    webhook_secret: SecretStr = Field(
+        min_length=32,
+        max_length=200,
+        exclude=True,
+    )
+    payload: dict[str, Any]
+
+
+class DiscordWebhookCreate(BaseModel):
+    """Raw Discord webhook payload + account-scoped secret."""
+
+    webhook_secret: SecretStr = Field(
+        min_length=32,
+        max_length=200,
+        exclude=True,
+    )
+    payload: dict[str, Any]
+
+
 class PositionSizeRequest(BaseModel):
     account_equity: Decimal = Field(gt=0)
     risk_percent: Decimal = Field(gt=0, le=5)
@@ -260,6 +308,40 @@ class PositionSizeResult(BaseModel):
     stop_distance: Decimal
     quantity: Decimal
     planned_r: Decimal | None
+
+
+class MarketQuoteRead(BaseModel):
+    instrument: str
+    bid: Decimal
+    ask: Decimal
+    spread: Decimal
+    market_time: datetime
+    retrieved_at: datetime
+    source: str
+    venue: str
+
+
+class MarketCandleRead(BaseModel):
+    instrument: str
+    timeframe: str
+    started_at: datetime
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal | None
+    complete: bool
+    retrieved_at: datetime
+    source: str
+    venue: str
+
+
+class MarketDataRead(BaseModel):
+    provider: str
+    instrument: str
+    timeframe: str
+    quote: MarketQuoteRead
+    candles: list[MarketCandleRead]
 
 
 class InstrumentSpecificationCreate(BaseModel):

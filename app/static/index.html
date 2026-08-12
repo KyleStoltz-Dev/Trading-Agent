@@ -3,78 +3,385 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Trading Agent — Journal First</title>
+    <title>Trading Agent — Market Dashboard</title>
+    <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
     <style>
-      :root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; }
-      body { margin: 0; background: #071b1a; color: #e8f5f1; }
-      main { max-width: 920px; margin: 0 auto; padding: 48px 20px; }
-      h1 { font-size: clamp(2rem, 6vw, 4.5rem); margin: 0; letter-spacing: -.05em; }
-      .lede { color: #9fc8bd; max-width: 650px; line-height: 1.6; }
-      .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit,minmax(250px,1fr)); margin-top: 36px; }
-      section { background: #0d2926; border: 1px solid #1e4a43; border-radius: 16px; padding: 20px; }
-      label { display: grid; gap: 6px; color: #a7cec4; font-size: .85rem; margin-bottom: 12px; }
-      input { background: #061513; color: white; border: 1px solid #2c5c53; border-radius: 8px; padding: 10px; }
-      button { background: #63e6be; color: #05211c; border: 0; border-radius: 9px; padding: 11px 16px; font-weight: 750; cursor: pointer; }
-      output { display: block; margin-top: 16px; white-space: pre-wrap; color: #d2fff2; }
-      .boundary { color: #f8d486; }
+      :root {
+        color-scheme: dark;
+        font-family: Inter, system-ui, -apple-system, sans-serif;
+        line-height: 1.35;
+      }
+
+      body {
+        margin: 0;
+        background: #061716;
+        color: #e6fff2;
+      }
+
+      main {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 24px;
+        display: grid;
+        gap: 16px;
+      }
+
+      section {
+        border: 1px solid #214e48;
+        border-radius: 14px;
+        background: #0d2d2a;
+        padding: 16px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 1.7rem;
+      }
+
+      .lede {
+        color: #90c7b2;
+        margin: 8px 0 0;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 16px;
+      }
+
+      label {
+        display: grid;
+        gap: 6px;
+        margin-bottom: 10px;
+      }
+
+      input,
+      select,
+      button {
+        width: 100%;
+        border-radius: 8px;
+        border: 1px solid #2f645e;
+        background: #08201d;
+        color: #e8ffef;
+        padding: 8px;
+        font-size: 0.95rem;
+      }
+
+      button {
+        margin-top: 8px;
+        background: #57f3c4;
+        color: #06251f;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      button:disabled {
+        opacity: 0.6;
+        cursor: progress;
+      }
+
+      #chart-wrap {
+        height: 420px;
+        border: 1px solid #2f645e;
+        border-radius: 12px;
+        overflow: hidden;
+      }
+
+      #market-chart {
+        width: 100%;
+        height: 100%;
+      }
+
+      .inline {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+
+      .inline > div {
+        background: #092f2b;
+        border: 1px solid #215e57;
+        border-radius: 10px;
+        padding: 10px;
+      }
+
+      .label {
+        color: #97d4b5;
+        margin-bottom: 4px;
+      }
+
+      .value {
+        font-size: 1.1rem;
+        font-weight: 700;
+      }
+
+      .note {
+        color: #95c8b4;
+      }
+
+      output {
+        display: block;
+        margin-top: 12px;
+        white-space: pre-wrap;
+        color: #d4fbef;
+      }
     </style>
   </head>
   <body>
     <main>
-      <p>JOURNAL-FIRST MVP</p>
-      <h1>Evidence over prediction.</h1>
-      <p class="lede">Capture context, trigger, risk, execution, and outcome. The assistant helps test a playbook; it does not place trades or promise what happens next.</p>
-      <div class="grid">
-        <section>
-          <h2>Local API access</h2>
-          <label>API key <input id="api-key" type="password" autocomplete="off" /></label>
-          <p class="lede">Stored only in this browser tab. Journal and chart mutations also require explicit confirmation.</p>
-        </section>
-        <section>
-          <h2>Position size</h2>
-          <form id="risk-form">
-            <label>Account equity <input name="account_equity" type="number" step="any" required /></label>
-            <label>Risk % <input name="risk_percent" type="number" step="any" value="1" required /></label>
-            <label>Entry <input name="entry" type="number" step="any" required /></label>
-            <label>Stop <input name="stop" type="number" step="any" required /></label>
-            <label>Target <input name="target" type="number" step="any" /></label>
-            <label>Value per price unit <input name="value_per_price_unit" type="number" step="any" value="1" required /></label>
-            <button>Calculate</button>
-          </form>
-          <output id="risk-output"></output>
-        </section>
-        <section>
-          <h2>Review loop</h2>
-          <ol>
-            <li>Record visible facts.</li>
-            <li>Label context hypotheses.</li>
-            <li>Define a lower-timeframe trigger.</li>
-            <li>Predefine invalidation and risk.</li>
-            <li>Review execution separately from outcome.</li>
-          </ol>
-          <p class="boundary">No autonomous order placement. Every moment is unique; the purpose is to measure repeatable decisions across regimes.</p>
-        </section>
-      </div>
+      <section>
+        <p class="note">JOURNAL-FIRST TOOLING</p>
+        <h1>Market feed + risk sanity checks</h1>
+        <p class="lede">
+          Keep OANDA for FX, add Kraken for crypto, and Alpaca for equities. This page uses
+          <strong>Lightweight Charts</strong> for normalized candle feeds and keeps all calls
+          read-only.
+        </p>
+      </section>
+
+      <section>
+        <h2>Live provider feed</h2>
+        <form id="market-form" class="grid" autocomplete="off">
+          <label>
+            API key
+            <input id="api-key" type="password" autocomplete="off" required />
+          </label>
+          <label>
+            Provider
+            <select id="provider" required>
+              <option value="oanda">OANDA (forex)</option>
+              <option value="kraken">Kraken (crypto)</option>
+              <option value="alpaca">Alpaca (stocks)</option>
+            </select>
+          </label>
+          <label>
+            Instrument
+            <input id="instrument" value="XAU_USD" required />
+          </label>
+          <label>
+            Timeframe
+            <select id="timeframe">
+              <option>1M</option>
+              <option>2M</option>
+              <option>5M</option>
+              <option>15M</option>
+              <option selected>4H</option>
+              <option>1D</option>
+            </select>
+          </label>
+          <label>
+            Count
+            <input id="count" type="number" min="1" max="5000" value="150" />
+          </label>
+          <button id="load-market">Load market data</button>
+        </form>
+        <output id="market-output"></output>
+
+        <div class="inline" style="margin-top: 12px;">
+          <div>
+            <div class="label">Latest quote</div>
+            <div class="value" id="market-quote">—</div>
+          </div>
+          <div>
+            <div class="label">Spread</div>
+            <div class="value" id="market-spread">—</div>
+          </div>
+          <div>
+            <div class="label">Last market time</div>
+            <div class="value" id="market-time">—</div>
+          </div>
+          <div>
+            <div class="label">Candle count / provider</div>
+            <div class="value" id="market-summary">—</div>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Normalized market chart</h2>
+        <div id="chart-wrap">
+          <div id="market-chart"></div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Risk sanity check</h2>
+        <form id="risk-form" class="grid">
+          <label>Account equity <input name="account_equity" type="number" step="any" required /></label>
+          <label>Risk % <input name="risk_percent" type="number" step="any" value="1" required /></label>
+          <label>Entry <input name="entry" type="number" step="any" required /></label>
+          <label>Stop <input name="stop" type="number" step="any" required /></label>
+          <label>Target <input name="target" type="number" step="any" /></label>
+          <label>Value per price unit <input name="value_per_price_unit" type="number" step="any" value="1" required /></label>
+          <button>Calculate</button>
+        </form>
+        <output id="risk-output"></output>
+      </section>
     </main>
+
     <script>
-      document.querySelector("#risk-form").addEventListener("submit", async (event) => {
-        event.preventDefault();
-        const apiKey = document.querySelector("#api-key").value;
-        if (!apiKey) {
-          document.querySelector("#risk-output").textContent = "Enter the local API key.";
-          return;
+      const chartContainer = document.getElementById("market-chart");
+      const chart = LightweightCharts.createChart(chartContainer, {
+        layout: {
+          background: { color: "#0d2d2a" },
+          textColor: "#e8ffef",
+        },
+        grid: {
+          vertLines: { color: "#184240" },
+          horzLines: { color: "#184240" },
+        },
+        rightPriceScale: {
+          borderColor: "#204d46",
+        },
+        timeScale: {
+          borderColor: "#204d46",
+          timeVisible: true,
+          secondsVisible: false,
+        },
+      });
+
+      chart.applyOptions({ width: chartContainer.clientWidth, height: 420 });
+      const candleSeries = chart.addCandlestickSeries({
+        upColor: "#4bf5b0",
+        downColor: "#ff8a8a",
+        borderVisible: false,
+        wickUpColor: "#4bf5b0",
+        wickDownColor: "#ff8a8a",
+      });
+      const quoteSeries = chart.addLineSeries({
+        color: "#7be2a4",
+        lineWidth: 2,
+        title: "Last quote",
+      });
+
+      const setChartSize = () => {
+        chart.applyOptions({ width: chartContainer.clientWidth, height: 420 });
+      };
+      if (window.ResizeObserver) {
+        const observer = new ResizeObserver(() => setChartSize());
+        observer.observe(chartContainer);
+      }
+
+      const form = document.getElementById("market-form");
+      const marketOutput = document.getElementById("market-output");
+      const quoteCell = document.getElementById("market-quote");
+      const spreadCell = document.getElementById("market-spread");
+      const marketTimeCell = document.getElementById("market-time");
+      const summaryCell = document.getElementById("market-summary");
+
+      const setFeedback = (message, isError = false) => {
+        marketOutput.textContent = message;
+        marketOutput.style.color = isError ? "#ffb4b4" : "#d4fbef";
+      };
+
+      const normalizeSeries = (payload) => {
+        const candles = payload.candles
+          .map((item) => {
+            const started = Math.floor(new Date(item.started_at).getTime() / 1000);
+            return {
+              time: started,
+              open: Number(item.open),
+              high: Number(item.high),
+              low: Number(item.low),
+              close: Number(item.close),
+            };
+          })
+          .filter((item) => Number.isFinite(item.open) && Number.isFinite(item.high) && Number.isFinite(item.low) && Number.isFinite(item.close));
+        candles.sort((a, b) => a.time - b.time);
+        return candles;
+      };
+
+      const normalizeQuotePoints = (payload) => {
+        const quote = payload.quote;
+        if (!quote) {
+          return [];
         }
+        return [
+          {
+            time: Math.floor(new Date(quote.market_time).getTime() / 1000),
+            value: (Number(quote.ask) + Number(quote.bid)) / 2,
+          },
+        ];
+      };
+
+      const loadMarketData = async (event) => {
+        event.preventDefault();
+        setFeedback("Fetching live market data...");
+        const apiKey = document.getElementById("api-key").value;
+        const provider = document.getElementById("provider").value;
+        const instrument = document.getElementById("instrument").value.trim();
+        const timeframe = document.getElementById("timeframe").value;
+        const count = Number(document.getElementById("count").value || 150);
+
+        const submit = document.getElementById("load-market");
+        submit.disabled = true;
+
+        try {
+          const url = new URL("/api/market-data", window.location.origin);
+          url.searchParams.set("provider", provider);
+          url.searchParams.set("instrument", instrument);
+          url.searchParams.set("timeframe", timeframe);
+          url.searchParams.set("count", String(count));
+
+          const response = await fetch(url, {
+            headers: { "X-API-Key": apiKey },
+          });
+          const payload = await response.json();
+
+          if (!response.ok) {
+            setFeedback(`Error ${response.status}: ${JSON.stringify(payload, null, 2)}`, true);
+            return;
+          }
+
+          const candles = normalizeSeries(payload);
+          const points = normalizeQuotePoints(payload);
+          if (!candles.length) {
+            setFeedback("No normalized candles were returned for those inputs.", true);
+            return;
+          }
+
+          const spread = Number(payload.quote.ask) - Number(payload.quote.bid);
+
+          candleSeries.setData(candles);
+          quoteSeries.setData(points);
+
+          quoteCell.textContent = `Bid ${Number(payload.quote.bid)} / Ask ${Number(payload.quote.ask)}`;
+          spreadCell.textContent = spread.toFixed(8);
+          marketTimeCell.textContent = payload.quote.market_time;
+          summaryCell.textContent = `${payload.instrument} · ${payload.timeframe} · ${candles.length} bars · ${payload.provider}`;
+
+          setFeedback(`Updated from ${provider} at ${payload.quote.retrieved_at}`);
+          chart.timeScale().fitContent();
+        } catch (error) {
+          setFeedback(`Request failed: ${error.message}`, true);
+        } finally {
+          submit.disabled = false;
+        }
+      };
+
+      form.addEventListener("submit", loadMarketData);
+
+      document.getElementById("risk-form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const apiKey = document.getElementById("api-key").value;
         const payload = Object.fromEntries(new FormData(event.target));
-        if (!payload.target) delete payload.target;
+        if (!payload.target) {
+          delete payload.target;
+        }
         const response = await fetch("/api/risk/position-size", {
           method: "POST",
-          headers: {"content-type": "application/json", "X-API-Key": apiKey},
-          body: JSON.stringify(payload)
+          headers: { "content-type": "application/json", "X-API-Key": apiKey },
+          body: JSON.stringify(payload),
         });
         const data = await response.json();
-        document.querySelector("#risk-output").textContent = response.ok
-          ? `Risk: $${data.risk_amount}\nQuantity: ${data.quantity}\nPlanned R: ${data.planned_r ?? "—"}`
-          : JSON.stringify(data, null, 2);
+        const out = document.getElementById("risk-output");
+        if (!response.ok) {
+          out.style.color = "#ffb4b4";
+          out.textContent = JSON.stringify(data, null, 2);
+          return;
+        }
+        out.style.color = "#d4fbef";
+        out.textContent = `Risk: $${data.risk_amount}\nQuantity: ${data.quantity}\nPlanned R: ${data.planned_r ?? "—"}`;
       });
     </script>
   </body>

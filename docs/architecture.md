@@ -66,7 +66,8 @@ The MVP is a human-in-the-loop journal and playbook service:
 ## Adapter boundary
 
 - Market data: OANDA first, MT5 reference; continuous data remains in memory.
-- News/calendar: Trading Economics metadata with provider and retrieval timestamps.
+- News/calendar: free Forex Factory weekly calendar events or Trading Economics metadata,
+  with provider and retrieval timestamps.
 - Web: read-only full-page retrieval for an explicit domain allowlist; redirects remain
   inside the allowlist and public network.
 - Search: optional Brave Search discovery after local, connector, and allowlisted sources

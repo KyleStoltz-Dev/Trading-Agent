@@ -6,11 +6,12 @@ import os
 import re
 import shutil
 import sys
+import time
 import unicodedata
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
@@ -48,6 +49,7 @@ from app.connectors import (
     create_metatrader_connector,
     create_news_connector,
     create_oanda_connector,
+    news_provider_configured,
 )
 from app.costs import (
     TokenUsage,
@@ -75,6 +77,7 @@ from app.models import (
     BrokerConnection,
     ConnectorCursor,
     ConversationSession,
+    EconomicEvent,
 )
 from app.policy import ExecutionHooks, PolicyEngine, PolicyViolation, ToolContext
 from app.providers import ProviderConfigurationError, create_model_provider
@@ -126,6 +129,7 @@ from app.services.catalog import (
     configure_instrument_specification,
 )
 from app.services.chart_analysis import SYSTEM_PROMPT, analyze_chart
+from app.services.chat_webhooks import set_chat_webhook_secret
 from app.services.conversations import (
     add_turn,
     conversation_history,
@@ -142,6 +146,7 @@ from app.services.development import (
     detect_development_intent,
     development_request,
 )
+from app.services.event_glossary import event_insight
 from app.services.evidence import record_chart_analysis
 from app.services.execution_ledger import record_management_event
 from app.services.health import HealthReport, check_health
@@ -173,7 +178,11 @@ from app.services.market_features import (
     strategy_experiment_report,
 )
 from app.services.mindset import create_mindset_check_in, list_mindset_check_ins
-from app.services.news import store_calendar_events, store_news_items
+from app.services.news import (
+    economic_event_history,
+    store_calendar_events,
+    store_news_items,
+)
 from app.services.pretrade import (
     PreflightAssessment,
     assess_preflight,
@@ -358,6 +367,8 @@ def _configured_workspace(db):
 
 
 STARTER_PROMPTS = (
+    "Show me today's economic news.",
+    "Show me the previous six Core PCE releases.",
     "Review this chart: /absolute/path/to/chart.png",
     "Help me build an XAUUSD New York premarket plan.",
     "Size this trade: equity 10000, risk 0.5%, entry 2350, stop 2345, target 2365.",
@@ -452,6 +463,30 @@ BROKER_CHOICES = (
         "Read-only live data and execution history through a terminal-side bridge.",
         ("mt4", "mt5", "meta trader", "metatrader 4", "metatrader 5"),
     ),
+    GuidedChoice(
+        "ibkr",
+        "Interactive Brokers (planned)",
+        "Planned read-only broker and account data adapter; not implemented yet.",
+        ("ibkr", "interactive brokers", "interactive broker", "ib"),
+    ),
+    GuidedChoice(
+        "alpaca",
+        "Alpaca (planned)",
+        "Planned stocks/ETFs/crypto market-data coverage; account feed is not implemented.",
+        ("alpaca", "alpaca markets"),
+    ),
+    GuidedChoice(
+        "twelve-data",
+        "Twelve Data (planned)",
+        "Planned unified FX/equities/indices data feed; not implemented yet.",
+        ("twelve data", "twelve-data", "twelvedata"),
+    ),
+    GuidedChoice(
+        "ctrader",
+        "cTrader (planned)",
+        "Planned OAuth account and market-data adapter for CFD and chart workflows.",
+        ("cTrader", "ctrader", "c trader"),
+    ),
 )
 METATRADER_PLATFORM_CHOICES = (
     GuidedChoice(
@@ -473,6 +508,12 @@ NEWS_CHOICES = (
         "No news provider yet",
         "Skip calendar/news data now; this can be changed later.",
         ("no", "skip", "no news", "disabled"),
+    ),
+    GuidedChoice(
+        "forex-factory",
+        "Forex Factory",
+        "Free read-only weekly economic calendar; no API key required.",
+        ("forex factory", "forexfactory", "ff"),
     ),
     GuidedChoice(
         "trading-economics",
@@ -844,6 +885,24 @@ def _render_broker_setup_error(
             "Then start the bridge and run "
             "[cyan]trade broker configure-metatrader --label NAME[/cyan]."
         )
+    elif provider in {"ibkr", "alpaca", "twelve-data", "ctrader"}:
+        display_name = (
+            "Interactive Brokers"
+            if provider == "ibkr"
+            else "Alpaca"
+            if provider == "alpaca"
+            else "Twelve Data"
+            if provider == "twelve-data"
+            else "cTrader"
+        )
+        console.print(
+            f"{display_name} is marked as planned in the public roadmap and is not yet "
+            "runnable in this release."
+        )
+        console.print(
+            "It currently appears in planning views; choose a live data source now for "
+            "broker reads."
+        )
     elif provider == "oanda":
         console.print(
             "Set [cyan]BROKER_PROVIDER=oanda[/cyan], "
@@ -868,11 +927,14 @@ def _render_broker_request_error(
     *,
     operation: str,
 ) -> None:
-    provider_name = (
-        "MetaTrader bridge"
-        if settings.broker_provider == "metatrader"
-        else "OANDA"
-    )
+    provider_name = {
+        "metatrader": "MetaTrader bridge",
+        "oanda": "OANDA",
+        "ibkr": "Interactive Brokers",
+        "alpaca": "Alpaca",
+        "twelve-data": "Twelve Data",
+        "ctrader": "cTrader",
+    }.get(settings.broker_provider, settings.broker_provider.title())
     console.print()
     console.print(f"[bold red]{provider_name} {operation} failed[/bold red]")
     console.print(f"[red]{escape_markup(str(error))}[/red]")
@@ -927,6 +989,37 @@ def _render_starter_prompts() -> None:
     console.print("[bold]Try asking:[/bold]")
     for prompt in STARTER_PROMPTS:
         console.print(f"  [cyan]›[/cyan] {prompt}")
+
+
+def _prompt_startup_action() -> str | None:
+    if not sys.stdin.isatty():
+        return None
+
+    options = (
+        ("1", "Do a day-start check (news + open plans)."),
+        ("2", "Show account and broker readiness for the selected symbol."),
+        ("3", "Start a new trade plan with guided defaults."),
+    )
+    console.print()
+    console.print("[bold]Quick start[/bold]")
+    for key, label in options:
+        console.print(f"  [cyan]{key}[/cyan]  {label}")
+    console.print(
+        "  [cyan]Enter[/cyan]  Continue with an empty prompt and type naturally"
+    )
+    while True:
+        selection = console.input("[dim]Quick start choice (1-3 or Enter):[/dim] ").strip()
+        if not selection:
+            return None
+        if selection == "1":
+            return "Show me today's economic news and an operational day-start summary."
+        if selection == "2":
+            return (
+                "Show my live broker status and whether I'm ready to size a trade now."
+            )
+        if selection == "3":
+            return "Help me build a New York premarket plan for XAUUSD."
+        console.print("[yellow]Please enter 1, 2, 3, or press Enter to continue.[/yellow]")
 
 
 def _literal_terminal_text(value: str) -> str:
@@ -2583,10 +2676,19 @@ def _run_onboarding(db, settings: Settings) -> bool:
             "[yellow]MetaTrader still needs the read-only bridge URL, dedicated token, "
             "and account ID before live reads. Ask “help me finish MT5 setup” in chat.[/yellow]"
         )
+    if broker in {"ibkr", "alpaca", "twelve-data", "ctrader"}:
+        console.print(
+            "[yellow]This broker is on the roadmap and not yet runnable in this release. "
+            "Use OANDA or MetaTrader for live broker reads today.[/yellow]"
+        )
     if news == "trading-economics":
         console.print(
             "[yellow]Trading Economics still needs its API key before calendar refreshes. "
             "Ask “help me finish news setup” in chat.[/yellow]"
+        )
+    if news == "forex-factory":
+        console.print(
+            "[green]Forex Factory calendar refresh is ready; no API key is required.[/green]"
         )
     console.print(
         "[green]Setup is complete. Continuing in Trading Agent now.[/green] "
@@ -4048,7 +4150,7 @@ def preflight(
                 )
             relevant_currencies = instrument_event_currencies(request.instrument)
 
-            if settings.news_provider == "trading-economics" and settings.trading_economics_api_key:
+            if news_provider_configured(settings):
                 try:
                     asyncio.run(refresh_startup_calendar(settings, db))
                 except Exception as exc:
@@ -4070,8 +4172,7 @@ def preflight(
                 currencies=relevant_currencies,
                 now=now,
                 configured=(
-                    settings.news_provider == "trading-economics"
-                    and bool(settings.trading_economics_api_key)
+                    news_provider_configured(settings)
                 ),
             )
 
@@ -4467,8 +4568,7 @@ def _run_chat(
         scope = _current_scope(db)
         if (
             settings.startup_news_sync
-            and settings.news_provider == "trading-economics"
-            and settings.trading_economics_api_key
+            and news_provider_configured(settings)
         ):
             try:
                 refreshed = asyncio.run(refresh_startup_calendar(settings, db))
@@ -4539,18 +4639,27 @@ def _run_chat(
             )
         startup_memory = build_startup_memory(db, conversation, scope=scope)
         startup_memory_pending = False
+        startup_message = _prompt_startup_action()
+        queued_messages = [startup_message] if startup_message else []
         _render_startup_memory(startup_memory)
         _render_starter_prompts()
         console.print(
             "[dim]/help commands · /onboard update setup · /examples starter prompts "
             "· /cost model pricing "
-            "· /memory saved recall · /learn curriculum · /model local model "
-            "· /details response audit "
+            "· /memory saved recall · /learn curriculum · /model · /model use NAME · "
+            "for local overrides"
+            " · /details response audit "
             "· /exit leave[/dim]\n"
         )
         while True:
             try:
-                message = console.input("[bold cyan]You[/bold cyan] [bold]❯[/bold] ").strip()
+                if queued_messages:
+                    message = queued_messages.pop(0)
+                    console.print(
+                        f"[dim]You (quick start)· {message}[/dim]"
+                    )
+                else:
+                    message = console.input("[bold cyan]You[/bold cyan] [bold]❯[/bold] ").strip()
             except (EOFError, KeyboardInterrupt):
                 console.print()
                 break
@@ -4946,10 +5055,16 @@ def _run_chat(
             )
             agent.last_tool_audit = None
             try:
+                recent_user_context = " ".join(
+                    item["content"]
+                    for item in history[-6:]
+                    if item.get("role") == "user"
+                )
+                event_currency_context = f"{recent_user_context} {message}"
                 alerts = pretrade_alerts(
                     db,
-                    message,
-                    currencies=instrument_event_currencies(message),
+                    "trade" if detect_preflight_intent(message) else "",
+                    currencies=instrument_event_currencies(event_currency_context),
                     window_minutes=settings.pretrade_news_window_minutes,
                     minimum_importance=settings.pretrade_minimum_event_importance,
                 )
@@ -4963,12 +5078,22 @@ def _run_chat(
                     for alert in alerts
                 ]
                 if alerts:
-                    console.print("[bold yellow]Upcoming event risk[/bold yellow]")
+                    impact_names = {0: "Info", 1: "Low", 2: "Medium", 3: "High"}
+                    console.print("[bold yellow]News reminder[/bold yellow]")
                     for alert in alerts:
+                        timing = (
+                            f"{abs(alert.minutes_from_now)}m ago"
+                            if alert.minutes_from_now < 0
+                            else (
+                                "now"
+                                if alert.minutes_from_now == 0
+                                else f"in {alert.minutes_from_now}m"
+                            )
+                        )
                         console.print(
                             Text(
-                                f"  {alert.minutes_from_now:+}m · importance "
-                                f"{alert.importance} · {alert.country} · {alert.title}"
+                                f"  {timing} · {impact_names[alert.importance]} · "
+                                f"{alert.currency or alert.country} · {alert.title}"
                             )
                         )
                 evidence_parts: list[str] = []
@@ -5820,6 +5945,135 @@ def setup_agent(
     )
 
 
+@app.command("quickstart")
+def quickstart_setup(
+    provider: Annotated[
+        str,
+        typer.Option(help="Model provider name: Ollama, OpenAI, or Anthropic."),
+    ] = "ollama",
+    model: Annotated[
+        str,
+        typer.Option(help="Local Ollama model tag to configure."),
+    ] = "qwen3.5:9b",
+    database: Annotated[
+        str,
+        typer.Option(help="Database mode: local, neon, or custom."),
+    ] = "local",
+    broker: Annotated[
+        str,
+        typer.Option(help="Broker name: none, oanda, or metatrader."),
+    ] = "none",
+    news: Annotated[
+        str,
+        typer.Option(help="News provider: none, forex-factory, or trading-economics."),
+    ] = "none",
+    tradingview: Annotated[
+        str,
+        typer.Option(help="TradingView alerts: enabled or disabled."),
+    ] = "disabled",
+    metatrader_platform: Annotated[
+        str | None,
+        typer.Option(help="MetaTrader terminal generation: MT4 or MT5 (metatrader only)."),
+    ] = None,
+) -> None:
+    """Apply a common setup profile without interactive prompts."""
+    try:
+        selected_provider = _resolve_cli_choice(
+            provider,
+            MODEL_PROVIDER_CHOICES,
+            option_name="model provider",
+        )
+        selected_database = _resolve_cli_choice(
+            database,
+            DATABASE_CHOICES,
+            option_name="database",
+        )
+        selected_broker = _resolve_cli_choice(
+            broker,
+            BROKER_CHOICES,
+            option_name="broker",
+        )
+        selected_news = _resolve_cli_choice(
+            news,
+            NEWS_CHOICES,
+            option_name="news provider",
+        )
+        selected_tradingview = _resolve_cli_choice(
+            tradingview,
+            TRADINGVIEW_CHOICES,
+            option_name="TradingView alerts",
+        )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
+
+    selected_metatrader_platform: str | None = None
+    if selected_broker == "metatrader":
+        try:
+            selected_metatrader_platform = _resolve_cli_choice(
+                metatrader_platform,
+                METATRADER_PLATFORM_CHOICES,
+                option_name="MetaTrader platform",
+            )
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(2) from exc
+
+    resolved_config = default_config_path().expanduser().resolve()
+    values = provider_settings(selected_provider, model)
+    values.update(
+        {
+            "DATABASE_MODE": selected_database,
+            "BROKER_PROVIDER": selected_broker,
+            "NEWS_PROVIDER": selected_news,
+            "TRADINGVIEW_WEBHOOK_ENABLED": str(selected_tradingview == "enabled").lower(),
+        }
+    )
+    if selected_metatrader_platform is not None:
+        values["METATRADER_PLATFORM"] = selected_metatrader_platform
+    update_env_file(resolved_config, values)
+    get_settings.cache_clear()
+
+    table = Table(title="Quickstart profile")
+    table.add_column("Setting")
+    table.add_column("Value")
+    table.add_row(
+        "Model provider",
+        next(choice.label for choice in MODEL_PROVIDER_CHOICES if choice.key == selected_provider),
+    )
+    table.add_row("Local model", model if selected_provider == "ollama" else "Not applicable")
+    table.add_row(
+        "Database",
+        next(choice.label for choice in DATABASE_CHOICES if choice.key == selected_database),
+    )
+    table.add_row(
+        "Broker",
+        next(choice.label for choice in BROKER_CHOICES if choice.key == selected_broker),
+    )
+    table.add_row(
+        "News/calendar",
+        next(choice.label for choice in NEWS_CHOICES if choice.key == selected_news),
+    )
+    table.add_row(
+        "TradingView alerts",
+        next(
+            choice.label
+            for choice in TRADINGVIEW_CHOICES
+            if choice.key == selected_tradingview
+        ),
+    )
+    if selected_metatrader_platform is not None:
+        table.add_row("MetaTrader terminal", selected_metatrader_platform)
+    table.add_row("Config file", str(resolved_config))
+    console.print(table)
+    console.print(f"[green]Quickstart profile written to {resolved_config}.[/green]")
+    if selected_provider == "ollama":
+        console.print(
+            "[dim]Run `trade models pull qwen3.5:9b` first if the model is not installed, "
+            "then `trade`.[/dim]"
+        )
+
+
 @develop_app.command("start")
 def develop_start(
     request: Annotated[str, typer.Argument(help="The software change to make.")],
@@ -6453,6 +6707,122 @@ def account_tradingview_secret(
                 title="TradingView account authentication",
             )
         )
+@account_app.command("telegram-secret")
+def account_telegram_secret(
+    account_reference: Annotated[
+        str | None,
+        typer.Option(
+            "--account",
+            help="Account label, broker account ID, or internal UUID; current by default.",
+        ),
+    ] = None,
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+) -> None:
+    """Create or rotate the one-time secret used in Telegram webhook payloads."""
+    upgrade_database()
+    with SessionLocal() as db:
+        workspace = _configured_workspace(db)
+        current = _current_scope(db)
+        account = resolve_account(
+            db,
+            workspace.id,
+            account_reference or current.account_id,
+            active_only=True,
+        )
+        if account is None:
+            console.print("[red]Account was not found in the configured workspace.[/red]")
+            raise typer.Exit(1)
+        _authorize_direct(
+            "configure_telegram_secret",
+            {
+                "workspace": workspace.slug,
+                "account": account.label,
+                "operation": "rotate account telegram webhook secret",
+            },
+            mutating=True,
+            assume_yes=yes,
+        )
+        secret = set_chat_webhook_secret(db=db, account=account, platform="telegram")
+        console.print(
+            Panel(
+                Text.assemble(
+                    ("Telegram webhook configured for ", "bold"),
+                    account.label,
+                    "\n\n",
+                    ("Webhook path\n", "bold"),
+                    f"/api/webhooks/telegram/{account.id}",
+                    "\n\n",
+                    ("Add this field to the message payload\n", "bold"),
+                    f'"webhook_secret": "{secret}"',
+                    "\n\n",
+                    (
+                        "This secret is shown once. PostgreSQL stores only its SHA-256 "
+                        "digest. Rotating it immediately invalidates the previous value.",
+                        "dim",
+                    ),
+                ),
+                title="Telegram account authentication",
+            )
+        )
+
+
+@account_app.command("discord-secret")
+def account_discord_secret(
+    account_reference: Annotated[
+        str | None,
+        typer.Option(
+            "--account",
+            help="Account label, broker account ID, or internal UUID; current by default.",
+        ),
+    ] = None,
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+) -> None:
+    """Create or rotate the one-time secret used in Discord webhook payloads."""
+    upgrade_database()
+    with SessionLocal() as db:
+        workspace = _configured_workspace(db)
+        current = _current_scope(db)
+        account = resolve_account(
+            db,
+            workspace.id,
+            account_reference or current.account_id,
+            active_only=True,
+        )
+        if account is None:
+            console.print("[red]Account was not found in the configured workspace.[/red]")
+            raise typer.Exit(1)
+        _authorize_direct(
+            "configure_discord_secret",
+            {
+                "workspace": workspace.slug,
+                "account": account.label,
+                "operation": "rotate account discord webhook secret",
+            },
+            mutating=True,
+            assume_yes=yes,
+        )
+        secret = set_chat_webhook_secret(db=db, account=account, platform="discord")
+        console.print(
+            Panel(
+                Text.assemble(
+                    ("Discord webhook configured for ", "bold"),
+                    account.label,
+                    "\n\n",
+                    ("Webhook path\n", "bold"),
+                    f"/api/webhooks/discord/{account.id}",
+                    "\n\n",
+                    ("Add this field to the message payload\n", "bold"),
+                    f'"webhook_secret": "{secret}"',
+                    "\n\n",
+                    (
+                        "This secret is shown once. PostgreSQL stores only its SHA-256 "
+                        "digest. Rotating it immediately invalidates the previous value.",
+                        "dim",
+                    ),
+                ),
+                title="Discord account authentication",
+            )
+        )
 
 
 @sessions_app.command("list")
@@ -6968,6 +7338,10 @@ def _configured_broker_connection(db, settings: Settings) -> BrokerConnection:
                 "run `trade broker configure-metatrader` for the configured account"
             )
         return matches[0]
+    if settings.broker_provider in {"ibkr", "alpaca", "twelve-data", "ctrader"}:
+        raise LookupError(
+            "this broker provider is planned but not yet configured for live reads"
+        )
     raise LookupError("select and configure a broker before synchronizing")
 
 
@@ -7979,18 +8353,320 @@ def news_sync(
         finally:
             await connector.aclose()
 
-    calendar, headlines = asyncio.run(fetch())
+    try:
+        calendar, headlines = asyncio.run(fetch())
+    except RuntimeError as exc:
+        console.print("[bold red]News sync unavailable[/bold red]")
+        console.print(str(exc))
+        console.print(
+            "[dim]Previously stored calendar data remains available. "
+            "Wait for the provider's retry window, then run this command again.[/dim]"
+        )
+        raise typer.Exit(1) from None
     with SessionLocal() as db:
         calendar_count = store_calendar_events(db, tuple(calendar))
         news_count = store_news_items(db, tuple(headlines))
-    _print_model(
-        {
-            "calendar_received": len(calendar),
-            "calendar_added": calendar_count,
-            "news_received": len(headlines),
-            "news_added": news_count,
-        }
+    provider_name = get_settings().news_provider.replace("-", " ").title()
+    console.print("[bold green]✓ News sync complete[/bold green]")
+    console.print(f"[bold]Source[/bold]  {provider_name}")
+    console.print(
+        f"[bold]Calendar[/bold]  {len(calendar)} received · {calendar_count} new"
     )
+    if headlines:
+        console.print(
+            f"[bold]Headlines[/bold] {len(headlines)} received · {news_count} new"
+        )
+    elif get_settings().news_provider == "forex-factory":
+        console.print(
+            "[dim]Forex Factory supplies calendar events, not a headline API.[/dim]"
+        )
+    if not calendar and not headlines:
+        console.print(
+            "[yellow]No matching items were found for this date, currency, "
+            "and impact filter.[/yellow]"
+        )
+
+
+@news_app.command("upcoming")
+def news_upcoming(
+    hours: Annotated[int, typer.Option(min=1, max=168)] = 24,
+    currencies: Annotated[str, typer.Option()] = "USD",
+    minimum_importance: Annotated[int, typer.Option(min=0, max=3)] = 2,
+    details: Annotated[bool, typer.Option("--details")] = False,
+) -> None:
+    """Show concise upcoming events from the stored calendar."""
+    currency_values = tuple(
+        dict.fromkeys(
+            value.strip().upper()
+            for value in currencies.split(",")
+            if value.strip()
+        )
+    )
+    now = datetime.now(UTC)
+    through = now + timedelta(hours=hours)
+    upgrade_database()
+    with SessionLocal() as db:
+        statement = (
+            select(EconomicEvent)
+            .where(
+                EconomicEvent.scheduled_at >= now,
+                EconomicEvent.scheduled_at <= through,
+                EconomicEvent.importance >= minimum_importance,
+            )
+            .order_by(EconomicEvent.scheduled_at, EconomicEvent.importance.desc())
+        )
+        if currency_values:
+            statement = statement.where(
+                EconomicEvent.currency.in_(currency_values)
+            )
+        events = tuple(db.scalars(statement))
+
+    console.print("[bold]Trading Agent: Upcoming economic events[/bold]")
+    if not events:
+        console.print(
+            "[yellow]No stored events match this window and filter.[/yellow]"
+        )
+        console.print(
+            "[dim]Run `trade news sync` to refresh the calendar, then try again.[/dim]"
+        )
+        return
+    local_timezone = datetime.now().astimezone().tzinfo
+    table = Table(show_header=True, box=None, pad_edge=False)
+    table.add_column("Time", no_wrap=True)
+    table.add_column("Currency", no_wrap=True)
+    table.add_column("Impact", no_wrap=True)
+    table.add_column("Event")
+    impact_names = {0: "Info", 1: "Low", 2: "Medium", 3: "High"}
+    for event in events:
+        local_time = event.scheduled_at.astimezone(local_timezone)
+        table.add_row(
+            local_time.strftime("%a %H:%M %Z"),
+            event.currency or "—",
+            impact_names[event.importance],
+            event.title,
+        )
+    console.print(table)
+    console.print(
+        f"[dim]{len(events)} event(s) through "
+        f"{through.astimezone(local_timezone).strftime('%a %H:%M %Z')} · "
+        "stored provider evidence, not trading instructions[/dim]"
+    )
+    if details:
+        for event in events:
+            insight = event_insight(event.title, event.currency)
+            local_time = event.scheduled_at.astimezone(local_timezone)
+            console.print()
+            console.rule(f"[bold]{event.title}[/bold]", style="dim")
+            console.print(
+                f"[dim]{local_time.strftime('%A, %H:%M %Z')} · "
+                f"{event.currency or '—'} · "
+                f"{impact_names[event.importance]} impact[/dim]"
+            )
+            console.print()
+            values = Table(show_header=True, box=None, pad_edge=False)
+            values.add_column("Actual", min_width=12)
+            values.add_column("Forecast", min_width=12)
+            values.add_column("Previous", min_width=12)
+            values.add_row(
+                f"[bold]{event.actual or 'Pending'}[/bold]",
+                event.forecast or "—",
+                event.previous or "—",
+            )
+            console.print(values)
+            console.print()
+            console.print("[bold]What it measures[/bold]")
+            console.print(insight.measures)
+            console.print()
+            console.print("[bold]Why markets watch it[/bold]")
+            console.print(insight.why_markets_watch)
+            console.print()
+            if insight.sensitive_markets:
+                console.print("[bold]Commonly sensitive markets[/bold]")
+                console.print(" · ".join(insight.sensitive_markets))
+                console.print()
+            console.print("[bold yellow]Interpret carefully[/bold yellow]")
+            console.print(f"[dim]{insight.interpretation_caution}[/dim]")
+            if insight.source_label and insight.source_url:
+                console.print()
+                console.print("[bold]Primary reference[/bold]")
+                console.print(insight.source_label)
+                console.print(
+                    f"[link={insight.source_url}]{insight.source_url}[/link]"
+                )
+
+
+@news_app.command("history")
+def news_history(
+    event: Annotated[str, typer.Argument(help="Event name, such as Core PCE or GDP.")],
+    currency: Annotated[str | None, typer.Option()] = None,
+    limit: Annotated[int, typer.Option(min=1, max=50)] = 10,
+) -> None:
+    """Show stored past observations for one requested economic event."""
+    upgrade_database()
+    with SessionLocal() as db:
+        try:
+            events = economic_event_history(
+                db,
+                event,
+                currency=currency,
+                limit=limit,
+            )
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(2) from exc
+
+    console.print(f"[bold]Trading Agent: Previous {event.strip()} releases[/bold]")
+    if not events:
+        console.print("[yellow]No matching past releases are stored yet.[/yellow]")
+        console.print(
+            "[dim]The free weekly feed builds history as calendar syncs are retained; "
+            "it is not a complete historical archive.[/dim]"
+        )
+        return
+
+    local_timezone = datetime.now().astimezone().tzinfo
+    impact_names = {0: "Info", 1: "Low", 2: "Medium", 3: "High"}
+    table = Table(show_header=True, box=None, pad_edge=False)
+    table.add_column("Date", no_wrap=True)
+    table.add_column("Event")
+    table.add_column("Impact", no_wrap=True)
+    table.add_column("Actual", no_wrap=True)
+    table.add_column("Forecast", no_wrap=True)
+    table.add_column("Previous", no_wrap=True)
+    for item in events:
+        table.add_row(
+            item.scheduled_at.astimezone(local_timezone).strftime("%Y-%m-%d %H:%M %Z"),
+            item.title,
+            impact_names[item.importance],
+            item.actual or "—",
+            item.forecast or "—",
+            item.previous or "—",
+        )
+    console.print(table)
+    console.print(
+        f"[dim]{len(events)} stored release(s) · "
+        "values are provider evidence, not a directional signal[/dim]"
+    )
+
+
+@news_app.command("watch")
+def news_watch(
+    interval_seconds: Annotated[int, typer.Option(min=30, max=3600)] = 300,
+    alert_minutes: Annotated[int, typer.Option(min=1, max=1440)] = 60,
+    currencies: Annotated[str, typer.Option()] = "USD",
+    minimum_importance: Annotated[int, typer.Option(min=0, max=3)] = 2,
+    once: Annotated[bool, typer.Option("--once")] = False,
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+) -> None:
+    """Refresh the calendar on a schedule and print newly due event alerts."""
+    settings = get_settings()
+    if not news_provider_configured(settings):
+        console.print(
+            "[red]Select a configured news provider before starting calendar watch.[/red]"
+        )
+        raise typer.Exit(2)
+    currency_values = tuple(
+        dict.fromkeys(
+            value.strip().upper()
+            for value in currencies.split(",")
+            if value.strip()
+        )
+    )
+    _authorize_direct(
+        "synchronize_news",
+        {
+            "mode": "watch",
+            "interval_seconds": interval_seconds,
+            "alert_minutes": alert_minutes,
+            "currencies": currency_values,
+            "minimum_importance": minimum_importance,
+        },
+        mutating=True,
+        assume_yes=yes,
+    )
+    upgrade_database()
+    console.print("[bold]Trading Agent: Economic calendar watch[/bold]")
+    console.print(
+        f"Refreshing every {interval_seconds}s · alert window {alert_minutes}m · "
+        f"currencies {', '.join(currency_values) or 'all'}"
+    )
+    console.print("[dim]Press Ctrl-C to stop. No orders can be placed.[/dim]")
+    notified: set[tuple[str, str]] = set()
+
+    async def refresh():
+        connector = create_news_connector(settings)
+        try:
+            today = datetime.now(UTC).date()
+            return await connector.calendar(
+                start=today,
+                end=today + timedelta(days=settings.startup_news_horizon_days),
+                countries=currency_values,
+                minimum_importance=minimum_importance,
+            )
+        finally:
+            await connector.aclose()
+
+    try:
+        while True:
+            try:
+                fetched = tuple(asyncio.run(refresh()))
+            except RuntimeError as exc:
+                console.print(
+                    f"[yellow]Calendar refresh unavailable: {exc}. "
+                    "Using stored events.[/yellow]"
+                )
+            else:
+                with SessionLocal() as db:
+                    added = store_calendar_events(db, fetched)
+                console.print(
+                    f"[dim]{datetime.now().astimezone().strftime('%H:%M:%S %Z')} · "
+                    f"{len(fetched)} received · {added} new[/dim]"
+                )
+
+            now = datetime.now(UTC)
+            through = now + timedelta(minutes=alert_minutes)
+            with SessionLocal() as db:
+                statement = (
+                    select(EconomicEvent)
+                    .where(
+                        EconomicEvent.scheduled_at >= now,
+                        EconomicEvent.scheduled_at <= through,
+                        EconomicEvent.importance >= minimum_importance,
+                    )
+                    .order_by(
+                        EconomicEvent.scheduled_at,
+                        EconomicEvent.importance.desc(),
+                    )
+                )
+                if currency_values:
+                    statement = statement.where(
+                        EconomicEvent.currency.in_(currency_values)
+                    )
+                due = tuple(db.scalars(statement))
+            new_due = tuple(
+                event
+                for event in due
+                if (event.source, event.source_event_id) not in notified
+            )
+            for event in new_due:
+                local_time = event.scheduled_at.astimezone()
+                console.print()
+                console.print(
+                    f"[bold yellow]Economic event approaching · "
+                    f"{event.currency or '—'} · "
+                    f"{local_time.strftime('%H:%M %Z')}[/bold yellow]"
+                )
+                console.print(event.title)
+                console.print(
+                    f"[dim]Impact {event.importance}/3 · source {event.source} · "
+                    "untrusted calendar evidence[/dim]"
+                )
+                notified.add((event.source, event.source_event_id))
+            if once:
+                return
+            time.sleep(interval_seconds)
+    except KeyboardInterrupt:
+        console.print("\n[dim]Calendar watch stopped.[/dim]")
 
 
 @sessions_app.command("show")

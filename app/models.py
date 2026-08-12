@@ -160,6 +160,14 @@ class TradingAccount(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     tradingview_webhook_secret_sha256: Mapped[str | None] = mapped_column(String(64))
+    telegram_webhook_secret_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        comment="SHA-256 digest of the account-specific Telegram webhook secret.",
+    )
+    discord_webhook_secret_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        comment="SHA-256 digest of the account-specific Discord webhook secret.",
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -1634,6 +1642,62 @@ class TradingViewAlert(Base):
     verified_source_ip: Mapped[str] = mapped_column(String(45))
     verification_method: Mapped[str] = mapped_column(String(64))
 
+
+class ChatWebhookMessage(Base):
+    """Normalized inbound chat message evidence from Telegram or Discord webhooks."""
+
+    __tablename__ = "chat_webhook_messages"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "account_id",
+            "platform",
+            "external_message_id",
+            name="uq_chat_webhook_message_external",
+        ),
+        UniqueConstraint(
+            "workspace_id",
+            "account_id",
+            "payload_sha256",
+            name="uq_chat_webhook_message_payload",
+        ),
+        ForeignKeyConstraint(
+            ("workspace_id", "account_id"),
+            ("trading_accounts.workspace_id", "trading_accounts.id"),
+            name="fk_chat_webhook_workspace_account",
+        ),
+        Index(
+            "ix_chat_webhook_platform_time",
+            "workspace_id",
+            "account_id",
+            "platform",
+            "sent_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        index=True,
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    platform: Mapped[str] = mapped_column(String(16), index=True)
+    external_message_id: Mapped[str] = mapped_column(String(160), index=True)
+    sender_id: Mapped[str] = mapped_column(String(120))
+    sender_name: Mapped[str | None] = mapped_column(String(160))
+    channel_id: Mapped[str | None] = mapped_column(String(120))
+    channel_name: Mapped[str | None] = mapped_column(String(200))
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    text: Mapped[str] = mapped_column(Text)
+    verified_source: Mapped[str | None] = mapped_column(String(120))
+    metadata_json: Mapped[dict] = mapped_column(JSONB, default=dict)
+    payload_sha256: Mapped[str] = mapped_column(String(64))
 
 class EvidenceItem(Base):
     __tablename__ = "evidence_items"

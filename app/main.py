@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import hmac
 import ipaddress
@@ -22,6 +23,7 @@ from fastapi import (
     Form,
     Header,
     HTTPException,
+    Query,
     Request,
     UploadFile,
 )
@@ -30,6 +32,11 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app.config import get_settings, secret_value
+from app.connectors import BrokerConfigurationError
+from app.connectors.alpaca import AlpacaConnectorError
+from app.connectors.factory import create_market_data_connector
+from app.connectors.kraken import KrakenConnectorError
+from app.connectors.oanda import OandaConnectorError
 from app.db import (
     SessionLocal,
     bind_database_scope,
@@ -42,10 +49,17 @@ from app.policy import PolicyEngine, ToolContext
 from app.providers import create_model_provider
 from app.schemas import (
     ChartAnalysis,
+    ChatWebhookMessageRead,
+    ChatWebhookReceipt,
+    DiscordWebhookCreate,
+    MarketCandleRead,
+    MarketDataRead,
+    MarketQuoteRead,
     PositionSizeRequest,
     PositionSizeResult,
     ReflectionCreate,
     ReflectionRead,
+    TelegramWebhookCreate,
     TradePlanCreate,
     TradePlanRead,
     TradingViewAlertRead,
@@ -53,6 +67,13 @@ from app.schemas import (
     TradingViewWebhookReceipt,
 )
 from app.services.chart_analysis import SYSTEM_PROMPT, analyze_chart
+from app.services.chat_webhooks import (
+    ChatWebhookReplayError,
+    ChatWebhookValidationError,
+    chat_webhook_secret_is_valid,
+    ingest_chat_webhook_message,
+    recent_chat_webhooks,
+)
 from app.services.evidence import record_chart_analysis
 from app.services.journal import (
     ReflectionExistsError,
@@ -139,6 +160,25 @@ app = FastAPI(
 MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 TRADINGVIEW_WEBHOOK_PATH = "/api/webhooks/tradingview/{account_id}"
 TRADINGVIEW_WEBHOOK_PREFIX = "/api/webhooks/tradingview/"
+TELEGRAM_WEBHOOK_PATH = "/api/webhooks/telegram/{account_id}"
+DISCORD_WEBHOOK_PATH = "/api/webhooks/discord/{account_id}"
+CHAT_WEBHOOK_PREFIXES = (
+    TRADINGVIEW_WEBHOOK_PREFIX,
+    "/api/webhooks/telegram/",
+    "/api/webhooks/discord/",
+)
+
+
+def _is_tradingview_webhook_path(path: str) -> bool:
+    return path.startswith(TRADINGVIEW_WEBHOOK_PREFIX)
+
+
+def _is_telegram_webhook_path(path: str) -> bool:
+    return path.startswith("/api/webhooks/telegram/")
+
+
+def _is_discord_webhook_path(path: str) -> bool:
+    return path.startswith("/api/webhooks/discord/")
 TRADINGVIEW_SOURCE_IPS = frozenset(
     {
         "52.89.214.238",
@@ -167,9 +207,16 @@ async def bind_confirmation_to_raw_body(
 ):
     """Hash raw API mutation bytes before JSON or multipart parsing consumes them."""
     if request.method in MUTATING_METHODS and request.url.path.startswith("/api/"):
-        tradingview_delivery = (
+        is_webhook_delivery = (
             request.method == "POST"
-            and request.url.path.startswith(TRADINGVIEW_WEBHOOK_PREFIX)
+            and (
+                _is_tradingview_webhook_path(request.url.path)
+                or _is_telegram_webhook_path(request.url.path)
+                or _is_discord_webhook_path(request.url.path)
+            )
+        )
+        tradingview_delivery = request.method == "POST" and _is_tradingview_webhook_path(
+            request.url.path
         )
         if tradingview_delivery:
             try:
@@ -194,7 +241,7 @@ async def bind_confirmation_to_raw_body(
                     content={"detail": "webhook rate limit exceeded"},
                 )
         if (
-            not tradingview_delivery
+            not is_webhook_delivery
             and get_settings().deployment_mode != "hosted-multi-user"
             and not _api_key_is_valid(request.headers.get("X-API-Key"))
         ):
@@ -202,7 +249,7 @@ async def bind_confirmation_to_raw_body(
                 status_code=401,
                 content={"detail": "valid API key required"},
             )
-        if not tradingview_delivery:
+        if not is_webhook_delivery:
             api_key = (
                 request.headers.get("Authorization", "")
                 if get_settings().deployment_mode == "hosted-multi-user"
@@ -221,7 +268,7 @@ async def bind_confirmation_to_raw_body(
                 )
         maximum = (
             get_settings().tradingview_webhook_max_request_bytes
-            if tradingview_delivery
+            if is_webhook_delivery
             else get_settings().api_max_request_bytes
         )
         raw_length = request.headers.get("content-length")
@@ -265,7 +312,11 @@ async def authenticate_hosted_principal(request: Request, call_next):
         or not request.url.path.startswith("/api/")
     ):
         return await call_next(request)
-    if request.url.path.startswith(TRADINGVIEW_WEBHOOK_PREFIX):
+    if (
+        _is_tradingview_webhook_path(request.url.path)
+        or _is_telegram_webhook_path(request.url.path)
+        or _is_discord_webhook_path(request.url.path)
+    ):
         return JSONResponse(status_code=404, content={"detail": "not found"})
     workspace_text = request.headers.get("X-Workspace-ID", "")
     account_text = request.headers.get("X-Account-ID", "")
@@ -674,6 +725,79 @@ def health(policy: RuntimePolicyDependency) -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/market-data", response_model=MarketDataRead)
+def market_data(
+    policy: RuntimePolicyDependency,
+    _api_key: ApiKeyDependency,
+    provider: str = Query(default="oanda", description="market data provider"),
+    instrument: str = Query(default="XAU_USD", description="provider symbol"),
+    timeframe: str = Query(default="H4", description="market timeframe"),
+    count: int = Query(default=100, ge=1, le=5000),
+) -> MarketDataRead:
+    authorize_api_call(
+        policy,
+        name="get_market_data",
+        arguments={
+            "provider": provider,
+            "instrument": instrument,
+            "timeframe": timeframe,
+            "count": count,
+        },
+    )
+    async def fetch_data() -> MarketDataRead:
+        connector = None
+        try:
+            settings = get_settings()
+            connector = create_market_data_connector(settings, provider)
+            quote = await connector.latest_quote(instrument)
+            candles = await connector.candles(instrument, timeframe, count=count)
+        except BrokerConfigurationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except (OandaConnectorError, KrakenConnectorError, AlpacaConnectorError) as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:  # pragma: no cover - provider-specific implementation detail
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        finally:
+            if connector is not None:
+                await connector.aclose()
+        return MarketDataRead(
+            provider=connector.name,
+            instrument=instrument,
+            timeframe=timeframe,
+            quote=MarketQuoteRead(
+                instrument=quote.instrument,
+                bid=quote.bid,
+                ask=quote.ask,
+                spread=quote.spread,
+                market_time=quote.market_time,
+                retrieved_at=quote.retrieved_at,
+                source=quote.source,
+                venue=quote.venue,
+            ),
+            candles=[
+                MarketCandleRead(
+                    instrument=item.instrument,
+                    timeframe=item.timeframe,
+                    started_at=item.started_at,
+                    open=item.open,
+                    high=item.high,
+                    low=item.low,
+                    close=item.close,
+                    volume=item.volume,
+                    complete=item.complete,
+                    retrieved_at=item.retrieved_at,
+                    source=item.source,
+                    venue=item.venue,
+                )
+                for item in candles
+            ],
+        )
+
+    return asyncio.run(fetch_data())
+
+
 @app.post(
     TRADINGVIEW_WEBHOOK_PATH,
     response_model=TradingViewWebhookReceipt,
@@ -785,6 +909,156 @@ def list_tradingview_alerts(
         scope=scope,
         symbol=symbol,
         timeframe=timeframe,
+        limit=limit,
+    )
+
+
+@app.post(
+    TELEGRAM_WEBHOOK_PATH,
+    response_model=ChatWebhookReceipt,
+    status_code=202,
+)
+def receive_telegram_webhook(
+    account_id: uuid.UUID,
+    payload: TelegramWebhookCreate,
+    db: DatabaseSession,
+    policy: RuntimePolicyDependency,
+) -> ChatWebhookReceipt:
+    settings = get_settings()
+    workspace = resolve_workspace(db, settings.trading_workspace)
+    account = (
+        resolve_account(db, workspace.id, account_id)
+        if workspace is not None
+        else None
+    )
+    if workspace is None or account is None:
+        raise HTTPException(status_code=401, detail="invalid webhook authorization")
+    if not chat_webhook_secret_is_valid(
+        account,
+        platform="telegram",
+        candidate=payload.webhook_secret.get_secret_value(),
+    ):
+        raise HTTPException(status_code=401, detail="invalid webhook authorization")
+    scope = RequestScope(workspace_id=workspace.id, account_id=account.id)
+    authorize_api_call(
+        policy,
+        name="ingest_chat_webhook_message",
+        arguments={"platform": "telegram"},
+        mutating=True,
+    )
+    with audit_api_mutation(
+        db,
+        scope=scope,
+        action="ingest_chat_webhook_message",
+        arguments={"platform": "telegram"},
+    ):
+        try:
+            message, created = ingest_chat_webhook_message(
+                db,
+                payload=payload.payload,
+                platform="telegram",
+                scope=scope,
+            )
+        except ChatWebhookValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ChatWebhookReplayError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return ChatWebhookReceipt(
+        accepted=True,
+        duplicate=not created,
+        platform="telegram",
+        message_id=message.id,
+        external_message_id=message.external_message_id,
+    )
+
+
+@app.post(
+    DISCORD_WEBHOOK_PATH,
+    response_model=ChatWebhookReceipt,
+    status_code=202,
+)
+def receive_discord_webhook(
+    account_id: uuid.UUID,
+    payload: DiscordWebhookCreate,
+    db: DatabaseSession,
+    policy: RuntimePolicyDependency,
+) -> ChatWebhookReceipt:
+    settings = get_settings()
+    workspace = resolve_workspace(db, settings.trading_workspace)
+    account = (
+        resolve_account(db, workspace.id, account_id)
+        if workspace is not None
+        else None
+    )
+    if workspace is None or account is None:
+        raise HTTPException(status_code=401, detail="invalid webhook authorization")
+    if not chat_webhook_secret_is_valid(
+        account,
+        platform="discord",
+        candidate=payload.webhook_secret.get_secret_value(),
+    ):
+        raise HTTPException(status_code=401, detail="invalid webhook authorization")
+    scope = RequestScope(workspace_id=workspace.id, account_id=account.id)
+    authorize_api_call(
+        policy,
+        name="ingest_chat_webhook_message",
+        arguments={"platform": "discord"},
+        mutating=True,
+    )
+    with audit_api_mutation(
+        db,
+        scope=scope,
+        action="ingest_chat_webhook_message",
+        arguments={"platform": "discord"},
+    ):
+        try:
+            message, created = ingest_chat_webhook_message(
+                db,
+                payload=payload.payload,
+                platform="discord",
+                scope=scope,
+            )
+        except ChatWebhookValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ChatWebhookReplayError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return ChatWebhookReceipt(
+        accepted=True,
+        duplicate=not created,
+        platform="discord",
+        message_id=message.id,
+        external_message_id=message.external_message_id,
+    )
+
+
+@app.get("/api/integrations/chat/messages", response_model=list[ChatWebhookMessageRead])
+def list_chat_webhook_messages(
+    db: DatabaseSession,
+    policy: RuntimePolicyDependency,
+    scope: ScopeDependency,
+    _api_key: ApiKeyDependency,
+    platform: str | None = None,
+    limit: int = 20,
+) -> list:
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
+    if platform is not None and platform.lower() not in {"telegram", "discord"}:
+        raise HTTPException(
+            status_code=422,
+            detail="platform must be 'telegram' or 'discord'",
+        )
+    authorize_api_call(
+        policy,
+        name="get_recent_chat_webhooks",
+        arguments={
+            "platform": platform,
+            "limit": limit,
+        },
+    )
+    return recent_chat_webhooks(
+        db,
+        scope=scope,
+        platform=platform,
         limit=limit,
     )
 

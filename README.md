@@ -31,7 +31,8 @@ execution. It does not autonomously place trades.
   exclusions, expectancy, and feature-correlation reports.
 - Deterministic candle measurements bridging visual review to numeric imbalance, equal-level,
   sweep-candidate, displacement, ATR, range, and change features.
-- Trading Economics calendar/news metadata with source and retrieval timestamps.
+- Free Forex Factory calendar events or Trading Economics calendar/news metadata, with
+  source and retrieval timestamps.
 - Startup calendar refresh and trade-intent event warnings when the news adapter is selected.
 - Tiered research: local harness and journal first, read-only documented-domain fetch
   second, and optional broader Brave Search only when earlier sources are insufficient.
@@ -385,6 +386,9 @@ trading-agent knowledge restore ITEM_UUID --strategy wyckoff-pure
 trading-agent experiment start --help
 trading-agent experiment report EXPERIMENT_ID
 trading-agent news sync --help
+trading-agent news upcoming --hours 24 --currencies USD --minimum-importance 2 --details
+trading-agent news history "Core PCE" --currency USD --limit 6
+trading-agent news watch --currencies USD --alert-minutes 60 --yes
 trading-agent edge report --minimum-sample 30
 trading-agent develop --help
 ```
@@ -608,8 +612,8 @@ non-public/private-network destinations, and revalidates redirects. Configure th
 
 ```text
 WEB_FETCH_ENABLED=true
-WEB_FETCH_ALLOWED_DOMAINS=oanda.com,tradingview.com,cmegroup.com,federalreserve.gov,fred.stlouisfed.org,bls.gov,bea.gov,tradingeconomics.com
-WEB_FETCH_ALLOWED_PATHS=oanda.com=/,/us-en/,/rest-live-v20/;federalreserve.gov=/,/newsevents/,/monetarypolicy/
+WEB_FETCH_ALLOWED_DOMAINS=oanda.com,tradingview.com,cmegroup.com,federalreserve.gov,fred.stlouisfed.org,bls.gov,bea.gov,dol.gov,census.gov,tradingeconomics.com
+WEB_FETCH_ALLOWED_PATHS=oanda.com=/,/us-en/,/rest-live-v20/;federalreserve.gov=/,/newsevents/,/monetarypolicy/;bea.gov=/,/news/,/data/,/help/,/resources/;dol.gov=/,/newsroom/releases/;census.gov=/,/manufacturing/
 ```
 
 Each tier-2 request, including every redirect, displays the exact GET URL for confirmation.

@@ -70,8 +70,9 @@ text.
 
 ## 2. News and calendar evidence
 
-Trading Economics imports scheduled events and headline metadata with provider, source time,
-and retrieval time:
+Set `NEWS_PROVIDER=forex-factory` for the free public weekly calendar feed, or select
+`trading-economics` and configure its API key for calendar plus headline metadata. Both
+preserve provider and retrieval timestamps:
 
 ```bash
 trade news sync \
@@ -81,9 +82,38 @@ trade news sync \
   --minimum-importance 2
 ```
 
+View a concise stored-event window without another provider request:
+
+```bash
+trade news upcoming --hours 24 --currencies USD,EUR --minimum-importance 2 --details
+trade news history "Core PCE" --currency USD --limit 6
+trade news watch --currencies USD,EUR --alert-minutes 60 --yes
+```
+
+Forex Factory provides calendar events, not a headline API. Its public export covers the
+current week, so scheduled refreshes update that window and PostgreSQL remains the cache when
+the source is temporarily unavailable. `news watch` runs until Ctrl-C, refreshes at a bounded
+interval, and prints each newly due event once per running watcher.
+
+`--details` shows stored actual/forecast/previous values plus a reviewed event definition,
+common market-sensitivity channels, interpretation cautions, and an original
+statistical-agency reference. The Forex Factory weekly export normally supplies forecast and
+previous values but may leave actual unavailable; the CLI labels it `Pending` rather than
+inventing a result. Unknown events remain explicitly unclassified instead of receiving a
+generated definition.
+
+Inside `trade chat`, traders can ask naturally: “Show me today’s economic news,” “Show only
+high-impact events for the United States and Euro Area,” or “Show me the previous six Core PCE
+releases.” Current-calendar requests default to every available country and impact level when
+the trader does not narrow the request. Historical rows are retrieved only on explicit request.
+Because the free feed covers the current week, its local release history grows as syncs are
+retained and is not a complete historical archive.
+
 The database retains metadata rather than copying full articles. The pre-trade workflow uses
-the stored calendar to warn about nearby events. News is evidence for conditional scenarios,
-not proof of manipulation or a direction.
+the stored calendar to show a compact nearby-event reminder when the trader expresses explicit
+near-term entry intent and the instrument maps to a relevant currency. The reminder does not
+interrupt the conversation or decide whether to trade. News is evidence for conditional
+scenarios, not proof of manipulation or a direction.
 
 ## 3. TradingView chart alerts
 

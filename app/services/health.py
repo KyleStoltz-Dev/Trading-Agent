@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.config import LEGACY_ENV_BACKEND, Settings, secret_value
 from app.connectors.factory import (
     BrokerConfigurationError,
+    news_provider_configured,
     validate_broker_account_selection,
 )
 from app.db import inspect_schema
@@ -243,6 +244,14 @@ def check_health(
                 "OANDA is selected but its read-only token and account id are not configured",
             )
         )
+    elif settings.broker_provider in {"ibkr", "alpaca", "twelve-data", "ctrader"}:
+        checks.append(
+            HealthCheck(
+                "broker",
+                "warning",
+                f"{settings.broker_provider} is on the roadmap and not implemented yet",
+            )
+        )
     elif all(metatrader_values):
         bridge_url = urlsplit(settings.metatrader_bridge_url)
         bridge_is_remote_http = (
@@ -279,12 +288,16 @@ def check_health(
                 "news connector intentionally disabled",
             )
         )
-    elif settings.trading_economics_api_key:
+    elif news_provider_configured(settings):
         checks.append(
             HealthCheck(
                 "news",
                 "ok",
-                "Trading Economics read-only connector is configured",
+                (
+                    "Forex Factory read-only calendar is configured"
+                    if settings.news_provider == "forex-factory"
+                    else "Trading Economics read-only connector is configured"
+                ),
             )
         )
     else:

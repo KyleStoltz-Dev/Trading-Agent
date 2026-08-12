@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.connectors import create_news_connector
+from app.connectors import create_news_connector, news_provider_configured
 from app.models import (
     AccountConstraintProfile,
     EconomicEvent,
@@ -1032,7 +1032,7 @@ async def refresh_startup_calendar(
     today: date | None = None,
     force: bool = False,
 ) -> int:
-    if not settings.trading_economics_api_key:
+    if not news_provider_configured(settings):
         return 0
     now = datetime.now(UTC)
     minimum_refresh = timedelta(
@@ -1045,7 +1045,7 @@ async def refresh_startup_calendar(
     )
     latest_retrieval = db.scalar(
         select(func.max(EconomicEvent.retrieved_at)).where(
-            EconomicEvent.source == "trading-economics",
+            EconomicEvent.source == settings.news_provider,
             EconomicEvent.scheduled_at >= coverage_start,
             EconomicEvent.scheduled_at < coverage_end,
         )

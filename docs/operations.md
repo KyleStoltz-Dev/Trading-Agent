@@ -33,6 +33,13 @@ Or, after installation:
 trade setup
 ```
 
+For a faster non-interactive path, use:
+
+```bash
+trade quickstart
+trade quickstart --provider openai --broker oanda --news none
+```
+
 Detailed diagnostics and the compatibility command remain available:
 
 ```bash
@@ -421,15 +428,22 @@ stored specification is versioned, so an old plan keeps the assumptions used at 
 
 ## News and calendar
 
-Set `TRADING_ECONOMICS_API_KEY`, then:
+For the free calendar, set `NEWS_PROVIDER=forex-factory`; no API key is required. For
+Trading Economics, set `NEWS_PROVIDER=trading-economics` and
+`TRADING_ECONOMICS_API_KEY`. Then:
 
 ```bash
 trading-agent news sync --help
+trading-agent news upcoming --hours 24 --currencies USD --details
+trading-agent news history "Core PCE" --currency USD --limit 6
+trading-agent news watch --currencies USD --alert-minutes 60 --yes
 ```
 
 Only provider metadata and summaries are retained: external ID, original timestamps,
 retrieval timestamp, importance, country/category/symbol, values, and source URL. Provider
-entitlements and redistribution terms still apply.
+entitlements and redistribution terms still apply. Forex Factory supplies the current weekly
+economic calendar only; it does not supply headline metadata, and its export may not provide
+post-release actual values. A missing actual remains visibly pending.
 
 ## Tiered web research
 
