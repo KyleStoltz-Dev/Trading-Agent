@@ -25,6 +25,8 @@ Current integration status:
 - MetaTrader 4: the same bridge protocol is supported; a terminal-side EA/bridge is still
   required.
 - cTrader and Interactive Brokers: planned.
+- Alpaca and Twelve Data: planned as additional stock/FX/ETF market-data paths after
+  OANDA and before cTrader/IBKR rollout.
 - Trading Economics: ready for economic calendar/news metadata.
 - Finnhub: planned.
 

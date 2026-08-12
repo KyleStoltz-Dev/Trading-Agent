@@ -1,7 +1,9 @@
 from typing import TYPE_CHECKING
 
 from app.config import Settings, secret_value
+from app.connectors.alpaca import AlpacaReadOnlyConnector
 from app.connectors.forex_factory import ForexFactoryReadOnlyConnector
+from app.connectors.kraken import KrakenReadOnlyConnector
 from app.connectors.metatrader_bridge import MetaTraderReadOnlyBridgeConnector
 from app.connectors.oanda import OandaReadOnlyConnector
 from app.connectors.trading_economics import TradingEconomicsReadOnlyConnector
@@ -13,6 +15,10 @@ if TYPE_CHECKING:
 
 class BrokerConfigurationError(ValueError):
     pass
+
+
+
+_PLANNED_BROKER_PROVIDERS = frozenset({"ibkr", "alpaca", "twelve-data", "ctrader"})
 
 
 def create_oanda_connector(settings: Settings) -> OandaReadOnlyConnector:
@@ -102,6 +108,10 @@ def create_broker_connector(
                 )
             except ValueError as exc:
                 raise BrokerConfigurationError(str(exc)) from exc
+    if settings.broker_provider in _PLANNED_BROKER_PROVIDERS:
+        raise BrokerConfigurationError(
+            f"BROKER_PROVIDER={settings.broker_provider} is planned and not implemented yet"
+        )
     if settings.broker_provider == "oanda":
         return create_oanda_connector(settings)
     if settings.broker_provider == "metatrader":
@@ -180,3 +190,43 @@ def create_news_connector(
             "TRADING_ECONOMICS_API_KEY is required for news and calendar reads"
         )
     return TradingEconomicsReadOnlyConnector(api_key)
+
+
+def create_market_data_connector(
+    settings: Settings,
+    provider: str,
+) -> OandaReadOnlyConnector | KrakenReadOnlyConnector | AlpacaReadOnlyConnector:
+    normalized = provider.strip().lower()
+    if normalized in {"oanda", "oanda-v20", "oanda-v2"}:
+        if not settings.oanda_api_token or not settings.oanda_account_id:
+            raise BrokerConfigurationError(
+                "OANDA_API_TOKEN and OANDA_ACCOUNT_ID are required for OANDA market data"
+            )
+        return OandaReadOnlyConnector(
+            token=secret_value(settings.oanda_api_token),
+            account_id=secret_value(settings.oanda_account_id),
+            environment=settings.oanda_environment,
+            timeout_seconds=settings.oanda_request_timeout_seconds,
+        )
+    if normalized == "kraken":
+        return KrakenReadOnlyConnector(
+            base_url=settings.kraken_base_url,
+            timeout_seconds=settings.kraken_request_timeout_seconds,
+        )
+    if normalized == "alpaca":
+        key_id = secret_value(settings.alpaca_api_key_id)
+        secret_key = secret_value(settings.alpaca_api_secret_key)
+        if not key_id or not secret_key:
+            raise BrokerConfigurationError(
+                "ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY are required for Alpaca "
+                "market data"
+            )
+        return AlpacaReadOnlyConnector(
+            key_id=key_id,
+            secret_key=secret_key,
+            base_url=settings.alpaca_data_base_url,
+            timeout_seconds=settings.alpaca_request_timeout_seconds,
+        )
+    raise BrokerConfigurationError(
+        f"market data provider is unknown or unsupported: {provider}"
+    )

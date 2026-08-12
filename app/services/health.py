@@ -244,6 +244,14 @@ def check_health(
                 "OANDA is selected but its read-only token and account id are not configured",
             )
         )
+    elif settings.broker_provider in {"ibkr", "alpaca", "twelve-data", "ctrader"}:
+        checks.append(
+            HealthCheck(
+                "broker",
+                "warning",
+                f"{settings.broker_provider} is on the roadmap and not implemented yet",
+            )
+        )
     elif all(metatrader_values):
         bridge_url = urlsplit(settings.metatrader_bridge_url)
         bridge_is_remote_http = (

@@ -33,6 +33,13 @@ Or, after installation:
 trade setup
 ```
 
+For a faster non-interactive path, use:
+
+```bash
+trade quickstart
+trade quickstart --provider openai --broker oanda --news none
+```
+
 Detailed diagnostics and the compatibility command remain available:
 
 ```bash

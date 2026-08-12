@@ -165,6 +165,36 @@ Completion means a trader can prepare, analyze, decide, manage, review, stop, an
 scoped session without understanding the underlying command inventory, while advanced and
 administrative capabilities remain deliberately accessible.
 
+### 1-4 integration follow-up (from current data-provider options)
+
+To expand beyond OANDA + MetaTrader while keeping read-only safety:
+
+1. Interactive Brokers adapter for spot FX, stocks, futures, and options market/account read paths.
+2. Alpaca-based equity/ETF/crypto adapter to cover non-OANDA markets alongside current broker workflows.
+3. Twelve Data adapter for unified quotes/candles/history fallback across classes.
+4. cTrader productionization path with documented OAuth and account contract handling.
+
+These are tracked as planned adapters in the integration catalog and should be staged behind
+the same verification, persistence, and account-selection rules used by existing read-only
+integrations.
+
+### 1-4 follow-up: surfaced technical debt to place on the roadmap
+
+After running the 1-4 work path and validation, these debt items surfaced and are
+currently not in a dedicated roadmap owner lane:
+
+- Broker synchronization correctness (historical transaction idempotency, lifecycle reconciliation,
+  and event/position deduping) has failing regression coverage and should be repaired before
+  exposing broader broker provider onboarding.
+- Missing-history and ambiguous-trade events in synchronization should preserve explicit trade
+  identity and trade-effect metadata without guessing lifecycle boundaries.
+- Account credential rotation/removal audit ordering is currently producing unordered audit events
+  under remove flow.
+- Preflight orchestration still writes mindset/session records during a transactional failure path;
+  failure rollback must be made truly atomic for all records tied to the failed decision.
+- Planned Finnhub connector appears in integration catalog but is not yet represented in a dedicated
+  roadmap owner lane.
+
 Resource and delegation constraints:
 
 - keep Trading Agent domain-specific; do not embed Hermes, OpenClaw, LangGraph, or another

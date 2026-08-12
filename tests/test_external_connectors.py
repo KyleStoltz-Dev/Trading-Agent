@@ -6,18 +6,22 @@ import httpx
 import pytest
 
 from app.config import Settings
-from app.connectors.factory import BrokerConfigurationError, create_broker_connector
+from app.connectors.alpaca import AlpacaReadOnlyConnector
+from app.connectors.factory import (
+    BrokerConfigurationError,
+    create_broker_connector,
+    create_market_data_connector,
+)
 from app.connectors.forex_factory import (
     ForexFactoryError,
     ForexFactoryReadOnlyConnector,
 )
+from app.connectors.kraken import KrakenReadOnlyConnector
 from app.connectors.oanda import (
     OandaConnectorError,
     OandaReadOnlyConnector,
 )
-from app.connectors.oanda import (
-    _retry_delay as oanda_retry_delay,
-)
+from app.connectors.oanda import _retry_delay as oanda_retry_delay
 from app.connectors.trading_economics import TradingEconomicsReadOnlyConnector
 from app.models import BrokerConnection, TradingAccount
 
@@ -212,6 +216,64 @@ def test_oanda_history_uses_bounded_transaction_id_pages() -> None:
 
 def test_oanda_invalid_retry_after_falls_back_without_crashing() -> None:
     assert oanda_retry_delay("not-a-delay", 1) == 0.5
+
+
+def test_planned_broker_provider_is_reported_as_not_implemented() -> None:
+    with pytest.raises(
+        BrokerConfigurationError,
+        match="BROKER_PROVIDER=ibkr is planned and not implemented yet",
+    ):
+        create_broker_connector(
+            Settings(
+                _env_file=None,
+                broker_provider="ibkr",
+                oanda_account_id="account-id",
+                oanda_api_token="secret",
+            )
+        )
+
+
+def test_market_data_factory_supports_oanda_kraken_and_alpaca() -> None:
+    oanda = create_market_data_connector(
+        Settings(
+            _env_file=None,
+            oanda_api_token="token",
+            oanda_account_id="account-id",
+        ),
+        provider="oanda",
+    )
+    assert isinstance(oanda, OandaReadOnlyConnector)
+    assert oanda.name == "oanda-v20"
+
+
+    kraken = create_market_data_connector(
+        Settings(_env_file=None),
+        provider="kraken",
+    )
+    assert isinstance(kraken, KrakenReadOnlyConnector)
+    assert kraken.name == "kraken"
+
+    alpaca = create_market_data_connector(
+        Settings(
+            _env_file=None,
+            alpaca_api_key_id="alpaca-key-id",
+            alpaca_api_secret_key="alpaca-secret",
+        ),
+        provider="alpaca",
+    )
+    assert isinstance(alpaca, AlpacaReadOnlyConnector)
+    assert alpaca.name == "alpaca"
+
+
+def test_market_data_factory_requires_alpaca_credentials() -> None:
+    with pytest.raises(
+        BrokerConfigurationError,
+        match="ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY are required",
+    ):
+        create_market_data_connector(
+            Settings(_env_file=None, alpaca_api_key_id=None, alpaca_api_secret_key=None),
+            provider="alpaca",
+        )
 
 
 def test_trading_economics_connector_preserves_provider_timestamps() -> None:

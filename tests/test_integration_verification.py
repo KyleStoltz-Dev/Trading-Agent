@@ -50,6 +50,12 @@ def test_qualification_does_not_confuse_implemented_with_live_verified(
     assert oanda.reachability == "not tested"
     assert oanda.evidence == "not observed"
 
+    for key in ("ibkr", "alpaca", "twelve-data", "ctrader"):
+        report = _report(reports, key)
+        assert report.implementation == "planned"
+        assert report.configuration == "not applicable"
+        assert report.reachability == "not applicable"
+        assert report.evidence == "not applicable"
     assert _report(reports, "ctrader").implementation == "planned"
     assert _report(reports, "ctrader").configuration == "not applicable"
     assert _report(reports, "trading-economics").evidence == "not observed"

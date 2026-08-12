@@ -137,7 +137,15 @@ class Settings(BaseSettings):
     tradingview_trusted_proxy_cidrs: str = "127.0.0.1/32,::1/128"
     evidence_directory: Path = Path(".data/evidence")
     maximum_trade_risk_percent: float = Field(default=1.0, gt=0, le=5)
-    broker_provider: Literal["none", "oanda", "metatrader"] = "none"
+    broker_provider: Literal[
+        "none",
+        "oanda",
+        "metatrader",
+        "ibkr",
+        "alpaca",
+        "twelve-data",
+        "ctrader",
+    ] = "none"
     oanda_api_token: SecretStr | None = None
     oanda_account_id: SecretStr | None = None
     oanda_environment: Literal["practice", "live"] = "practice"
@@ -156,6 +164,13 @@ class Settings(BaseSettings):
     )
     metatrader_allow_insecure_remote: bool = False
     market_quote_max_age_seconds: float = Field(default=5.0, gt=0, le=300)
+    # Market data providers (read-only)
+    alpaca_api_key_id: SecretStr | None = None
+    alpaca_api_secret_key: SecretStr | None = None
+    alpaca_data_base_url: str = "https://data.alpaca.markets/v2"
+    alpaca_request_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    kraken_base_url: str = "https://api.kraken.com"
+    kraken_request_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
     trading_economics_api_key: SecretStr | None = None
     news_provider: Literal["none", "trading-economics", "forex-factory"] = "none"
     news_request_timeout_seconds: float = Field(default=10.0, gt=0, le=30)

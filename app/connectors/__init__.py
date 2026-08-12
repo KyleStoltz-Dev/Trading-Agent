@@ -3,6 +3,7 @@
 from app.connectors.factory import (
     BrokerConfigurationError,
     create_broker_connector,
+    create_market_data_connector,
     create_metatrader_connector,
     create_news_connector,
     create_oanda_connector,
@@ -21,6 +22,7 @@ __all__ = [
     "OandaConnectorError",
     "OandaReadOnlyConnector",
     "create_broker_connector",
+    "create_market_data_connector",
     "create_metatrader_connector",
     "create_oanda_connector",
     "create_news_connector",

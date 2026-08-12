@@ -129,6 +129,7 @@ from app.services.catalog import (
     configure_instrument_specification,
 )
 from app.services.chart_analysis import SYSTEM_PROMPT, analyze_chart
+from app.services.chat_webhooks import set_chat_webhook_secret
 from app.services.conversations import (
     add_turn,
     conversation_history,
@@ -461,6 +462,30 @@ BROKER_CHOICES = (
         "MetaTrader 4 / 5",
         "Read-only live data and execution history through a terminal-side bridge.",
         ("mt4", "mt5", "meta trader", "metatrader 4", "metatrader 5"),
+    ),
+    GuidedChoice(
+        "ibkr",
+        "Interactive Brokers (planned)",
+        "Planned read-only broker and account data adapter; not implemented yet.",
+        ("ibkr", "interactive brokers", "interactive broker", "ib"),
+    ),
+    GuidedChoice(
+        "alpaca",
+        "Alpaca (planned)",
+        "Planned stocks/ETFs/crypto market-data coverage; account feed is not implemented.",
+        ("alpaca", "alpaca markets"),
+    ),
+    GuidedChoice(
+        "twelve-data",
+        "Twelve Data (planned)",
+        "Planned unified FX/equities/indices data feed; not implemented yet.",
+        ("twelve data", "twelve-data", "twelvedata"),
+    ),
+    GuidedChoice(
+        "ctrader",
+        "cTrader (planned)",
+        "Planned OAuth account and market-data adapter for CFD and chart workflows.",
+        ("cTrader", "ctrader", "c trader"),
     ),
 )
 METATRADER_PLATFORM_CHOICES = (
@@ -860,6 +885,24 @@ def _render_broker_setup_error(
             "Then start the bridge and run "
             "[cyan]trade broker configure-metatrader --label NAME[/cyan]."
         )
+    elif provider in {"ibkr", "alpaca", "twelve-data", "ctrader"}:
+        display_name = (
+            "Interactive Brokers"
+            if provider == "ibkr"
+            else "Alpaca"
+            if provider == "alpaca"
+            else "Twelve Data"
+            if provider == "twelve-data"
+            else "cTrader"
+        )
+        console.print(
+            f"{display_name} is marked as planned in the public roadmap and is not yet "
+            "runnable in this release."
+        )
+        console.print(
+            "It currently appears in planning views; choose a live data source now for "
+            "broker reads."
+        )
     elif provider == "oanda":
         console.print(
             "Set [cyan]BROKER_PROVIDER=oanda[/cyan], "
@@ -884,11 +927,14 @@ def _render_broker_request_error(
     *,
     operation: str,
 ) -> None:
-    provider_name = (
-        "MetaTrader bridge"
-        if settings.broker_provider == "metatrader"
-        else "OANDA"
-    )
+    provider_name = {
+        "metatrader": "MetaTrader bridge",
+        "oanda": "OANDA",
+        "ibkr": "Interactive Brokers",
+        "alpaca": "Alpaca",
+        "twelve-data": "Twelve Data",
+        "ctrader": "cTrader",
+    }.get(settings.broker_provider, settings.broker_provider.title())
     console.print()
     console.print(f"[bold red]{provider_name} {operation} failed[/bold red]")
     console.print(f"[red]{escape_markup(str(error))}[/red]")
@@ -943,6 +989,37 @@ def _render_starter_prompts() -> None:
     console.print("[bold]Try asking:[/bold]")
     for prompt in STARTER_PROMPTS:
         console.print(f"  [cyan]›[/cyan] {prompt}")
+
+
+def _prompt_startup_action() -> str | None:
+    if not sys.stdin.isatty():
+        return None
+
+    options = (
+        ("1", "Do a day-start check (news + open plans)."),
+        ("2", "Show account and broker readiness for the selected symbol."),
+        ("3", "Start a new trade plan with guided defaults."),
+    )
+    console.print()
+    console.print("[bold]Quick start[/bold]")
+    for key, label in options:
+        console.print(f"  [cyan]{key}[/cyan]  {label}")
+    console.print(
+        "  [cyan]Enter[/cyan]  Continue with an empty prompt and type naturally"
+    )
+    while True:
+        selection = console.input("[dim]Quick start choice (1-3 or Enter):[/dim] ").strip()
+        if not selection:
+            return None
+        if selection == "1":
+            return "Show me today's economic news and an operational day-start summary."
+        if selection == "2":
+            return (
+                "Show my live broker status and whether I'm ready to size a trade now."
+            )
+        if selection == "3":
+            return "Help me build a New York premarket plan for XAUUSD."
+        console.print("[yellow]Please enter 1, 2, 3, or press Enter to continue.[/yellow]")
 
 
 def _literal_terminal_text(value: str) -> str:
@@ -2598,6 +2675,11 @@ def _run_onboarding(db, settings: Settings) -> bool:
         console.print(
             "[yellow]MetaTrader still needs the read-only bridge URL, dedicated token, "
             "and account ID before live reads. Ask “help me finish MT5 setup” in chat.[/yellow]"
+        )
+    if broker in {"ibkr", "alpaca", "twelve-data", "ctrader"}:
+        console.print(
+            "[yellow]This broker is on the roadmap and not yet runnable in this release. "
+            "Use OANDA or MetaTrader for live broker reads today.[/yellow]"
         )
     if news == "trading-economics":
         console.print(
@@ -4557,18 +4639,27 @@ def _run_chat(
             )
         startup_memory = build_startup_memory(db, conversation, scope=scope)
         startup_memory_pending = False
+        startup_message = _prompt_startup_action()
+        queued_messages = [startup_message] if startup_message else []
         _render_startup_memory(startup_memory)
         _render_starter_prompts()
         console.print(
             "[dim]/help commands · /onboard update setup · /examples starter prompts "
             "· /cost model pricing "
-            "· /memory saved recall · /learn curriculum · /model local model "
-            "· /details response audit "
+            "· /memory saved recall · /learn curriculum · /model · /model use NAME · "
+            "for local overrides"
+            " · /details response audit "
             "· /exit leave[/dim]\n"
         )
         while True:
             try:
-                message = console.input("[bold cyan]You[/bold cyan] [bold]❯[/bold] ").strip()
+                if queued_messages:
+                    message = queued_messages.pop(0)
+                    console.print(
+                        f"[dim]You (quick start)· {message}[/dim]"
+                    )
+                else:
+                    message = console.input("[bold cyan]You[/bold cyan] [bold]❯[/bold] ").strip()
             except (EOFError, KeyboardInterrupt):
                 console.print()
                 break
@@ -5854,6 +5945,135 @@ def setup_agent(
     )
 
 
+@app.command("quickstart")
+def quickstart_setup(
+    provider: Annotated[
+        str,
+        typer.Option(help="Model provider name: Ollama, OpenAI, or Anthropic."),
+    ] = "ollama",
+    model: Annotated[
+        str,
+        typer.Option(help="Local Ollama model tag to configure."),
+    ] = "qwen3.5:9b",
+    database: Annotated[
+        str,
+        typer.Option(help="Database mode: local, neon, or custom."),
+    ] = "local",
+    broker: Annotated[
+        str,
+        typer.Option(help="Broker name: none, oanda, or metatrader."),
+    ] = "none",
+    news: Annotated[
+        str,
+        typer.Option(help="News provider: none, forex-factory, or trading-economics."),
+    ] = "none",
+    tradingview: Annotated[
+        str,
+        typer.Option(help="TradingView alerts: enabled or disabled."),
+    ] = "disabled",
+    metatrader_platform: Annotated[
+        str | None,
+        typer.Option(help="MetaTrader terminal generation: MT4 or MT5 (metatrader only)."),
+    ] = None,
+) -> None:
+    """Apply a common setup profile without interactive prompts."""
+    try:
+        selected_provider = _resolve_cli_choice(
+            provider,
+            MODEL_PROVIDER_CHOICES,
+            option_name="model provider",
+        )
+        selected_database = _resolve_cli_choice(
+            database,
+            DATABASE_CHOICES,
+            option_name="database",
+        )
+        selected_broker = _resolve_cli_choice(
+            broker,
+            BROKER_CHOICES,
+            option_name="broker",
+        )
+        selected_news = _resolve_cli_choice(
+            news,
+            NEWS_CHOICES,
+            option_name="news provider",
+        )
+        selected_tradingview = _resolve_cli_choice(
+            tradingview,
+            TRADINGVIEW_CHOICES,
+            option_name="TradingView alerts",
+        )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
+
+    selected_metatrader_platform: str | None = None
+    if selected_broker == "metatrader":
+        try:
+            selected_metatrader_platform = _resolve_cli_choice(
+                metatrader_platform,
+                METATRADER_PLATFORM_CHOICES,
+                option_name="MetaTrader platform",
+            )
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(2) from exc
+
+    resolved_config = default_config_path().expanduser().resolve()
+    values = provider_settings(selected_provider, model)
+    values.update(
+        {
+            "DATABASE_MODE": selected_database,
+            "BROKER_PROVIDER": selected_broker,
+            "NEWS_PROVIDER": selected_news,
+            "TRADINGVIEW_WEBHOOK_ENABLED": str(selected_tradingview == "enabled").lower(),
+        }
+    )
+    if selected_metatrader_platform is not None:
+        values["METATRADER_PLATFORM"] = selected_metatrader_platform
+    update_env_file(resolved_config, values)
+    get_settings.cache_clear()
+
+    table = Table(title="Quickstart profile")
+    table.add_column("Setting")
+    table.add_column("Value")
+    table.add_row(
+        "Model provider",
+        next(choice.label for choice in MODEL_PROVIDER_CHOICES if choice.key == selected_provider),
+    )
+    table.add_row("Local model", model if selected_provider == "ollama" else "Not applicable")
+    table.add_row(
+        "Database",
+        next(choice.label for choice in DATABASE_CHOICES if choice.key == selected_database),
+    )
+    table.add_row(
+        "Broker",
+        next(choice.label for choice in BROKER_CHOICES if choice.key == selected_broker),
+    )
+    table.add_row(
+        "News/calendar",
+        next(choice.label for choice in NEWS_CHOICES if choice.key == selected_news),
+    )
+    table.add_row(
+        "TradingView alerts",
+        next(
+            choice.label
+            for choice in TRADINGVIEW_CHOICES
+            if choice.key == selected_tradingview
+        ),
+    )
+    if selected_metatrader_platform is not None:
+        table.add_row("MetaTrader terminal", selected_metatrader_platform)
+    table.add_row("Config file", str(resolved_config))
+    console.print(table)
+    console.print(f"[green]Quickstart profile written to {resolved_config}.[/green]")
+    if selected_provider == "ollama":
+        console.print(
+            "[dim]Run `trade models pull qwen3.5:9b` first if the model is not installed, "
+            "then `trade`.[/dim]"
+        )
+
+
 @develop_app.command("start")
 def develop_start(
     request: Annotated[str, typer.Argument(help="The software change to make.")],
@@ -6487,6 +6707,122 @@ def account_tradingview_secret(
                 title="TradingView account authentication",
             )
         )
+@account_app.command("telegram-secret")
+def account_telegram_secret(
+    account_reference: Annotated[
+        str | None,
+        typer.Option(
+            "--account",
+            help="Account label, broker account ID, or internal UUID; current by default.",
+        ),
+    ] = None,
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+) -> None:
+    """Create or rotate the one-time secret used in Telegram webhook payloads."""
+    upgrade_database()
+    with SessionLocal() as db:
+        workspace = _configured_workspace(db)
+        current = _current_scope(db)
+        account = resolve_account(
+            db,
+            workspace.id,
+            account_reference or current.account_id,
+            active_only=True,
+        )
+        if account is None:
+            console.print("[red]Account was not found in the configured workspace.[/red]")
+            raise typer.Exit(1)
+        _authorize_direct(
+            "configure_telegram_secret",
+            {
+                "workspace": workspace.slug,
+                "account": account.label,
+                "operation": "rotate account telegram webhook secret",
+            },
+            mutating=True,
+            assume_yes=yes,
+        )
+        secret = set_chat_webhook_secret(db=db, account=account, platform="telegram")
+        console.print(
+            Panel(
+                Text.assemble(
+                    ("Telegram webhook configured for ", "bold"),
+                    account.label,
+                    "\n\n",
+                    ("Webhook path\n", "bold"),
+                    f"/api/webhooks/telegram/{account.id}",
+                    "\n\n",
+                    ("Add this field to the message payload\n", "bold"),
+                    f'"webhook_secret": "{secret}"',
+                    "\n\n",
+                    (
+                        "This secret is shown once. PostgreSQL stores only its SHA-256 "
+                        "digest. Rotating it immediately invalidates the previous value.",
+                        "dim",
+                    ),
+                ),
+                title="Telegram account authentication",
+            )
+        )
+
+
+@account_app.command("discord-secret")
+def account_discord_secret(
+    account_reference: Annotated[
+        str | None,
+        typer.Option(
+            "--account",
+            help="Account label, broker account ID, or internal UUID; current by default.",
+        ),
+    ] = None,
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+) -> None:
+    """Create or rotate the one-time secret used in Discord webhook payloads."""
+    upgrade_database()
+    with SessionLocal() as db:
+        workspace = _configured_workspace(db)
+        current = _current_scope(db)
+        account = resolve_account(
+            db,
+            workspace.id,
+            account_reference or current.account_id,
+            active_only=True,
+        )
+        if account is None:
+            console.print("[red]Account was not found in the configured workspace.[/red]")
+            raise typer.Exit(1)
+        _authorize_direct(
+            "configure_discord_secret",
+            {
+                "workspace": workspace.slug,
+                "account": account.label,
+                "operation": "rotate account discord webhook secret",
+            },
+            mutating=True,
+            assume_yes=yes,
+        )
+        secret = set_chat_webhook_secret(db=db, account=account, platform="discord")
+        console.print(
+            Panel(
+                Text.assemble(
+                    ("Discord webhook configured for ", "bold"),
+                    account.label,
+                    "\n\n",
+                    ("Webhook path\n", "bold"),
+                    f"/api/webhooks/discord/{account.id}",
+                    "\n\n",
+                    ("Add this field to the message payload\n", "bold"),
+                    f'"webhook_secret": "{secret}"',
+                    "\n\n",
+                    (
+                        "This secret is shown once. PostgreSQL stores only its SHA-256 "
+                        "digest. Rotating it immediately invalidates the previous value.",
+                        "dim",
+                    ),
+                ),
+                title="Discord account authentication",
+            )
+        )
 
 
 @sessions_app.command("list")
@@ -7002,6 +7338,10 @@ def _configured_broker_connection(db, settings: Settings) -> BrokerConnection:
                 "run `trade broker configure-metatrader` for the configured account"
             )
         return matches[0]
+    if settings.broker_provider in {"ibkr", "alpaca", "twelve-data", "ctrader"}:
+        raise LookupError(
+            "this broker provider is planned but not yet configured for live reads"
+        )
     raise LookupError("select and configure a broker before synchronizing")
 
 

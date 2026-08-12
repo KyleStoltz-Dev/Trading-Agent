@@ -842,7 +842,6 @@ TOOLS = [
                 },
                 "selected_topics": {
                     "type": "array",
-                    "uniqueItems": True,
                     "items": {
                         "type": "string",
                         "enum": [
@@ -1151,6 +1150,18 @@ TOOLS = [
     },
 ]
 
+
+def _sanitize_tool_schema(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_tool_schema(inner)
+            for key, inner in value.items()
+            if key != "uniqueItems"
+        }
+    if isinstance(value, list):
+        return [_sanitize_tool_schema(item) for item in value]
+    return value
+
 TOOL_METADATA = {
     "calculate_position_size": {"mutating": False, "deterministic": True},
     "calculate_broker_position_size": {"mutating": False, "deterministic": True},
@@ -1309,6 +1320,7 @@ class TradingAgent:
         self.provider = provider or create_model_provider(settings)
         self.policy = policy or PolicyEngine.load()
         self.policy.validate_tool_surface(TOOLS, TOOL_METADATA)
+        self._tools = _sanitize_tool_schema(TOOLS)
         self.hooks = ExecutionHooks(self.policy, confirm_mutation)
         self.last_route: ModelRoute | None = None
         self.last_harness_context = HarnessContext(())
@@ -1337,11 +1349,22 @@ class TradingAgent:
         )
         if account is None:
             raise LookupError("selected trading account no longer exists")
-        provider = (
-            "oanda-v20"
-            if self.settings.broker_provider == "oanda"
-            else f"metatrader-{self.settings.metatrader_platform}-bridge"
-        )
+        if self.settings.broker_provider == "oanda":
+            provider = "oanda-v20"
+        elif self.settings.broker_provider == "metatrader":
+            provider = f"metatrader-{self.settings.metatrader_platform}-bridge"
+        elif self.settings.broker_provider in {
+            "ibkr",
+            "alpaca",
+            "twelve-data",
+            "ctrader",
+        }:
+            raise BrokerConfigurationError(
+                f"BROKER_PROVIDER={self.settings.broker_provider} is planned and "
+                "not available for live reads yet"
+            )
+        else:
+            raise BrokerConfigurationError("no broker provider is configured")
         connection = self.db.scalar(
             select(BrokerConnection).where(
                 BrokerConnection.workspace_id == scope.workspace_id,
@@ -1491,7 +1514,7 @@ class TradingAgent:
             instructions=request.instructions,
             message=request.message,
             history=request.history,
-            tools=TOOLS,
+            tools=self._tools,
             execute_tool=execute_tool,
             max_tool_rounds=self.policy.policy.tool_policy.max_tool_rounds,
             model=request.route.model,

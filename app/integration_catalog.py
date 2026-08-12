@@ -56,6 +56,33 @@ INTEGRATIONS = (
         documentation="https://www.interactivebrokers.com/campus/ibkr-api-page/webapi-doc/",
     ),
     IntegrationOption(
+        kind="broker",
+        key="alpaca",
+        name="Alpaca",
+        status="planned",
+        capability=(
+            "stocks, ETFs, and crypto market data with optional account/equity read-only "
+            "feeds for retail and prop-like workflows"
+        ),
+        setup=(
+            "Future API keys via ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY; "
+            "market-data-only mode by default"
+        ),
+        documentation="https://alpaca.markets/docs/",
+    ),
+    IntegrationOption(
+        kind="broker",
+        key="twelve-data",
+        name="Twelve Data",
+        status="planned",
+        capability="unified market data for FX, equities, commodities, and indices",
+        setup=(
+            "Future API key from Twelve Data or a matching market-data environment key "
+            "for the chosen plan"
+        ),
+        documentation="https://twelvedata.com/",
+    ),
+    IntegrationOption(
         kind="news",
         key="forex-factory",
         name="Forex Factory",
