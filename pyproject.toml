@@ -39,11 +39,11 @@ openai = [
   "openai>=1.99,<3",
 ]
 anthropic = [
-  "anthropic>=0.75,<1",
+  "anthropic>=0.75,<2",
 ]
 ai = [
   "openai>=1.99,<3",
-  "anthropic>=0.75,<1",
+  "anthropic>=0.75,<2",
 ]
 metatrader = [
   "MetaTrader5>=5.0; sys_platform == 'win32'",
