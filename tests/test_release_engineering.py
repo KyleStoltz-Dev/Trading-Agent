@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import tarfile
 import zipfile
 from io import BytesIO
@@ -29,6 +30,15 @@ from scripts.verify_release_artifacts import (
     verify_wheel,
     write_release_metadata,
 )
+
+
+def _bootstrap_uv_version() -> str:
+    requirements = (Path(__file__).resolve().parents[1] / "requirements-bootstrap.txt").read_text(
+        encoding="utf-8"
+    )
+    match = re.search(r"^uv==([0-9]+\.[0-9]+\.[0-9]+)", requirements, flags=re.MULTILINE)
+    assert match is not None, "could not parse uv pin from requirements-bootstrap.txt"
+    return match.group(1)
 
 
 def test_release_member_validation_rejects_private_and_unsafe_paths() -> None:
@@ -89,7 +99,8 @@ def test_wheel_and_sdist_require_runtime_release_content(tmp_path) -> None:
         "install-trading-agent.ps1": b"",
         "install-trading-agent.sh": b"",
         "pyproject.toml": b"",
-        "requirements-bootstrap.txt": b"uv==0.11.32 --hash=sha256:" + b"a" * 64,
+        "requirements-bootstrap.txt": f"uv=={_bootstrap_uv_version()} --hash=sha256:".encode()
+        + b"a" * 64,
         "uv.lock": b"",
     }
     with tarfile.open(sdist, "w:gz") as archive:

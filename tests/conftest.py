@@ -17,7 +17,12 @@ def db_session():
     except OperationalError:
         pytest.skip("PostgreSQL is unavailable")
     transaction = connection.begin()
-    session = Session(bind=connection, expire_on_commit=False)
+    session = Session(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+
     try:
         yield session
     finally:

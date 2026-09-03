@@ -46,7 +46,7 @@ def test_secure_devcontainer_uses_locked_codex_cli_and_python_dependencies() -> 
     assert "curl -fsSL" not in dockerfile
     assert "rm -f /usr/bin/sudo" in dockerfile
     assert "--group release" in dockerfile
-    assert "editables==0.5" in pyproject["dependency-groups"]["release"]
+    assert "editables==0.6" in pyproject["dependency-groups"]["release"]
     assert 'ENTRYPOINT ["/usr/local/bin/trading-agent-container-entrypoint"]' in dockerfile
     assert "uv sync --locked --offline" in post_create
     assert "--no-install-project" in post_create
