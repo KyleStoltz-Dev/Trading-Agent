@@ -28,7 +28,7 @@ from app.connectors import (
 )
 from app.costs import output_budget_for_mode
 from app.harness_context import HarnessContext, select_harness_context
-from app.models import BrokerConnection, TradingAccount
+from app.models import BrokerConnection, ConnectorCursor, TradingAccount
 from app.policy import (
     ExecutionHooks,
     PolicyEngine,
@@ -53,6 +53,8 @@ from app.services.account_constraints import (
     unverified_account_rules,
 )
 from app.services.analytics import build_edge_report
+from app.services.broker_review import broker_trade_review
+from app.services.broker_sync import synchronize_broker
 from app.services.catalog import active_instrument_specification
 from app.services.chart_analysis import SYSTEM_PROMPT, analyze_chart
 from app.services.event_glossary import event_insight
@@ -145,6 +147,15 @@ items; keep any explanation with its question. Do not combine several required i
 dense paragraph. Do not repeat the complete capability list unless explicitly asked.
 Never expose internal tool names, function names, policy keys, schema field names, confirmation
 hook names, or implementation sequences. Translate constraints into plain trading language.
+Treat the conversation as one resumable trading workflow, not a collection of commands. Infer
+the trader's goal from ordinary language, retrieve facts already available through read-only
+tools, and continue from prior context. Do not ask the trader to repeat a broker value, market
+fact, strategy rule, journal record, or profile field that an available tool can retrieve. Ask
+at most one concise follow-up at a time, and only when a human judgment or genuinely unavailable
+fact blocks the next useful step. Never launch a long questionnaire from a natural-language
+request. For broker trade reviews, use the broker-history review tool rather than journal plans;
+state the account currency and call quantity "broker-reported units" unless a verified instrument
+specification proves that it is lots.
 When something is unavailable, use one short sentence for the limitation and one short sentence
 for the trader's next action. If several items need substantial explanation, give each item its
 own short labeled section instead of placing prose side by side. When the trader answers a menu
@@ -167,6 +178,13 @@ the configured provider capability. "Today's news" means every available country
 level unless the trader specifies filters; state the applied window and filters briefly. Keep the
 default view concise. Retrieve past observations for a named event only when the trader explicitly
 asks for prior releases, previous data, or history. Never append historical rows proactively.
+
+For a broker trade-history request, begin with "Trading Agent: Recent trades". State the number
+of closed trades, known winners and losers, and net PnL with the account currency. Show each trade
+on one compact line as holding time, side, broker-reported quantity, and net PnL. Then show the
+holding-time buckets and no more than three patterns worth testing. Do not call a correlation an
+edge, omit unknown PnL rather than converting it to zero, and state when the imported ledger may
+not contain the requested period.
 
 Strategy isolation is mandatory. When an active strategy version is supplied, use only that
 definition and knowledge indexed to that exact version. Never import concepts from another
@@ -710,6 +728,46 @@ TOOLS = [
     },
     {
         "type": "function",
+        "name": "get_broker_trade_history",
+        "description": (
+            "Summarize completed trades already imported from the selected broker. Use for "
+            "recent-trade reviews, performance questions, holding-time patterns, winners, "
+            "losers, and net PnL. Values are calculated deterministically from normalized "
+            "fills; this does not contact the broker or change data."
+        ),
+        "strict": True,
+        "parameters": _object_schema(
+            {
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                "days": {
+                    "type": ["integer", "null"],
+                    "minimum": 1,
+                    "maximum": 3650,
+                },
+            },
+            ["limit", "days"],
+        ),
+    },
+    {
+        "type": "function",
+        "name": "sync_broker_history",
+        "description": (
+            "Import new read-only execution history from the selected broker, then reconcile "
+            "account and positions. This changes only the local journal and always requires "
+            "terminal confirmation. For the first MetaTrader import, use an ISO-8601 timestamp "
+            "with timezone to include the requested historical period. Never invent an OANDA "
+            "transaction cursor. This cannot place or modify orders."
+        ),
+        "strict": True,
+        "parameters": _object_schema(
+            {
+                "from_cursor": {"type": ["string", "null"], "maxLength": 200},
+            },
+            ["from_cursor"],
+        ),
+    },
+    {
+        "type": "function",
         "name": "get_economic_calendar",
         "description": (
             "Get current or upcoming scheduled economic events. Use this when the trader "
@@ -1176,6 +1234,8 @@ TOOL_METADATA = {
     "get_live_quote": {"mutating": False, "deterministic": False},
     "get_recent_candles": {"mutating": False, "deterministic": False},
     "get_broker_state": {"mutating": False, "deterministic": False},
+    "get_broker_trade_history": {"mutating": False, "deterministic": True},
+    "sync_broker_history": {"mutating": True, "deterministic": False},
     "get_market_news": {"mutating": False, "deterministic": False},
     "get_economic_calendar": {"mutating": False, "deterministic": False},
     "get_economic_event_history": {"mutating": False, "deterministic": False},
@@ -1339,7 +1399,7 @@ class TradingAgent:
             )
         return self.scope
 
-    def _broker_connector(self):
+    def _broker_account_connection(self) -> tuple[TradingAccount, BrokerConnection | None]:
         scope = self._require_scope()
         account = self.db.scalar(
             select(TradingAccount).where(
@@ -1372,6 +1432,10 @@ class TradingAgent:
                 BrokerConnection.provider == provider,
             )
         )
+        return account, connection
+
+    def _broker_connector(self):
+        account, connection = self._broker_account_connection()
         return create_broker_connector(
             self.settings,
             account=account,
@@ -2111,6 +2175,87 @@ class TradingAgent:
                     ),
                 }
             )
+
+        if name == "get_broker_trade_history":
+            result = broker_trade_review(
+                self.db,
+                scope=self._require_scope(),
+                limit=arguments["limit"],
+                days=arguments["days"],
+            )
+            self._reference(
+                "broker",
+                f"Imported broker trade history ({result.trade_count} closed trades)",
+                "normalized-broker-ledger",
+                result.as_of,
+            )
+            return _json(
+                {
+                    "ok": True,
+                    "result": _untrusted_content(
+                        "normalized_broker_trade_history",
+                        {
+                            "trade_count": result.trade_count,
+                            "currency": result.account_currency,
+                            "source": result.source,
+                        },
+                        result.model_payload(),
+                    ),
+                }
+            )
+
+        if name == "sync_broker_history":
+            scope = self._require_scope()
+            _, connection = self._broker_account_connection()
+            if connection is None:
+                raise BrokerConfigurationError(
+                    "the selected broker connection is not configured"
+                )
+            from_cursor = arguments["from_cursor"]
+            existing_cursor = self.db.scalar(
+                select(ConnectorCursor).where(
+                    ConnectorCursor.workspace_id == scope.workspace_id,
+                    ConnectorCursor.account_id == scope.account_id,
+                    ConnectorCursor.connection_id == connection.id,
+                    ConnectorCursor.stream_name == "transactions",
+                )
+            )
+            if from_cursor is not None and existing_cursor is not None:
+                raise ValueError(
+                    "broker history already has a cursor; refusing to rewind imported history"
+                )
+            if from_cursor is not None:
+                if self.settings.broker_provider == "oanda" and not from_cursor.isdigit():
+                    raise ValueError("OANDA history cursor must contain only digits")
+                self.db.add(
+                    ConnectorCursor(
+                        workspace_id=scope.workspace_id,
+                        account_id=scope.account_id,
+                        connection_id=connection.id,
+                        stream_name="transactions",
+                        cursor_value=from_cursor,
+                    )
+                )
+                self.db.flush()
+            connector = self._broker_connector()
+            try:
+                result = asyncio.run(
+                    synchronize_broker(
+                        self.db,
+                        scope=scope,
+                        connection_id=connection.id,
+                        connector=connector,
+                    )
+                )
+            finally:
+                asyncio.run(connector.aclose())
+            self._reference(
+                "broker",
+                f"{connection.provider} execution-history synchronization",
+                f"broker-connection:{connection.id}",
+                datetime.now(UTC),
+            )
+            return _json({"ok": True, "result": asdict(result)})
 
         if name == "get_market_news":
 

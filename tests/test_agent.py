@@ -10,7 +10,7 @@ import pytest
 
 from app.config import Settings
 from app.news.contracts import CalendarEvent, NewsHeadline
-from app.policy import PolicyViolation
+from app.policy import PolicyEngine, PolicyViolation
 from app.schemas import AccountConstraintRead, AccountRuleLimits
 from app.services.agent import (
     TOOLS,
@@ -311,7 +311,7 @@ def test_agent_executes_risk_tool_and_loads_runtime_policy() -> None:
 
     assert result == "Risk is $100 and planned R is 4."
     assert provider.max_output_tokens == 900
-    assert "Runtime policy 1.7.0" in provider.instructions
+    assert "Runtime policy 1.8.0" in provider.instructions
     assert "human_controls_orders" in provider.instructions
     assert "TASK-RELEVANT TRADING HARNESS" in provider.instructions
     assert "skills/position-planning/SKILL.md" in provider.instructions
@@ -490,6 +490,16 @@ def test_calendar_tools_describe_natural_defaults_and_on_demand_history() -> Non
     assert "only when the trader explicitly asks" in (
         tools["get_economic_event_history"]["description"]
     )
+
+
+def test_broker_review_and_sync_tools_support_natural_trade_history_flow() -> None:
+    tools = {tool["name"]: tool for tool in TOOLS}
+
+    assert "holding-time patterns" in tools["get_broker_trade_history"]["description"]
+    assert "cannot place or modify orders" in tools["sync_broker_history"]["description"]
+    policy = PolicyEngine.load().policy.tool_policy
+    assert "get_broker_trade_history" in policy.deterministic_tools
+    assert "sync_broker_history" in policy.mutating_tools
 
 
 def test_agent_includes_current_local_clock_for_relative_calendar_requests() -> None:

@@ -1384,8 +1384,7 @@ def test_agent_reply_is_compact_and_details_preserve_the_audit(monkeypatch) -> N
     assert "**Observed:**" not in rendered
     assert "References used" not in rendered
     assert "[untrusted markup]" not in rendered
-    assert "Agent ❯" in rendered
-    assert "Trading Agent" not in rendered
+    assert "Trading Agent ❯" in rendered
     assert "1 source" in rendered
     assert "/details" in rendered
 
