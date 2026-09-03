@@ -72,9 +72,9 @@ def parse_chat_calendar_request(
     current = now or datetime.now().astimezone()
     if current.tzinfo is None or current.utcoffset() is None:
         raise ValueError("calendar clock must include a timezone")
+    local_timezone = current.tzinfo
     start_local = current.replace(hour=0, minute=0, second=0, microsecond=0)
     end_local = start_local + timedelta(days=1)
-    assert start_local.tzinfo is not None
 
     currencies = {
         code
@@ -96,7 +96,7 @@ def parse_chat_calendar_request(
         minimum_importance = 0
     return ChatCalendarRequest(
         local_date=start_local.date().isoformat(),
-        local_timezone=start_local.tzinfo,
+        local_timezone=local_timezone,
         start_utc=start_local.astimezone(UTC),
         end_utc=end_local.astimezone(UTC),
         currencies=tuple(sorted(currencies)),
