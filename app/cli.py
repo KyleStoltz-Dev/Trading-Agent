@@ -228,6 +228,7 @@ from app.services.tool_audit import (
     complete_mutation_audit,
     record_direct_cli_confirmation,
 )
+from app.services.trading_workflow import infer_workflow_checkpoint
 from app.services.tradingview import set_tradingview_webhook_secret
 from app.services.workspaces import (
     RequestScope,
@@ -3191,7 +3192,7 @@ def _render_agent_reply(
         performance=dict(performance or {}),
     )
     console.print()
-    console.print("[bold green]Agent[/bold green] [bold]❯[/bold]")
+    console.print("[bold green]Trading Agent[/bold green] [bold]❯[/bold]")
     console.print(Markdown(_terminal_markdown(reply)))
     route_parts = [model, route_label.split(" · ", 1)[0]]
     detail_parts: list[str] = []
@@ -4638,11 +4639,32 @@ def _run_chat(
                 "strategy-specific guidance[/yellow]"
             )
         startup_memory = build_startup_memory(db, conversation, scope=scope)
-        startup_memory_pending = False
-        startup_message = _prompt_startup_action()
-        queued_messages = [startup_message] if startup_message else []
+        startup_memory_pending = startup_memory.has_content
         _render_startup_memory(startup_memory)
-        _render_starter_prompts()
+        transcript = conversation_transcript(
+            db,
+            conversation,
+            scope=scope,
+            limit=settings.model_history_turn_limit,
+        )
+        workflow_checkpoint = infer_workflow_checkpoint(
+            [item["content"] for item in transcript if item.get("role") == "user"]
+        )
+        if workflow_checkpoint is not None:
+            target = (
+                f" · {workflow_checkpoint.instrument}"
+                if workflow_checkpoint.instrument
+                else ""
+            )
+            console.print(f"[bold]Continuing:[/bold] {workflow_checkpoint.label}{target}")
+            console.print(
+                "[dim]Say continue, ask what is missing, or tell me what changed.[/dim]"
+            )
+        else:
+            console.print(
+                "[bold]What are you working on?[/bold] Tell me naturally—preparing, "
+                "checking a chart, evaluating a trade, or reviewing results."
+            )
         console.print(
             "[dim]/help commands · /onboard update setup · /examples starter prompts "
             "· /cost model pricing "
@@ -4653,13 +4675,9 @@ def _run_chat(
         )
         while True:
             try:
-                if queued_messages:
-                    message = queued_messages.pop(0)
-                    console.print(
-                        f"[dim]You (quick start)· {message}[/dim]"
-                    )
-                else:
-                    message = console.input("[bold cyan]You[/bold cyan] [bold]❯[/bold] ").strip()
+                message = console.input(
+                    "[bold cyan]You[/bold cyan] [bold]❯[/bold] "
+                ).strip()
             except (EOFError, KeyboardInterrupt):
                 console.print()
                 break
@@ -5018,22 +5036,6 @@ def _run_chat(
                     console.print(f"[red]{type(exc).__name__}: {exc}[/red]")
                 continue
 
-            if _handle_chat_preflight_intent(db, conversation, message):
-                if (
-                    agent.active_playbook_version_id
-                    != conversation.active_playbook_version_id
-                ):
-                    agent.active_playbook_version_id = (
-                        conversation.active_playbook_version_id
-                    )
-                    startup_memory = build_startup_memory(
-                        db,
-                        conversation,
-                        scope=scope,
-                    )
-                    startup_memory_pending = False
-                continue
-
             request_playbook_version_id = conversation.active_playbook_version_id
             request_id = uuid.uuid4()
             user_turn = add_turn(
@@ -5098,6 +5100,16 @@ def _run_chat(
                         )
                 evidence_parts: list[str] = []
                 evidence_references: list[UsedReference] = []
+                workflow_checkpoint = infer_workflow_checkpoint(
+                    [
+                        item["content"]
+                        for item in history
+                        if item.get("role") == "user"
+                    ]
+                    + [message]
+                )
+                if workflow_checkpoint is not None:
+                    evidence_parts.append(workflow_checkpoint.prompt_context())
                 if startup_memory_pending:
                     evidence_parts.append(startup_memory.prompt_context())
                     evidence_references.extend(

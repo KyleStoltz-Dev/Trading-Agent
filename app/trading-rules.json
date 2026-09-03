@@ -1,5 +1,5 @@
 {
-  "version": "1.7.0",
+  "version": "1.8.0",
   "rules": [
     {
       "id": "human_controls_orders",
@@ -127,11 +127,13 @@
       "set_learning_preferences",
       "update_learning_progress",
       "quarantine_strategy_knowledge",
-      "restore_strategy_knowledge"
+      "restore_strategy_knowledge",
+      "sync_broker_history"
     ],
     "deterministic_tools": [
       "calculate_position_size",
       "calculate_broker_position_size",
+      "get_broker_trade_history",
       "get_strategy_edge_report",
       "get_strategy_test_report",
       "measure_market_features",
