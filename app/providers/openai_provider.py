@@ -32,6 +32,7 @@ def _openai_usage(response: Any) -> TokenUsage:
 
 class OpenAIProvider:
     name = "openai"
+    access_mode = "api"
 
     def __init__(
         self,

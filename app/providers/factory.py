@@ -5,6 +5,12 @@ from app.providers.anthropic_provider import AnthropicProvider
 from app.providers.base import ModelProvider, ProviderConfigurationError
 from app.providers.ollama_provider import OllamaProvider
 from app.providers.openai_provider import OpenAIProvider
+from app.providers.subscription_provider import (
+    ClaudeSubscriptionProvider,
+    CodexSubscriptionProvider,
+    claude_subscription_status,
+    codex_subscription_status,
+)
 from app.services.model_credentials import resolve_model_credentials
 from app.services.secrets import SecretBackendError
 
@@ -60,6 +66,13 @@ def create_named_model_provider(
     client: Any = None,
 ) -> ModelProvider:
     if provider_name == "openai":
+        auth_mode = settings.openai_auth_mode
+        if client is None and auth_mode != "api":
+            status = codex_subscription_status()
+            if status.ready:
+                return CodexSubscriptionProvider(settings)
+            if auth_mode == "subscription":
+                raise ProviderConfigurationError(status.detail)
         try:
             credentials = (
                 None
@@ -70,7 +83,8 @@ def create_named_model_provider(
             raise ProviderConfigurationError(str(exc)) from exc
         if credentials is None and client is None:
             raise ProviderConfigurationError(
-                "An OpenAI API key is required; run `trade setup --provider openai`"
+                "OpenAI is not connected. Run `codex login` for ChatGPT access, or "
+                "run `trade setup --provider openai` to use an API key."
             )
         return OpenAIProvider(
             settings,
@@ -78,6 +92,13 @@ def create_named_model_provider(
             api_key=credentials.api_key if credentials else None,
         )
     if provider_name == "anthropic":
+        auth_mode = settings.anthropic_auth_mode
+        if client is None and auth_mode != "api":
+            status = claude_subscription_status()
+            if status.ready:
+                return ClaudeSubscriptionProvider(settings)
+            if auth_mode == "subscription":
+                raise ProviderConfigurationError(status.detail)
         try:
             credentials = (
                 None
@@ -88,7 +109,8 @@ def create_named_model_provider(
             raise ProviderConfigurationError(str(exc)) from exc
         if credentials is None and client is None:
             raise ProviderConfigurationError(
-                "An Anthropic API key is required; run `trade setup --provider anthropic`"
+                "Claude is not connected. Run `claude auth login` for subscription "
+                "access, or run `trade setup --provider anthropic` to use an API key."
             )
         return AnthropicProvider(
             settings,

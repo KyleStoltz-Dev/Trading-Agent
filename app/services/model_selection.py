@@ -14,6 +14,10 @@ from app.providers.base import ModelProvider, ProviderConfigurationError, valid_
 from app.providers.catalog import supported_agent_model
 from app.providers.factory import create_named_model_provider
 from app.providers.ollama_provider import OllamaProvider
+from app.providers.subscription_provider import (
+    claude_subscription_status,
+    codex_subscription_status,
+)
 from app.services.model_credentials import model_api_key_configured
 from app.services.secrets import SecretBackendError
 
@@ -25,6 +29,7 @@ class ModelSelectionOption:
     provider: str
     model: str
     local: bool
+    access_mode: str | None = None
 
 
 class SessionModelController:
@@ -57,6 +62,17 @@ class SessionModelController:
     def _provider_enabled(self, provider_name: str) -> bool:
         if provider_name == "ollama":
             return True
+        auth_mode = getattr(self.settings, f"{provider_name}_auth_mode")
+        if auth_mode != "api":
+            status = (
+                codex_subscription_status()
+                if provider_name == "openai"
+                else claude_subscription_status()
+            )
+            if status.ready:
+                return True
+            if auth_mode == "subscription":
+                return False
         try:
             return model_api_key_configured(
                 self.settings,
@@ -137,6 +153,9 @@ class SessionModelController:
                     provider=provider_name,
                     model=model,
                     local=provider_name == "ollama",
+                    access_mode=str(
+                        getattr(self.provider_for(provider_name), "access_mode", "api")
+                    ),
                 )
                 for model in models
             )
@@ -157,8 +176,11 @@ class SessionModelController:
             )
         provider = self.provider_for(provider_name)
         if model not in self.discover_models(provider_name):
+            access_mode = getattr(provider, "access_mode", "api")
             raise ProviderConfigurationError(
-                f"{provider_name}/{model} is not available to the configured API key"
+                f"{provider_name}/{model} is not available to the signed-in subscription"
+                if access_mode == "subscription"
+                else f"{provider_name}/{model} is not available to the configured API key"
                 if provider_name != "ollama"
                 else f"{model} is not installed; run `trade models pull {model}`"
             )

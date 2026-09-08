@@ -16,6 +16,7 @@ from app.cli import app
 from app.config import Settings
 from app.connectors import BrokerConfigurationError
 from app.costs import TokenUsage
+from app.providers.subscription_provider import SubscriptionRuntimeStatus
 from app.schemas import MindsetCheckInRead, TraderProfileUpsert
 from app.services.agent import UsedReference
 from app.services.health import HealthCheck, HealthReport
@@ -1110,6 +1111,16 @@ def test_interactive_cloud_setup_saves_api_key_in_vault_only(
     monkeypatch.setattr(cli_module, "shell_path_hint", Mock(return_value=None))
     monkeypatch.setattr(cli_module, "model_api_key_configured", Mock(return_value=False))
     monkeypatch.setattr(cli_module, "store_model_api_key", stored)
+    monkeypatch.setattr(
+        cli_module,
+        "codex_subscription_status",
+        lambda: SubscriptionRuntimeStatus(
+            False,
+            False,
+            False,
+            "Codex is not signed in.",
+        ),
+    )
 
     result = runner.invoke(
         app,
@@ -1128,12 +1139,12 @@ def test_interactive_cloud_setup_saves_api_key_in_vault_only(
             "--config",
             str(config),
         ],
-        input="y\nprivate-openai-key\n",
+        input="y\ny\nprivate-openai-key\n",
     )
 
     assert result.exit_code == 0
     assert "private-openai-key" not in config.read_text(encoding="utf-8")
-    assert "never writes that key to the settings file" in result.stdout
+    assert "never in this settings file" in result.stdout
     assert "never asks for or overwrites API keys" not in result.stdout
     assert stored.call_args.kwargs["provider"] == "openai"
     assert stored.call_args.kwargs["api_key"] == "private-openai-key"
@@ -1144,7 +1155,7 @@ def test_setup_typo_returns_suggestion_without_traceback() -> None:
 
     assert result.exit_code == 2
     assert "Did you mean" in result.stdout
-    assert "OpenAI API" in result.stdout
+    assert "OpenAI / ChatGPT" in result.stdout
     assert "Traceback" not in result.stdout
 
 
@@ -1859,6 +1870,28 @@ def test_agent_reply_is_compact_and_details_preserve_the_audit(monkeypatch) -> N
     assert "20 output" in expanded
     assert "$0 API" in expanded
     assert "References" in expanded
+
+
+def test_normal_thinking_status_hides_cost_and_context_internals() -> None:
+    prepared = SimpleNamespace(
+        route=SimpleNamespace(mode="balanced", model="gpt-5.6-sol")
+    )
+
+    rendered = cli_module._request_status_label(prepared, "openai", 3)
+
+    assert rendered == "[green]Thinking[/green] · OpenAI · gpt-5.6-sol"
+    assert "$" not in rendered
+    assert "source" not in rendered
+
+
+def test_mutation_confirmation_is_plain_and_never_displays_credentials() -> None:
+    prompt = cli_module._mutation_confirmation_prompt(
+        "Policy-approved mutation: configure_broker_connection",
+        {"account": "practice", "token": "do-not-display"},
+    )
+
+    assert prompt == "Save this read-only broker connection?"
+    assert "do-not-display" not in prompt
 
 
 def test_terminal_markdown_unwraps_documents_and_stacks_wide_tables_as_cards() -> None:

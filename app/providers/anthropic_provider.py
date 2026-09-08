@@ -66,6 +66,7 @@ def _reasoning_options(reasoning_effort: str) -> dict[str, Any]:
 
 class AnthropicProvider:
     name = "anthropic"
+    access_mode = "api"
 
     def __init__(
         self,

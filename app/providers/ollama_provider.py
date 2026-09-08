@@ -106,6 +106,7 @@ def _ollama_performance(data: dict[str, Any]) -> dict[str, float]:
 
 
 class OllamaProvider:
+    access_mode = "local"
     name = "ollama"
 
     def __init__(self, settings: Settings, client: httpx.Client | None = None) -> None:
