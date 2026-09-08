@@ -13,7 +13,7 @@ def resolve_provider_name(settings: Settings) -> str:
     if settings.model_provider != "auto":
         return settings.model_provider
 
-    available = [
+    environment_providers = [
         name
         for name, configured in (
             ("openai", bool(settings.openai_api_key)),
@@ -21,12 +21,29 @@ def resolve_provider_name(settings: Settings) -> str:
         )
         if configured
     ]
+    if len(environment_providers) == 1:
+        return environment_providers[0]
+    if len(environment_providers) > 1:
+        raise ProviderConfigurationError(
+            "Both provider keys are configured; set MODEL_PROVIDER=openai or anthropic"
+        )
+
+    try:
+        available = [
+            name
+            for name in ("openai", "anthropic")
+            if resolve_model_credentials(
+                settings,
+                provider=name,  # type: ignore[arg-type]
+            )
+            is not None
+        ]
+    except SecretBackendError as exc:
+        raise ProviderConfigurationError(str(exc)) from exc
     if len(available) == 1:
         return available[0]
     if not available:
-        raise ProviderConfigurationError(
-            "Configure a model API key, or set MODEL_PROVIDER=ollama for local inference"
-        )
+        return "ollama"
     raise ProviderConfigurationError(
         "Both provider keys are configured; set MODEL_PROVIDER=openai or anthropic"
     )

@@ -93,9 +93,7 @@ from app.providers import (
     ModelProvider,
     ProviderConfigurationError,
     create_model_provider,
-    create_named_model_provider,
 )
-from app.providers.base import valid_model_id
 from app.providers.ollama_provider import OllamaProvider
 from app.routing import AgentMode
 from app.schemas import (
@@ -197,6 +195,7 @@ from app.services.model_credentials import (
     model_api_key_configured,
     store_model_api_key,
 )
+from app.services.model_selection import SessionModelController
 from app.services.news import (
     economic_event_history,
     store_calendar_events,
@@ -2941,80 +2940,35 @@ def _render_ollama_models(
         console.print(f"[dim]Other installed models: {', '.join(extras)}[/dim]")
 
 
-def _configured_provider_models(settings: Settings, provider_name: str) -> tuple[str, ...]:
-    values = []
-    for suffix in ("model", "economy_model", "balanced_model", "deep_model"):
-        value = getattr(settings, f"{provider_name}_{suffix}", None)
-        if value and value not in values:
-            values.append(value)
-    return tuple(values)
-
-
-def _discover_provider_models(
-    settings: Settings,
-    provider_name: str,
-) -> tuple[str, ...]:
-    provider = create_named_model_provider(settings, provider_name)
-    if isinstance(provider, OllamaProvider):
-        return tuple(sorted(provider.installed_models()))
-    available = getattr(provider, "available_models", None)
-    if available is None:
-        return _configured_provider_models(settings, provider_name)
-    try:
-        discovered = tuple(available())
-    except ProviderConfigurationError:
-        discovered = ()
-    configured = _configured_provider_models(settings, provider_name)
-    return tuple(dict.fromkeys((*configured, *discovered)))
-
-
 def _model_menu_options(
-    settings: Settings,
+    controller: SessionModelController,
     *,
     current_provider: str,
     current_model: str,
 ) -> tuple[TerminalMenuOption, ...]:
     options: list[TerminalMenuOption] = []
-    for provider_name, provider_label in (
-        ("ollama", "Local"),
-        ("openai", "OpenAI"),
-        ("anthropic", "Anthropic"),
-    ):
-        if provider_name != "ollama":
-            try:
-                configured = model_api_key_configured(
-                    settings,
-                    provider=provider_name,  # type: ignore[arg-type]
-                )
-            except SecretBackendError:
-                configured = False
-            if not configured:
-                continue
-        try:
-            models = _discover_provider_models(settings, provider_name)
-        except ProviderConfigurationError:
-            models = _configured_provider_models(settings, provider_name)
-        for model in models:
-            selected = provider_name == current_provider and model == current_model
-            location = "runs on this computer" if provider_name == "ollama" else "uses your API key"
-            options.append(
-                TerminalMenuOption(
-                    value=f"{provider_name}\0{model}",
-                    label=f"{provider_label} · {model}",
-                    description=("current · " if selected else "") + location,
-                )
+    labels = {"ollama": "Local", "openai": "OpenAI", "anthropic": "Anthropic"}
+    for option in controller.options():
+        selected = option.provider == current_provider and option.model == current_model
+        location = "runs on this computer" if option.local else "uses your API key"
+        options.append(
+            TerminalMenuOption(
+                value=f"{option.provider}\0{option.model}",
+                label=f"{labels[option.provider]} · {option.model}",
+                description=("current · " if selected else "") + location,
             )
+        )
     return tuple(options)
 
 
 def _choose_session_model(
-    settings: Settings,
+    controller: SessionModelController,
     *,
     current_provider: str,
     current_model: str,
 ) -> tuple[str, str] | None:
     options = _model_menu_options(
-        settings,
+        controller,
         current_provider=current_provider,
         current_model=current_model,
     )
@@ -3150,6 +3104,71 @@ def _release_local_model(
     if announce:
         console.print(f"[green]Released {model} from memory.[/green]")
     return True
+
+
+def _switch_session_model(
+    settings: Settings,
+    controller: SessionModelController,
+    *,
+    provider_name: str,
+    model: str,
+    last_runtime_model: str | None,
+    conversation_turns: int,
+) -> tuple[ModelProvider, str | None] | None:
+    """Validate, disclose, and commit one session-only model switch."""
+    try:
+        selected_provider = controller.validate_selection(provider_name, model)
+    except ProviderConfigurationError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return None
+
+    if isinstance(selected_provider, OllamaProvider):
+        try:
+            assessment = _assess_ollama_model(
+                settings,
+                model,
+                selected_provider.installed_model_sizes(
+                    timeout=settings.model_discovery_timeout_seconds
+                ),
+                selected_provider.loaded_models(
+                    timeout=settings.model_discovery_timeout_seconds
+                ),
+            )
+        except ProviderConfigurationError as exc:
+            console.print(f"[red]{exc}[/red]")
+            return None
+        if assessment is not None:
+            _render_model_assessment(assessment)
+            if assessment.status == "block":
+                console.print(
+                    "[red]The session override was not changed. Close memory-heavy "
+                    "applications or choose a smaller installed model.[/red]"
+                )
+                return None
+
+    current_provider = controller.provider
+    if selected_provider.name != "ollama" and selected_provider.name != current_provider.name:
+        disclosure = {
+            "provider": selected_provider.name,
+            "destination": f"hosted-provider:{selected_provider.name}",
+            "conversation_turns": conversation_turns,
+            "content": "bounded recent conversation history and future session requests",
+        }
+        if not _confirm_agent_external_action(
+            "External disclosure: hosted conversation",
+            disclosure,
+        ):
+            console.print("[yellow]Hosted model switch declined.[/yellow]")
+            return None
+
+    if isinstance(current_provider, OllamaProvider) and last_runtime_model:
+        try:
+            _release_local_model(current_provider, last_runtime_model)
+        except ProviderConfigurationError as exc:
+            console.print(f"[yellow]{exc}[/yellow]")
+        last_runtime_model = None
+
+    return controller.activate(selected_provider, model), last_runtime_model
 
 
 _DOCUMENT_FENCE = re.compile(
@@ -5109,6 +5128,7 @@ def _run_chat(
     except ProviderConfigurationError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
+    model_controller = SessionModelController(settings, provider)
     if session_reference and (new_session or session_name):
         console.print("[red]Use either --session or --new/--name, not both.[/red]")
         raise typer.Exit(2)
@@ -5295,6 +5315,7 @@ def _run_chat(
                     get_settings.cache_clear()
                     settings = get_settings()
                     agent.settings = settings
+                    model_controller.settings = settings
                     current_mode = settings.agent_mode
                     startup_memory = build_startup_memory(
                         db,
@@ -5604,7 +5625,7 @@ def _run_chat(
             if message == "/model":
                 try:
                     selection = _choose_session_model(
-                        settings,
+                        model_controller,
                         current_provider=provider.name,
                         current_model=current_model_override or provider.model,
                     )
@@ -5614,22 +5635,26 @@ def _run_chat(
                 if selection is None:
                     continue
                 selected_provider_name, selected_model = selection
-                try:
-                    selected_provider = create_named_model_provider(
-                        settings,
-                        selected_provider_name,
-                    )
-                except ProviderConfigurationError as exc:
-                    console.print(f"[red]{exc}[/red]")
+                switched = _switch_session_model(
+                    settings,
+                    model_controller,
+                    provider_name=selected_provider_name,
+                    model=selected_model,
+                    last_runtime_model=last_runtime_model,
+                    conversation_turns=len(
+                        conversation_history(
+                            db,
+                            conversation,
+                            scope=scope,
+                            playbook_version_id=conversation.active_playbook_version_id,
+                            limit=settings.model_history_turn_limit,
+                        )
+                    ),
+                )
+                if switched is None:
                     continue
-                if isinstance(provider, OllamaProvider) and last_runtime_model:
-                    try:
-                        _release_local_model(provider, last_runtime_model)
-                    except ProviderConfigurationError as exc:
-                        console.print(f"[yellow]{exc}[/yellow]")
-                    last_runtime_model = None
-                provider = selected_provider
-                agent.provider = selected_provider
+                provider, last_runtime_model = switched
+                agent.provider = provider
                 current_model_override = selected_model
                 destination = "this computer" if provider.name == "ollama" else "the provider API"
                 console.print(
@@ -5645,6 +5670,7 @@ def _run_chat(
                         console.print(f"[yellow]{exc}[/yellow]")
                     last_runtime_model = None
                 current_model_override = None
+                model_controller.automatic_profile()
                 console.print("[green]Returned to automatic model-profile routing.[/green]")
                 continue
             if message == "/model unload":
@@ -5674,58 +5700,26 @@ def _run_chat(
                 else:
                     selected_provider_name = provider.name
                     selected_model = requested
-                if selected_provider_name not in {"ollama", "openai", "anthropic"}:
-                    console.print("[red]Provider must be ollama, openai, or anthropic.[/red]")
-                    continue
-                if not valid_model_id(selected_model):
-                    console.print("[red]Model name contains unsupported characters.[/red]")
-                    continue
-                try:
-                    selected_provider = create_named_model_provider(
-                        settings,
-                        selected_provider_name,
-                    )
-                except ProviderConfigurationError as exc:
-                    console.print(f"[red]{exc}[/red]")
-                    continue
-                if isinstance(selected_provider, OllamaProvider):
-                    try:
-                        installed = selected_provider.installed_models()
-                    except ProviderConfigurationError as exc:
-                        console.print(f"[red]{exc}[/red]")
-                        continue
-                    if selected_model not in installed:
-                        console.print(
-                            f"[red]{selected_model} is not installed. In another terminal run "
-                            f"`trade models pull {selected_model}`.[/red]"
+                switched = _switch_session_model(
+                    settings,
+                    model_controller,
+                    provider_name=selected_provider_name,
+                    model=selected_model,
+                    last_runtime_model=last_runtime_model,
+                    conversation_turns=len(
+                        conversation_history(
+                            db,
+                            conversation,
+                            scope=scope,
+                            playbook_version_id=conversation.active_playbook_version_id,
+                            limit=settings.model_history_turn_limit,
                         )
-                        continue
-                    try:
-                        assessment = _assess_ollama_model(
-                            settings,
-                            selected_model,
-                            selected_provider.installed_model_sizes(),
-                            selected_provider.loaded_models(),
-                        )
-                    except ProviderConfigurationError as exc:
-                        console.print(f"[red]{exc}[/red]")
-                        continue
-                    if assessment is not None:
-                        _render_model_assessment(assessment)
-                        if assessment.status == "block":
-                            console.print(
-                                "[red]The session override was not changed. Close memory-heavy "
-                                "applications or choose a smaller installed model.[/red]"
-                            )
-                            continue
-                if isinstance(provider, OllamaProvider) and last_runtime_model:
-                    try:
-                        _release_local_model(provider, last_runtime_model)
-                    except ProviderConfigurationError as exc:
-                        console.print(f"[yellow]{exc}[/yellow]")
-                    last_runtime_model = None
-                provider = selected_provider
-                agent.provider = selected_provider
+                    ),
+                )
+                if switched is None:
+                    continue
+                provider, last_runtime_model = switched
+                agent.provider = provider
                 current_model_override = selected_model
                 console.print(
                     f"[green]This session now uses {provider.name}/{selected_model}; "
@@ -6070,6 +6064,7 @@ def _run_chat(
                 _release_local_model(provider, last_runtime_model)
             except ProviderConfigurationError as exc:
                 console.print(f"[yellow]Local model cleanup failed: {exc}[/yellow]")
+        model_controller.close()
 
 
 @app.callback()
@@ -6662,8 +6657,8 @@ def setup_agent(
     review.add_row("Settings", "Managed automatically on this computer")
     console.print(review)
     console.print(
-        "[dim]Setup writes provider selections only. It never asks for or overwrites "
-        "API keys and passwords.[/dim]"
+        "[dim]Setup writes provider selections and can save a hosted-model API key in "
+        "your configured credential vault. It never writes that key to the settings file.[/dim]"
     )
     if not yes and not typer.confirm("Apply this setup?", default=True):
         console.print("[yellow]Nothing was changed.[/yellow]")

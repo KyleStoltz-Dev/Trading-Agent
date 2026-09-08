@@ -1133,6 +1133,8 @@ def test_interactive_cloud_setup_saves_api_key_in_vault_only(
 
     assert result.exit_code == 0
     assert "private-openai-key" not in config.read_text(encoding="utf-8")
+    assert "never writes that key to the settings file" in result.stdout
+    assert "never asks for or overwrites API keys" not in result.stdout
     assert stored.call_args.kwargs["provider"] == "openai"
     assert stored.call_args.kwargs["api_key"] == "private-openai-key"
 

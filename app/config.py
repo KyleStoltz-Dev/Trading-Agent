@@ -104,6 +104,7 @@ class Settings(BaseSettings):
     agent_mode: Literal["auto", "economy", "balanced", "deep"] = "auto"
     model_max_concurrent_requests: int = Field(default=2, ge=1, le=16)
     model_request_queue_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
+    model_discovery_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
     model_history_turn_limit: int = Field(default=20, ge=2, le=100)
     app_env: Literal["development", "test", "production"] = "development"
     database_auto_migrate: bool = True

@@ -14,6 +14,7 @@ from app.providers.base import (
     track_completion_usage,
     valid_model_id,
 )
+from app.providers.catalog import supported_agent_model
 
 
 def _anthropic_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -74,6 +75,7 @@ class AnthropicProvider:
     ) -> None:
         self.model = settings.anthropic_model
         self.last_usage = TokenUsage()
+        self._discovery_timeout_seconds = settings.model_discovery_timeout_seconds
         self._capacity_limiter = provider_capacity_limiter(
             self.name,
             settings.model_max_concurrent_requests,
@@ -96,17 +98,20 @@ class AnthropicProvider:
     def available_models(self) -> tuple[str, ...]:
         """Return models visible to this API key."""
         try:
-            response = self.client.models.list(limit=1000)
+            response = self.client.models.list(
+                limit=1000,
+                timeout=self._discovery_timeout_seconds,
+            )
         except Exception as exc:
             raise ProviderConfigurationError("Anthropic model discovery failed") from exc
         models = {
             item.id
             for item in getattr(response, "data", ())
             if valid_model_id(getattr(item, "id", None))
+            and supported_agent_model(self.name, item.id)
         }
         if not valid_model_id(self.model):
             raise ProviderConfigurationError("Configured Anthropic model name is invalid")
-        models.add(self.model)
         return tuple(sorted(models))
 
     @track_completion_usage

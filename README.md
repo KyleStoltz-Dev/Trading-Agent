@@ -135,8 +135,9 @@ OPENAI_API_KEY=...
 OPENAI_MODEL=gpt-5.6-sol
 ```
 
-`MODEL_PROVIDER=auto` works when exactly one provider key is configured. If both keys are
-present, select one explicitly.
+`MODEL_PROVIDER=auto` uses the only cloud key found in the environment or configured credential
+vault, falls back to local Ollama when no cloud key exists, and requires an explicit provider
+when both cloud providers are configured.
 
 For local, token-free use, install Ollama for your operating system from
 [ollama.com/download](https://ollama.com/download). On macOS, Homebrew is also supported:
@@ -179,9 +180,14 @@ trade models pull qwen3.5:35b-a3b
 trade models use qwen3.5:35b-a3b --tier quality
 ```
 
-Inside chat, `/model` shows local profiles, `/model use qwen3.5:35b-a3b` creates a
-session-only override, `/model auto` restores tier routing, and `/model unload` immediately
-releases the model owned by the current session. `/mode` still controls reasoning effort.
+Inside chat, `/model` opens an arrow-key picker containing installed local models and cloud
+models that are both available to the configured key and reviewed for the agent's tool and
+chart request shapes. `/model use qwen3.5:35b-a3b` or
+`/model use openai/gpt-5.6-terra` creates a session-only override, `/model auto` restores tier
+routing within the selected provider, and `/model unload` immediately releases the local model
+owned by the current session. Switching to a different hosted provider discloses that bounded
+recent conversation history will be sent there and requires confirmation. `/mode` still
+controls reasoning effort.
 Chart analysis accepts `--model qwen3.5:35b-a3b --reasoning-effort high`.
 Before local inference, the resource guard recalculates whether the selected model fits the
 current machine. It can warn, refuse an unsafe explicit override, or route an automatic
@@ -191,7 +197,9 @@ Local model weights expire after two idle minutes by default and are released im
 when chat exits. The startup smoke test validates inference without leaving a model resident.
 
 `trade setup` can safely change the selected provider later. It rewrites only non-secret
-provider settings, collapses duplicate provider entries, and never reads or writes API keys.
+provider settings, collapses duplicate provider entries, and can collect a hosted-model API key
+with hidden input. The key is written only to the configured credential vault; secret fields
+remain prohibited in the managed settings file. Environment keys remain an advanced override.
 Configuration is loaded from exactly one trusted file: an absolute `TRADING_AGENT_CONFIG`,
 the standard user configuration directory, or the editable installation. A current-directory
 `.env` is never loaded. On POSIX systems, the selected file must be owned by the current user,
@@ -339,8 +347,10 @@ Useful chat commands are:
 /memory use           confirm recall disclosure for the next model request only
 /memory off           cancel a pending recall disclosure
 /mode auto|economy|balanced|deep
-/model                show installed/configured local models
-/model use NAME       override the local model for this session
+/model                choose an available reviewed local or cloud model
+/model use NAME       override the current provider's model for this session
+/model use PROVIDER/NAME
+                      switch provider/model after any required disclosure
 /model auto           restore automatic model-profile routing
 /model unload         release this session's local model immediately
 ```
