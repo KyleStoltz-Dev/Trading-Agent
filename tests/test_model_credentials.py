@@ -34,7 +34,7 @@ class MemorySecretBackend:
 def test_model_api_key_round_trip_uses_vault_without_exposing_key(monkeypatch) -> None:
     backend = MemorySecretBackend()
     monkeypatch.setattr(model_credentials, "secret_backend", lambda _settings: backend)
-    settings = Settings(model_provider="openai")
+    settings = Settings(model_provider="openai", openai_api_key=None)
 
     store_model_api_key(settings, provider="openai", api_key="  private-api-key  ")
 
