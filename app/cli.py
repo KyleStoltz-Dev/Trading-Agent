@@ -75,7 +75,12 @@ from app.db import (
     upgrade_database,
 )
 from app.integration_catalog import integration_options
-from app.interactive_input import IMAGE_MARKER, ClipboardChatPrompt
+from app.interactive_input import (
+    IMAGE_MARKER,
+    ClipboardChatPrompt,
+    TerminalMenuOption,
+    choose_terminal_option,
+)
 from app.models import (
     ApiPrincipal,
     BrokerConnection,
@@ -84,7 +89,13 @@ from app.models import (
     EconomicEvent,
 )
 from app.policy import ExecutionHooks, PolicyEngine, PolicyViolation, ToolContext
-from app.providers import ProviderConfigurationError, create_model_provider
+from app.providers import (
+    ModelProvider,
+    ProviderConfigurationError,
+    create_model_provider,
+    create_named_model_provider,
+)
+from app.providers.base import valid_model_id
 from app.providers.ollama_provider import OllamaProvider
 from app.routing import AgentMode
 from app.schemas import (
@@ -182,6 +193,10 @@ from app.services.market_features import (
     strategy_experiment_report,
 )
 from app.services.mindset import create_mindset_check_in, list_mindset_check_ins
+from app.services.model_credentials import (
+    model_api_key_configured,
+    store_model_api_key,
+)
 from app.services.news import (
     economic_event_history,
     store_calendar_events,
@@ -2926,6 +2941,107 @@ def _render_ollama_models(
         console.print(f"[dim]Other installed models: {', '.join(extras)}[/dim]")
 
 
+def _configured_provider_models(settings: Settings, provider_name: str) -> tuple[str, ...]:
+    values = []
+    for suffix in ("model", "economy_model", "balanced_model", "deep_model"):
+        value = getattr(settings, f"{provider_name}_{suffix}", None)
+        if value and value not in values:
+            values.append(value)
+    return tuple(values)
+
+
+def _discover_provider_models(
+    settings: Settings,
+    provider_name: str,
+) -> tuple[str, ...]:
+    provider = create_named_model_provider(settings, provider_name)
+    if isinstance(provider, OllamaProvider):
+        return tuple(sorted(provider.installed_models()))
+    available = getattr(provider, "available_models", None)
+    if available is None:
+        return _configured_provider_models(settings, provider_name)
+    try:
+        discovered = tuple(available())
+    except ProviderConfigurationError:
+        discovered = ()
+    configured = _configured_provider_models(settings, provider_name)
+    return tuple(dict.fromkeys((*configured, *discovered)))
+
+
+def _model_menu_options(
+    settings: Settings,
+    *,
+    current_provider: str,
+    current_model: str,
+) -> tuple[TerminalMenuOption, ...]:
+    options: list[TerminalMenuOption] = []
+    for provider_name, provider_label in (
+        ("ollama", "Local"),
+        ("openai", "OpenAI"),
+        ("anthropic", "Anthropic"),
+    ):
+        if provider_name != "ollama":
+            try:
+                configured = model_api_key_configured(
+                    settings,
+                    provider=provider_name,  # type: ignore[arg-type]
+                )
+            except SecretBackendError:
+                configured = False
+            if not configured:
+                continue
+        try:
+            models = _discover_provider_models(settings, provider_name)
+        except ProviderConfigurationError:
+            models = _configured_provider_models(settings, provider_name)
+        for model in models:
+            selected = provider_name == current_provider and model == current_model
+            location = "runs on this computer" if provider_name == "ollama" else "uses your API key"
+            options.append(
+                TerminalMenuOption(
+                    value=f"{provider_name}\0{model}",
+                    label=f"{provider_label} · {model}",
+                    description=("current · " if selected else "") + location,
+                )
+            )
+    return tuple(options)
+
+
+def _choose_session_model(
+    settings: Settings,
+    *,
+    current_provider: str,
+    current_model: str,
+) -> tuple[str, str] | None:
+    options = _model_menu_options(
+        settings,
+        current_provider=current_provider,
+        current_model=current_model,
+    )
+    if not options:
+        console.print("[yellow]No selectable models are currently configured.[/yellow]")
+        return None
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        table = Table(title="Selectable models")
+        table.add_column("Provider")
+        table.add_column("Model")
+        for option in options:
+            provider_name, model = option.value.split("\0", 1)
+            table.add_row(provider_name, model)
+        console.print(table)
+        console.print("[dim]Use /model use PROVIDER/MODEL in a non-interactive terminal.[/dim]")
+        return None
+    selected = choose_terminal_option(
+        "Choose model",
+        "Use ↑/↓ to select where the next request runs.",
+        options,
+    )
+    if selected is None:
+        return None
+    provider_name, model = selected.split("\0", 1)
+    return provider_name, model
+
+
 def _request_status_label(
     prepared: PreparedAgentRequest,
     provider_name: str,
@@ -4566,6 +4682,7 @@ def _handle_chat_clipboard_chart_intent(
     conversation: ConversationSession,
     message: str,
     *,
+    provider: ModelProvider | None = None,
     model: str | None,
     reasoning_effort: str,
     clipboard_image: ClipboardImage | None = None,
@@ -4593,7 +4710,7 @@ def _handle_chat_clipboard_chart_intent(
     )
     chart_context = message.replace(IMAGE_MARKER, "").strip() or "Analyze this copied chart."
     try:
-        if clipboard_image is None:
+        if provider is None and clipboard_image is None:
             chart(
                 image=None,
                 clipboard=True,
@@ -4617,6 +4734,7 @@ def _handle_chat_clipboard_chart_intent(
                 timeframe=None,
                 market_time=None,
                 trade_plan=None,
+                provider=provider,
                 model=model,
                 reasoning_effort=reasoning_effort,
             )
@@ -5155,14 +5273,15 @@ def _run_chat(
                     "/memory · show source-backed goals and recent records in scope\n"
                     "/memory use · include bounded recall in the next model request\n"
                     "/memory off · cancel pending recall\n"
+                    "/account · choose the default account for new sessions\n"
                     "/strategy · show active isolated strategy\n"
                     "/strategy use NAME · switch to exactly one strategy version\n"
                     "/strategy clear · disable strategy-specific retrieval\n"
                     "/learn · show curriculum and next lesson\n"
                     "/learn LESSON · begin a sourced teaching conversation\n"
                     "/mode auto|economy|balanced|deep · choose model effort\n"
-                    "/model · show local model profiles\n"
-                    "/model use NAME · override the local model for this session\n"
+                    "/model · choose a configured local or cloud model\n"
+                    "/model use NAME or PROVIDER/NAME · override this session\n"
                     "/model auto · return to automatic profile routing\n"
                     "/model unload · release this session's local model from memory\n"
                     "/develop <change> · hand a software change to the coding agent\n"
@@ -5246,6 +5365,80 @@ def _run_chat(
                 startup_memory_pending = False
                 console.print("[dim]Pending recall was cleared.[/dim]")
                 continue
+            if message == "/account":
+                workspace = _configured_workspace(db)
+                accounts = list_accounts(db, workspace.id, active_only=True)
+                options = tuple(
+                    TerminalMenuOption(
+                        value=str(account.id),
+                        label=account.label,
+                        description=(
+                            f"{account.broker} · {account.mode} · "
+                            + (
+                                "current session"
+                                if account.id == scope.account_id
+                                else "new sessions"
+                            )
+                        ),
+                    )
+                    for account in accounts
+                )
+                if not (sys.stdin.isatty() and sys.stdout.isatty()):
+                    console.print(
+                        "[dim]Use `trade account list` and `trade account use NAME` "
+                        "outside an interactive terminal.[/dim]"
+                    )
+                    continue
+                selected_account_id = choose_terminal_option(
+                    "Choose account",
+                    "The current conversation remains attached to its original account.",
+                    options,
+                )
+                if selected_account_id is None:
+                    continue
+                account = next(
+                    item for item in accounts if str(item.id) == selected_account_id
+                )
+                if account.id == scope.account_id:
+                    console.print(f"[dim]{account.label} already owns this session.[/dim]")
+                    continue
+                try:
+                    _authorize_direct(
+                        "select_trading_account",
+                        {
+                            "workspace": workspace.slug,
+                            "account": account.label,
+                            "broker": account.broker,
+                            "mode": account.mode,
+                        },
+                        mutating=True,
+                    )
+                except PolicyViolation as exc:
+                    console.print(f"[red]{exc}[/red]")
+                    continue
+                config_path = default_config_path()
+                env_snapshot = snapshot_env_file(config_path)
+                try:
+                    update_env_file(
+                        config_path,
+                        {
+                            "TRADING_WORKSPACE": workspace.slug,
+                            "TRADING_ACCOUNT": str(account.id),
+                        },
+                    )
+                    for candidate in accounts:
+                        candidate.is_default = candidate.id == account.id
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    restore_env_file(config_path, env_snapshot)
+                    raise
+                get_settings.cache_clear()
+                console.print(
+                    f"[green]{account.label} will be used for new sessions.[/green] "
+                    "[dim]This conversation remains isolated to its original account.[/dim]"
+                )
+                continue
             if message == "/learn":
                 try:
                     _, curriculum, learning_scope = _learning_context(db)
@@ -5272,8 +5465,39 @@ def _run_chat(
                     conversation,
                     scope=scope,
                 )
-                if active_strategy is None:
-                    summaries = list_strategy_summaries(db, scope=scope)
+                summaries = list_strategy_summaries(db, scope=scope)
+                if sys.stdin.isatty() and sys.stdout.isatty() and summaries:
+                    strategy_options = tuple(
+                        TerminalMenuOption(
+                            value=f"use\0{item.name}",
+                            label=item.name,
+                            description=(
+                                "current"
+                                if active_strategy is not None
+                                and active_strategy[0].name == item.name
+                                else "switch this session"
+                            ),
+                        )
+                        for item in summaries
+                    ) + (
+                        TerminalMenuOption(
+                            value="clear",
+                            label="No active strategy",
+                            description="disable strategy-specific retrieval",
+                        ),
+                    )
+                    selected_strategy = choose_terminal_option(
+                        "Choose strategy",
+                        "Only the selected strategy version will be retrieved.",
+                        strategy_options,
+                    )
+                    if selected_strategy is None:
+                        continue
+                    if selected_strategy == "clear":
+                        message = "/strategy clear"
+                    else:
+                        message = "/strategy use " + selected_strategy.split("\0", 1)[1]
+                elif active_strategy is None:
                     drafts = list_local_strategy_templates()
                     if summaries:
                         names = ", ".join(item.name for item in summaries)
@@ -5292,12 +5516,13 @@ def _run_chat(
                             "No strategy is active or saved. Ask me to build one "
                             "conversationally."
                         )
+                    continue
                 else:
                     console.print(
                         f"{active_strategy[0].name} v{active_strategy[1].version} · "
                         f"sha256={active_strategy[1].content_hash[:12]}"
                     )
-                continue
+                    continue
             if message.startswith("/strategy use "):
                 strategy_name = message.removeprefix("/strategy use ").strip()
                 try:
@@ -5377,25 +5602,40 @@ def _run_chat(
                 console.print(f"[green]Model mode is now {current_mode}.[/green]")
                 continue
             if message == "/model":
-                if not isinstance(provider, OllamaProvider):
-                    console.print(
-                        f"Current provider is {provider.name}. Use /mode for configured "
-                        "API model tiers."
-                    )
-                    continue
                 try:
-                    _render_ollama_models(
+                    selection = _choose_session_model(
                         settings,
-                        provider.installed_model_sizes(),
-                        provider.loaded_models(),
+                        current_provider=provider.name,
+                        current_model=current_model_override or provider.model,
                     )
                 except ProviderConfigurationError as exc:
                     console.print(f"[red]{exc}[/red]")
                     continue
-                if current_model_override:
-                    console.print(f"[green]Session override: {current_model_override}[/green]")
-                else:
-                    console.print("[dim]Session override: automatic routing[/dim]")
+                if selection is None:
+                    continue
+                selected_provider_name, selected_model = selection
+                try:
+                    selected_provider = create_named_model_provider(
+                        settings,
+                        selected_provider_name,
+                    )
+                except ProviderConfigurationError as exc:
+                    console.print(f"[red]{exc}[/red]")
+                    continue
+                if isinstance(provider, OllamaProvider) and last_runtime_model:
+                    try:
+                        _release_local_model(provider, last_runtime_model)
+                    except ProviderConfigurationError as exc:
+                        console.print(f"[yellow]{exc}[/yellow]")
+                    last_runtime_model = None
+                provider = selected_provider
+                agent.provider = selected_provider
+                current_model_override = selected_model
+                destination = "this computer" if provider.name == "ollama" else "the provider API"
+                console.print(
+                    f"[green]This session now uses {provider.name}/{selected_model} "
+                    f"on {destination}.[/green]"
+                )
                 continue
             if message == "/model auto":
                 if isinstance(provider, OllamaProvider) and last_runtime_model:
@@ -5426,52 +5666,70 @@ def _run_chat(
                 last_runtime_model = None
                 continue
             if message.startswith("/model use "):
-                if not isinstance(provider, OllamaProvider):
-                    console.print(
-                        "[red]Direct /model switching is available for local Ollama; "
-                        "API providers use configured /mode tiers.[/red]"
-                    )
+                requested = message.removeprefix("/model use ").strip()
+                if "/" in requested:
+                    selected_provider_name, selected_model = requested.split("/", 1)
+                    selected_provider_name = selected_provider_name.casefold().strip()
+                    selected_model = selected_model.strip()
+                else:
+                    selected_provider_name = provider.name
+                    selected_model = requested
+                if selected_provider_name not in {"ollama", "openai", "anthropic"}:
+                    console.print("[red]Provider must be ollama, openai, or anthropic.[/red]")
                     continue
-                selected_model = message.removeprefix("/model use ").strip()
+                if not valid_model_id(selected_model):
+                    console.print("[red]Model name contains unsupported characters.[/red]")
+                    continue
                 try:
-                    installed = provider.installed_models()
+                    selected_provider = create_named_model_provider(
+                        settings,
+                        selected_provider_name,
+                    )
                 except ProviderConfigurationError as exc:
                     console.print(f"[red]{exc}[/red]")
                     continue
-                if selected_model not in installed:
-                    console.print(
-                        f"[red]{selected_model} is not installed. In another terminal run "
-                        f"`trade models pull {selected_model}`.[/red]"
-                    )
-                    continue
-                if last_runtime_model and last_runtime_model != selected_model:
+                if isinstance(selected_provider, OllamaProvider):
+                    try:
+                        installed = selected_provider.installed_models()
+                    except ProviderConfigurationError as exc:
+                        console.print(f"[red]{exc}[/red]")
+                        continue
+                    if selected_model not in installed:
+                        console.print(
+                            f"[red]{selected_model} is not installed. In another terminal run "
+                            f"`trade models pull {selected_model}`.[/red]"
+                        )
+                        continue
+                    try:
+                        assessment = _assess_ollama_model(
+                            settings,
+                            selected_model,
+                            selected_provider.installed_model_sizes(),
+                            selected_provider.loaded_models(),
+                        )
+                    except ProviderConfigurationError as exc:
+                        console.print(f"[red]{exc}[/red]")
+                        continue
+                    if assessment is not None:
+                        _render_model_assessment(assessment)
+                        if assessment.status == "block":
+                            console.print(
+                                "[red]The session override was not changed. Close memory-heavy "
+                                "applications or choose a smaller installed model.[/red]"
+                            )
+                            continue
+                if isinstance(provider, OllamaProvider) and last_runtime_model:
                     try:
                         _release_local_model(provider, last_runtime_model)
                     except ProviderConfigurationError as exc:
                         console.print(f"[yellow]{exc}[/yellow]")
                     last_runtime_model = None
-                try:
-                    assessment = _assess_ollama_model(
-                        settings,
-                        selected_model,
-                        provider.installed_model_sizes(),
-                        provider.loaded_models(),
-                    )
-                except ProviderConfigurationError as exc:
-                    console.print(f"[red]{exc}[/red]")
-                    continue
-                if assessment is not None:
-                    _render_model_assessment(assessment)
-                    if assessment.status == "block":
-                        console.print(
-                            "[red]The session override was not changed. Close memory-heavy "
-                            "applications or choose a smaller installed model.[/red]"
-                        )
-                        continue
+                provider = selected_provider
+                agent.provider = selected_provider
                 current_model_override = selected_model
                 console.print(
-                    f"[green]This session now uses {selected_model}; /mode still controls "
-                    "reasoning effort.[/green]"
+                    f"[green]This session now uses {provider.name}/{selected_model}; "
+                    "/mode still controls reasoning effort.[/green]"
                 )
                 continue
             chart_effort = {
@@ -5484,6 +5742,7 @@ def _run_chat(
                 db,
                 conversation,
                 message,
+                provider=provider,
                 model=current_model_override,
                 reasoning_effort=chart_effort,
                 clipboard_image=clipboard_image,
@@ -6410,6 +6669,29 @@ def setup_agent(
         console.print("[yellow]Nothing was changed.[/yellow]")
         return
 
+    pending_model_api_key: str | None = None
+    if selected in {"openai", "anthropic"} and not yes:
+        credential_settings = get_settings()
+        try:
+            has_existing_key = model_api_key_configured(
+                credential_settings,
+                provider=selected,  # type: ignore[arg-type]
+            )
+        except SecretBackendError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1) from exc
+        replace_key = not has_existing_key or typer.confirm(
+            f"Replace the saved {selected.title()} API key?",
+            default=False,
+        )
+        if replace_key:
+            pending_model_api_key = typer.prompt(
+                f"{selected.title()} API key",
+                hide_input=True,
+                confirmation_prompt=False,
+            ).strip()
+
+    config_snapshot = snapshot_env_file(resolved_config)
     try:
         values = provider_settings(selected, model)  # type: ignore[arg-type]
         values.update(
@@ -6425,9 +6707,16 @@ def setup_agent(
         if selected_metatrader_platform is not None:
             values["METATRADER_PLATFORM"] = selected_metatrader_platform
         update_env_file(resolved_config, values)
-    except ValueError as exc:
+        if pending_model_api_key is not None:
+            store_model_api_key(
+                credential_settings,
+                provider=selected,  # type: ignore[arg-type]
+                api_key=pending_model_api_key,
+            )
+    except (SecretBackendError, ValueError) as exc:
+        restore_env_file(resolved_config, config_snapshot)
         console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(2) from exc
+        raise typer.Exit(1) from exc
     console.print(f"[green]Configured {selected}.[/green]")
 
     launcher_target = launcher_target_for_interpreter(Path(sys.executable))
@@ -6461,10 +6750,17 @@ def setup_agent(
 
     if selected in {"openai", "anthropic"}:
         key_name = "OPENAI_API_KEY" if selected == "openai" else "ANTHROPIC_API_KEY"
-        console.print(
-            f"[yellow]Cloud sign-in still needs {key_name} through the advanced "
-            "configuration path. Model keys are never written by this wizard.[/yellow]"
-        )
+        if pending_model_api_key is not None:
+            console.print(
+                f"[green]{selected.title()} credential saved in the configured "
+                "credential vault.[/green]"
+            )
+        elif yes:
+            console.print(
+                f"[yellow]Non-interactive setup did not collect {key_name}. Rerun "
+                "`trade setup` interactively or provide it through the process "
+                "environment.[/yellow]"
+            )
     if selected_database != "local":
         console.print(
             f"[yellow]Add the private {selected_database} SQLAlchemy DATABASE_URL to "
@@ -9351,6 +9647,7 @@ def _analyze_chart_command(
     model: str | None,
     reasoning_effort: str,
     captured_clipboard_image: ClipboardImage | None = None,
+    provider: ModelProvider | None = None,
 ) -> None:
     if clipboard == (image is not None):
         console.print(
@@ -9415,10 +9712,10 @@ def _analyze_chart_command(
         if observed_at.tzinfo is None or observed_at.utcoffset() is None:
             console.print("[red]--market-time must include a timezone[/red]")
             raise typer.Exit(2)
-    provider = create_model_provider(settings)
-    destination = _chart_destination(settings, provider)
+    selected_provider = provider or create_model_provider(settings)
+    destination = _chart_destination(settings, selected_provider)
     disclosure = {
-        "provider": provider.name,
+        "provider": selected_provider.name,
         "destination": destination,
         "content_type": content_type,
         "image_bytes": len(image_bytes),
@@ -9437,12 +9734,12 @@ def _analyze_chart_command(
     if reasoning_effort not in {"low", "medium", "high"}:
         console.print("[red]--reasoning-effort must be low, medium, or high.[/red]")
         raise typer.Exit(2)
-    if isinstance(provider, OllamaProvider):
-        selected_model = model or provider.model
+    if isinstance(selected_provider, OllamaProvider):
+        selected_model = model or selected_provider.model
         try:
-            model_sizes = provider.installed_model_sizes()
+            model_sizes = selected_provider.installed_model_sizes()
             installed = frozenset(model_sizes)
-            loaded = provider.loaded_models()
+            loaded = selected_provider.loaded_models()
         except ProviderConfigurationError as exc:
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(1) from exc
@@ -9472,7 +9769,7 @@ def _analyze_chart_command(
             content_type,
             context,
             settings,
-            provider=provider,
+            provider=selected_provider,
             model=model,
             reasoning_effort=reasoning_effort,
         )
@@ -9500,7 +9797,7 @@ def _analyze_chart_command(
             content_type=content_type,
             evidence_directory=settings.evidence_directory,
             analysis=result,
-            provider=provider,
+            provider=selected_provider,
             model=model,
             policy_hash=_runtime_policy().content_hash,
             prompt=SYSTEM_PROMPT,
@@ -9514,9 +9811,9 @@ def _analyze_chart_command(
     _print_model(
         {
             "analysis": result,
-            "provider": provider.name,
-            "model": model or provider.model,
-            "performance": getattr(provider, "last_performance", None),
+            "provider": selected_provider.name,
+            "model": model or selected_provider.model,
+            "performance": getattr(selected_provider, "last_performance", None),
             "evidence_id": evidence.id,
             "analysis_run_id": run.id,
         }

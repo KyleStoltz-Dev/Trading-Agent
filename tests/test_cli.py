@@ -1099,6 +1099,44 @@ def test_setup_accepts_human_provider_names_without_internal_slugs(
     assert "TRADINGVIEW_WEBHOOK_ENABLED=true" in content
 
 
+def test_interactive_cloud_setup_saves_api_key_in_vault_only(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = tmp_path / ".env"
+    launcher = tmp_path / "trade"
+    stored = Mock()
+    monkeypatch.setattr(cli_module, "install_user_launcher", Mock(return_value=launcher))
+    monkeypatch.setattr(cli_module, "shell_path_hint", Mock(return_value=None))
+    monkeypatch.setattr(cli_module, "model_api_key_configured", Mock(return_value=False))
+    monkeypatch.setattr(cli_module, "store_model_api_key", stored)
+
+    result = runner.invoke(
+        app,
+        [
+            "setup",
+            "--provider",
+            "OpenAI",
+            "--database",
+            "local",
+            "--broker",
+            "none",
+            "--news",
+            "none",
+            "--tradingview",
+            "disabled",
+            "--config",
+            str(config),
+        ],
+        input="y\nprivate-openai-key\n",
+    )
+
+    assert result.exit_code == 0
+    assert "private-openai-key" not in config.read_text(encoding="utf-8")
+    assert stored.call_args.kwargs["provider"] == "openai"
+    assert stored.call_args.kwargs["api_key"] == "private-openai-key"
+
+
 def test_setup_typo_returns_suggestion_without_traceback() -> None:
     result = runner.invoke(app, ["setup", "--provider", "opnai", "--yes"])
 

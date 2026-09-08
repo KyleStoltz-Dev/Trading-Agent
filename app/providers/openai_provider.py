@@ -13,6 +13,7 @@ from app.providers.base import (
     record_analysis_usage,
     safe_tool_error,
     track_completion_usage,
+    valid_model_id,
 )
 
 
@@ -31,7 +32,12 @@ def _openai_usage(response: Any) -> TokenUsage:
 class OpenAIProvider:
     name = "openai"
 
-    def __init__(self, settings: Settings, client: Any = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        client: Any = None,
+        api_key: str | None = None,
+    ) -> None:
         self.model = settings.openai_model
         self.last_usage = TokenUsage()
         self.safety_identifier = settings.openai_safety_identifier
@@ -49,8 +55,38 @@ class OpenAIProvider:
                 raise ProviderConfigurationError(
                     'Install the OpenAI adapter with `pip install -e ".[openai]"`'
                 ) from exc
-            client = openai.OpenAI(api_key=secret_value(settings.openai_api_key))
+            client = openai.OpenAI(
+                api_key=api_key or secret_value(settings.openai_api_key)
+            )
         self.client = client
+
+    def available_models(self) -> tuple[str, ...]:
+        """Return text-capable model candidates visible to this API key."""
+        try:
+            response = self.client.models.list()
+        except Exception as exc:
+            raise ProviderConfigurationError("OpenAI model discovery failed") from exc
+        excluded = (
+            "audio",
+            "image",
+            "moderation",
+            "realtime",
+            "search",
+            "transcri",
+            "tts",
+            "whisper",
+        )
+        models = {
+            item.id
+            for item in getattr(response, "data", ())
+            if valid_model_id(getattr(item, "id", None))
+            and item.id.startswith(("gpt-", "o1", "o3", "o4"))
+            and not any(token in item.id.casefold() for token in excluded)
+        }
+        if not valid_model_id(self.model):
+            raise ProviderConfigurationError("Configured OpenAI model name is invalid")
+        models.add(self.model)
+        return tuple(sorted(models))
 
     @track_completion_usage
     @limit_provider_capacity

@@ -2,7 +2,12 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from app.clipboard import ClipboardImage, ClipboardImageNotFoundError
-from app.interactive_input import IMAGE_MARKER, ClipboardChatPrompt
+from app.interactive_input import (
+    IMAGE_MARKER,
+    ClipboardChatPrompt,
+    TerminalMenuOption,
+    choose_terminal_option,
+)
 
 PNG = b"\x89PNG\r\n\x1a\nchart"
 
@@ -70,3 +75,30 @@ def test_clipboard_error_is_shown_without_attaching_an_image() -> None:
 
     assert result.clipboard_image is None
     assert "No copied image was found" in session.toolbar[0][1]
+
+
+def test_terminal_choice_menu_returns_selected_value(monkeypatch) -> None:
+    dialog = Mock()
+    dialog.run.return_value = "openai\0gpt-5.6-terra"
+    factory = Mock(return_value=dialog)
+    monkeypatch.setattr("app.interactive_input.radiolist_dialog", factory)
+
+    selected = choose_terminal_option(
+        "Choose model",
+        "Select a provider and model.",
+        (
+            TerminalMenuOption(
+                value="openai\0gpt-5.6-terra",
+                label="OpenAI · gpt-5.6-terra",
+                description="uses your API key",
+            ),
+        ),
+    )
+
+    assert selected == "openai\0gpt-5.6-terra"
+    assert factory.call_args.kwargs["values"] == [
+        (
+            "openai\0gpt-5.6-terra",
+            "OpenAI · gpt-5.6-terra — uses your API key",
+        )
+    ]

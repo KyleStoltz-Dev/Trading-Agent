@@ -12,6 +12,7 @@ from app.providers.base import (
     record_analysis_usage,
     safe_tool_error,
     track_completion_usage,
+    valid_model_id,
 )
 
 
@@ -65,7 +66,12 @@ def _reasoning_options(reasoning_effort: str) -> dict[str, Any]:
 class AnthropicProvider:
     name = "anthropic"
 
-    def __init__(self, settings: Settings, client: Any = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        client: Any = None,
+        api_key: str | None = None,
+    ) -> None:
         self.model = settings.anthropic_model
         self.last_usage = TokenUsage()
         self._capacity_limiter = provider_capacity_limiter(
@@ -82,8 +88,26 @@ class AnthropicProvider:
                 raise ProviderConfigurationError(
                     'Install the Anthropic adapter with `pip install -e ".[anthropic]"`'
                 ) from exc
-            client = anthropic.Anthropic(api_key=secret_value(settings.anthropic_api_key))
+            client = anthropic.Anthropic(
+                api_key=api_key or secret_value(settings.anthropic_api_key)
+            )
         self.client = client
+
+    def available_models(self) -> tuple[str, ...]:
+        """Return models visible to this API key."""
+        try:
+            response = self.client.models.list(limit=1000)
+        except Exception as exc:
+            raise ProviderConfigurationError("Anthropic model discovery failed") from exc
+        models = {
+            item.id
+            for item in getattr(response, "data", ())
+            if valid_model_id(getattr(item, "id", None))
+        }
+        if not valid_model_id(self.model):
+            raise ProviderConfigurationError("Configured Anthropic model name is invalid")
+        models.add(self.model)
+        return tuple(sorted(models))
 
     @track_completion_usage
     @limit_provider_capacity

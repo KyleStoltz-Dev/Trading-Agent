@@ -16,7 +16,11 @@ from app.connectors.factory import (
 )
 from app.db import inspect_schema
 from app.models import BrokerConnection, TradingAccount
-from app.providers import ProviderConfigurationError, resolve_provider_name
+from app.providers import (
+    ProviderConfigurationError,
+    create_named_model_provider,
+    resolve_provider_name,
+)
 from app.providers.ollama_provider import OllamaProvider
 from app.services.secrets import SecretBackendError, validate_secret_backend
 from app.services.tradingview import trusted_proxy_networks
@@ -494,6 +498,8 @@ def check_health(
                 else settings.anthropic_model
             )
             package_available = importlib.util.find_spec(provider_name) is not None
+            if package_available:
+                create_named_model_provider(settings, provider_name)
             checks.append(
                 HealthCheck(
                     "model_provider",

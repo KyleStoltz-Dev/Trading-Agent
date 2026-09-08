@@ -1,3 +1,4 @@
+import re
 import threading
 from collections.abc import Callable
 from functools import wraps
@@ -8,6 +9,11 @@ from app.costs import TokenUsage
 ToolExecutor = Callable[[str, dict[str, Any]], str]
 _CAPACITY_LOCK = threading.Lock()
 _CAPACITY_LIMITERS: dict[tuple[str, int], threading.BoundedSemaphore] = {}
+MODEL_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:+-]{0,199}")
+
+
+def valid_model_id(value: object) -> bool:
+    return isinstance(value, str) and MODEL_ID_PATTERN.fullmatch(value) is not None
 
 
 def provider_capacity_limiter(

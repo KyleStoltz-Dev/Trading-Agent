@@ -5,6 +5,8 @@ from app.providers.anthropic_provider import AnthropicProvider
 from app.providers.base import ModelProvider, ProviderConfigurationError
 from app.providers.ollama_provider import OllamaProvider
 from app.providers.openai_provider import OpenAIProvider
+from app.services.model_credentials import resolve_model_credentials
+from app.services.secrets import SecretBackendError
 
 
 def resolve_provider_name(settings: Settings) -> str:
@@ -32,16 +34,50 @@ def resolve_provider_name(settings: Settings) -> str:
 
 def create_model_provider(settings: Settings, client: Any = None) -> ModelProvider:
     provider_name = resolve_provider_name(settings)
+    return create_named_model_provider(settings, provider_name, client=client)
+
+
+def create_named_model_provider(
+    settings: Settings,
+    provider_name: str,
+    client: Any = None,
+) -> ModelProvider:
     if provider_name == "openai":
-        if not settings.openai_api_key and client is None:
-            raise ProviderConfigurationError("OPENAI_API_KEY is required for the OpenAI provider")
-        return OpenAIProvider(settings, client=client)
-    if provider_name == "anthropic":
-        if not settings.anthropic_api_key and client is None:
-            raise ProviderConfigurationError(
-                "ANTHROPIC_API_KEY is required for the Anthropic provider"
+        try:
+            credentials = (
+                None
+                if client is not None
+                else resolve_model_credentials(settings, provider="openai")
             )
-        return AnthropicProvider(settings, client=client)
+        except SecretBackendError as exc:
+            raise ProviderConfigurationError(str(exc)) from exc
+        if credentials is None and client is None:
+            raise ProviderConfigurationError(
+                "An OpenAI API key is required; run `trade setup --provider openai`"
+            )
+        return OpenAIProvider(
+            settings,
+            client=client,
+            api_key=credentials.api_key if credentials else None,
+        )
+    if provider_name == "anthropic":
+        try:
+            credentials = (
+                None
+                if client is not None
+                else resolve_model_credentials(settings, provider="anthropic")
+            )
+        except SecretBackendError as exc:
+            raise ProviderConfigurationError(str(exc)) from exc
+        if credentials is None and client is None:
+            raise ProviderConfigurationError(
+                "An Anthropic API key is required; run `trade setup --provider anthropic`"
+            )
+        return AnthropicProvider(
+            settings,
+            client=client,
+            api_key=credentials.api_key if credentials else None,
+        )
     if provider_name == "ollama":
         return OllamaProvider(settings, client=client)
     raise ProviderConfigurationError(f"Unsupported model provider: {provider_name}")

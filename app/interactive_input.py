@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.shortcuts import radiolist_dialog
 from prompt_toolkit.styles import Style
 
 from app.clipboard import ClipboardImage, ClipboardImageError, read_clipboard_image
@@ -16,6 +17,34 @@ IMAGE_MARKER = "[Image #1]"
 class ChatPromptResult:
     text: str
     clipboard_image: ClipboardImage | None
+
+
+@dataclass(frozen=True)
+class TerminalMenuOption:
+    value: str
+    label: str
+    description: str = ""
+
+
+def choose_terminal_option(
+    title: str,
+    text: str,
+    options: tuple[TerminalMenuOption, ...],
+) -> str | None:
+    """Show an arrow-key terminal selector and return the selected value."""
+    if not options:
+        return None
+    values = [
+        (option.value, f"{option.label} — {option.description}".rstrip(" —"))
+        for option in options
+    ]
+    return radiolist_dialog(
+        title=title,
+        text=text,
+        values=values,
+        ok_text="Use selection",
+        cancel_text="Cancel",
+    ).run()
 
 
 class ClipboardChatPrompt:
