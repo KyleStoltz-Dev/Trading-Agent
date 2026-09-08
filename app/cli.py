@@ -5076,6 +5076,11 @@ def _offer_starter_profile(db, settings: Settings, *, scope: RequestScope) -> bo
     return False
 
 
+def _matches_chat_command(message: str, command: str) -> bool:
+    """Match a slash command as a complete token, not as a string prefix."""
+    return bool(message) and message.split(maxsplit=1)[0] == command
+
+
 def _run_chat(
     session_reference: str | None,
     new_session: bool,
@@ -5614,7 +5619,7 @@ def _run_chat(
                 )
                 _render_startup_memory(startup_memory)
                 continue
-            if message.startswith("/mode"):
+            if _matches_chat_command(message, "/mode"):
                 requested_mode = message.removeprefix("/mode").strip()
                 if requested_mode not in {"auto", "economy", "balanced", "deep"}:
                     console.print("[red]Use /mode auto|economy|balanced|deep[/red]")

@@ -8,6 +8,24 @@ from app.providers.base import ProviderConfigurationError
 from app.services.model_selection import SessionModelController
 
 
+@pytest.mark.parametrize(
+    ("message", "matches_mode"),
+    (
+        ("/mode", True),
+        ("/mode deep", True),
+        ("/model", False),
+        ("/model use openai/gpt-5.6-sol", False),
+        ("/modeled", False),
+        ("", False),
+    ),
+)
+def test_mode_command_matches_only_the_complete_command_token(
+    message: str,
+    matches_mode: bool,
+) -> None:
+    assert cli_module._matches_chat_command(message, "/mode") is matches_mode
+
+
 class FakeProvider:
     def __init__(self, name: str, model: str, models: tuple[str, ...] = ()) -> None:
         self.name = name
