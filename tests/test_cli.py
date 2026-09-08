@@ -567,6 +567,35 @@ def test_chat_clipboard_chart_failure_stays_in_chat(monkeypatch) -> None:
     assert "conversation remained open" in add_turn.call_args_list[-1].args[3]
 
 
+def test_chat_ctrl_v_uses_the_exact_attached_image(monkeypatch) -> None:
+    conversation = SimpleNamespace(
+        workspace_id=TEST_SCOPE.workspace_id,
+        account_id=TEST_SCOPE.account_id,
+        name="chart-review",
+        active_playbook_version_id=None,
+    )
+    image = cli_module.ClipboardImage(
+        data=b"\x89PNG\r\n\x1a\nchart",
+        content_type="image/png",
+        source="macOS clipboard",
+    )
+    analyze = Mock()
+    monkeypatch.setattr(cli_module, "add_turn", Mock())
+    monkeypatch.setattr(cli_module, "_analyze_chart_command", analyze)
+
+    assert cli_module._handle_chat_clipboard_chart_intent(
+        Mock(),
+        conversation,
+        f"{cli_module.IMAGE_MARKER} clean distribution during New York",
+        model=None,
+        reasoning_effort="medium",
+        clipboard_image=image,
+    )
+
+    assert analyze.call_args.kwargs["captured_clipboard_image"] is image
+    assert analyze.call_args.kwargs["context"] == "clean distribution during New York"
+
+
 def test_chat_trade_intent_enables_live_market_when_broker_ready(
     monkeypatch,
 ) -> None:

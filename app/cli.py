@@ -32,6 +32,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.clipboard import (
+    ClipboardImage,
     ClipboardImageError,
     read_clipboard_image,
 )
@@ -74,6 +75,7 @@ from app.db import (
     upgrade_database,
 )
 from app.integration_catalog import integration_options
+from app.interactive_input import IMAGE_MARKER, ClipboardChatPrompt
 from app.models import (
     ApiPrincipal,
     BrokerConnection,
@@ -4566,9 +4568,10 @@ def _handle_chat_clipboard_chart_intent(
     *,
     model: str | None,
     reasoning_effort: str,
+    clipboard_image: ClipboardImage | None = None,
 ) -> bool:
     """Analyze a copied chart without making the trader leave interactive chat."""
-    if not _detect_clipboard_chart_intent(message):
+    if clipboard_image is None and not _detect_clipboard_chart_intent(message):
         return False
 
     scope = RequestScope(
@@ -4588,19 +4591,35 @@ def _handle_chat_clipboard_chart_intent(
         "[dim]Reading the copied image, checking what is visible, and preparing "
         "a chart review…[/dim]"
     )
+    chart_context = message.replace(IMAGE_MARKER, "").strip() or "Analyze this copied chart."
     try:
-        chart(
-            image=None,
-            clipboard=True,
-            context=message,
-            instrument=None,
-            venue=None,
-            timeframe=None,
-            market_time=None,
-            trade_plan=None,
-            model=model,
-            reasoning_effort=reasoning_effort,
-        )
+        if clipboard_image is None:
+            chart(
+                image=None,
+                clipboard=True,
+                context=chart_context,
+                instrument=None,
+                venue=None,
+                timeframe=None,
+                market_time=None,
+                trade_plan=None,
+                model=model,
+                reasoning_effort=reasoning_effort,
+            )
+        else:
+            _analyze_chart_command(
+                image=None,
+                clipboard=True,
+                captured_clipboard_image=clipboard_image,
+                context=chart_context,
+                instrument=None,
+                venue=None,
+                timeframe=None,
+                market_time=None,
+                trade_plan=None,
+                model=model,
+                reasoning_effort=reasoning_effort,
+            )
     except typer.Exit as exc:
         add_turn(
             db,
@@ -5087,11 +5106,18 @@ def _run_chat(
                 "checking a chart, evaluating a trade, or reviewing results."
             )
         console.print(
-            "[dim]Type naturally · /help for commands · /examples for ideas · "
+            "[dim]Type naturally · Ctrl-V attaches a screenshot · /help for commands · "
+            "/examples for ideas · "
             "/exit to leave[/dim]\n"
         )
         queued_message = _prompt_startup_action()
+        clipboard_prompt = (
+            ClipboardChatPrompt()
+            if sys.stdin.isatty() and sys.stdout.isatty()
+            else None
+        )
         while True:
+            clipboard_image = None
             if queued_message is not None:
                 message = queued_message
                 queued_message = None
@@ -5101,9 +5127,14 @@ def _run_chat(
                 )
             else:
                 try:
-                    message = console.input(
-                        "[bold cyan]You[/bold cyan] [bold]❯[/bold] "
-                    ).strip()
+                    if clipboard_prompt is None:
+                        message = console.input(
+                            "[bold cyan]You[/bold cyan] [bold]❯[/bold] "
+                        ).strip()
+                    else:
+                        prompt_result = clipboard_prompt.read()
+                        message = prompt_result.text
+                        clipboard_image = prompt_result.clipboard_image
                 except (EOFError, KeyboardInterrupt):
                     console.print()
                     break
@@ -5136,8 +5167,8 @@ def _run_chat(
                     "/model unload · release this session's local model from memory\n"
                     "/develop <change> · hand a software change to the coding agent\n"
                     "Clear software-change requests also offer a development handoff.\n"
-                    "Everything else is natural language. Copy a chart image, then say "
-                    "'analyze my copied chart'—no file path needed."
+                    "Everything else is natural language. Press Ctrl-V to attach a copied "
+                    "screenshot, or say 'analyze my copied chart'—no file path needed."
                 )
                 continue
             if message == "/onboard":
@@ -5455,6 +5486,7 @@ def _run_chat(
                 message,
                 model=current_model_override,
                 reasoning_effort=chart_effort,
+                clipboard_image=clipboard_image,
             ):
                 continue
             if _handle_chat_preflight_intent(db, conversation, message):
@@ -9306,52 +9338,20 @@ def manage_trade(
         )
 
 
-@app.command(rich_help_panel="Core advisor workflow")
-def chart(
-    image: Annotated[
-        Path | None,
-        typer.Argument(
-            exists=True,
-            dir_okay=False,
-            help="PNG, JPEG, or WebP chart path. Omit when using --clipboard.",
-        ),
-    ] = None,
-    clipboard: Annotated[
-        bool,
-        typer.Option(
-            "--clipboard",
-            help="Read an image directly from the system clipboard; clipboard text is ignored.",
-        ),
-    ] = False,
-    context: Annotated[
-        str,
-        typer.Option(help="Known context; never inferred from the image."),
-    ] = "",
-    instrument: Annotated[str | None, typer.Option()] = None,
-    venue: Annotated[str | None, typer.Option()] = None,
-    timeframe: Annotated[str | None, typer.Option()] = None,
-    market_time: Annotated[
-        str | None,
-        typer.Option(help="Timezone-aware ISO market time; omit when unknown."),
-    ] = None,
-    trade_plan: Annotated[
-        str | None,
-        typer.Option(
-            "--trade-plan",
-            "--trade-plan-id",
-            help="Human trade reference or internal UUID.",
-        ),
-    ] = None,
-    model: Annotated[
-        str | None,
-        typer.Option(help="One-call model override; useful for local vision models."),
-    ] = None,
-    reasoning_effort: Annotated[
-        str,
-        typer.Option(help="low, medium, or high."),
-    ] = "medium",
+def _analyze_chart_command(
+    *,
+    image: Path | None,
+    clipboard: bool,
+    context: str,
+    instrument: str | None,
+    venue: str | None,
+    timeframe: str | None,
+    market_time: str | None,
+    trade_plan: str | None,
+    model: str | None,
+    reasoning_effort: str,
+    captured_clipboard_image: ClipboardImage | None = None,
 ) -> None:
-    """Analyze a chart screenshot from a path or the system clipboard."""
     if clipboard == (image is not None):
         console.print(
             "[red]Choose exactly one chart source: provide an image path or use "
@@ -9378,11 +9378,13 @@ def chart(
     settings = get_settings()
     resolved_image: Path | None = None
     if clipboard:
-        try:
-            clipboard_image = read_clipboard_image()
-        except ClipboardImageError as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(2) from exc
+        clipboard_image = captured_clipboard_image
+        if clipboard_image is None:
+            try:
+                clipboard_image = read_clipboard_image()
+            except ClipboardImageError as exc:
+                console.print(f"[red]{exc}[/red]")
+                raise typer.Exit(2) from exc
         image_bytes = clipboard_image.data
         content_type = clipboard_image.content_type
         source_label = clipboard_image.source
@@ -9518,6 +9520,67 @@ def chart(
             "evidence_id": evidence.id,
             "analysis_run_id": run.id,
         }
+    )
+
+
+@app.command(rich_help_panel="Core advisor workflow")
+def chart(
+    image: Annotated[
+        Path | None,
+        typer.Argument(
+            exists=True,
+            dir_okay=False,
+            help="PNG, JPEG, or WebP chart path. Omit when using --clipboard.",
+        ),
+    ] = None,
+    clipboard: Annotated[
+        bool,
+        typer.Option(
+            "--clipboard",
+            help="Read an image directly from the system clipboard; clipboard text is ignored.",
+        ),
+    ] = False,
+    context: Annotated[
+        str,
+        typer.Option(help="Known context; never inferred from the image."),
+    ] = "",
+    instrument: Annotated[str | None, typer.Option()] = None,
+    venue: Annotated[str | None, typer.Option()] = None,
+    timeframe: Annotated[str | None, typer.Option()] = None,
+    market_time: Annotated[
+        str | None,
+        typer.Option(help="Timezone-aware ISO market time; omit when unknown."),
+    ] = None,
+    trade_plan: Annotated[
+        str | None,
+        typer.Option(
+            "--trade-plan",
+            "--trade-plan-id",
+            help="Human trade reference or internal UUID.",
+        ),
+    ] = None,
+    model: Annotated[
+        str | None,
+        typer.Option(help="One-call model override; useful for local vision models."),
+    ] = None,
+    reasoning_effort: Annotated[
+        str,
+        typer.Option(help="low, medium, or high."),
+    ] = "medium",
+) -> None:
+    """Analyze a chart screenshot from a path or the system clipboard."""
+    _analyze_chart_command(
+        image=image,
+        clipboard=clipboard,
+        captured_clipboard_image=None,
+        context=context,
+        instrument=instrument,
+        venue=venue,
+        timeframe=timeframe,
+        market_time=market_time,
+        trade_plan=trade_plan,
+        model=model,
+        reasoning_effort=reasoning_effort,
     )
 
 
