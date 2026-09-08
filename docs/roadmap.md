@@ -29,6 +29,8 @@ met.
 ### Interaction and provider layer
 
 - Interactive Typer/Rich CLI with named sessions.
+- One-step first-run setup with private defaults and a conservative starter profile; the
+  underlying settings file is managed for beginners and contains no collected secrets.
 - Shared application services for CLI and FastAPI.
 - OpenAI, Anthropic, and local Ollama provider adapters.
 - Model routing, cost estimates, and memory-pressure-aware local-model selection.
@@ -82,6 +84,26 @@ The model can propose a hypothesis. It cannot promote one to an edge.
 
 ## Near-term priorities
 
+### Beginner-first setup and connection center
+
+Implementation checkpoint (2026-09-03): running `trade` without an existing configuration
+offers one recommended setup instead of requiring environment-file editing. It configures a
+local model and database, enables the key-free calendar, leaves broker/execution access off,
+and offers a one-click conservative profile. Advanced setup and environment overrides remain
+available without becoming the default product experience.
+
+Next requirements:
+
+- move cloud-model credentials from manual configuration into the operating-system credential
+  vault or a hosted secret manager;
+- expose broker, news, model, and profile changes through one in-agent connection center;
+- validate each connection immediately and explain failures without stack traces or internal
+  setting names;
+- add an installer-owned PostgreSQL path so beginners never need to create or remember a
+  database password;
+- make every optional integration skippable without blocking chat, journaling, or chart review;
+- retain environment variables only as an advanced deployment override.
+
 ### 0. Stabilize the current baseline
 
 Before implementing more product capabilities, turn the current broad passing change set into
@@ -118,6 +140,15 @@ pre-session
   → daily/weekly reflection
 ```
 
+Implementation checkpoint (2026-09-02): named conversations now resume the most recent
+recognized lifecycle stage and instrument. For instrument-specific analysis, the host assembles
+one read-only context pack before the model responds: active plan, broker account and quote,
+context/trigger candle features, linked chart evidence, nearby economic events, and recent
+comparable plans. Chart evidence can be labeled by lifecycle stage and linked to the active plan;
+trader corrections are retained against the exact screenshot without changing strategy rules.
+The remaining work is a fully persisted lifecycle state machine spanning no-trades, management,
+post-trade review, and daily/weekly reflection.
+
 Requirements:
 
 - checkpoint and resume without losing exact strategy scope;
@@ -133,6 +164,12 @@ Make the resumable decision lifecycle the primary product experience instead of 
 the trader to navigate many independent command groups. Preserve existing capabilities and
 standalone commands as compatibility and recovery paths while presenting six coherent
 user-facing areas:
+
+Implementation checkpoint (2026-09-02): running `trade` opens the conversational advisor,
+offers three plain-language starting actions, resumes recognized prior work, routes explicit
+entry decisions into deterministic preflight, and groups expert commands by customer workflow
+or administration purpose. Standalone commands remain available. The larger module split and
+one shared application-command boundary remain open.
 
 ```text
 trade          resume the current trading workflow

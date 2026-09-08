@@ -1,0 +1,134 @@
+{
+  "methodology": "Personal multi-timeframe price action with simplified Wyckoff accumulation and distribution",
+  "objective": "Test whether predetermined higher-timeframe context plus observable lower-timeframe accumulation or distribution, break of order flow, and mitigation produces positive expectancy after costs.",
+  "requirements": [
+    "State the narrative timeframe, setup timeframe, execution timeframe, direction, invalidation, and target before entry.",
+    "Mark the relevant range, point of interest, and liquidity level before using them to justify an entry.",
+    "Keep chart observations separate from interpretations about accumulation, distribution, manipulation, or participant intent.",
+    "Choose one execution model before price reaches the entry: break-of-order-flow close, departure-push Fibonacci mitigation, schematic-range Fibonacci mitigation, or direct rejection.",
+    "For Fibonacci mitigation, record whether the anchors span the break-producing push or the entire schematic and whether the selected retracement is 50 or 80 percent.",
+    "Record every qualifying occurrence including valid setups that were not traded."
+  ],
+  "exclusions": [
+    "Do not search progressively lower timeframes merely to find a confirming pattern.",
+    "Do not change the selected range, Fibonacci anchors, retracement level, liquidity target, stop, or setup classification after seeing the outcome.",
+    "Do not replace a missed 80 percent mitigation with a retrospective 50 percent or break-close entry.",
+    "Do not compress the structural stop solely to manufacture the minimum reward-to-risk ratio.",
+    "Do not treat a liquidity sweep, imbalance, candle pattern, or volume-profile level alone as proof of direction.",
+    "Do not combine statistics from different setup or execution types."
+  ],
+  "context": {
+    "required": [
+      "Daily and four-hour charts establish broad narrative, external ranges, supply or demand, and major objectives.",
+      "One-hour and fifteen-minute charts identify active delivery, pullbacks, continuation ranges, and setup location.",
+      "Five-minute and one-minute charts confirm and execute; they do not independently override missing higher-timeframe context.",
+      "Classify each opportunity as higher-timeframe aligned or countertrend, and as inside or outside a predetermined point of interest.",
+      "Classify liquidity separately as previous day, previous week, previous month, session, equal-level, swing, or trendline liquidity."
+    ],
+    "exclusions": [
+      "No trade when the relevant timeframe hierarchy and structural invalidation cannot be stated clearly.",
+      "No countertrend trade without lower-timeframe confirmation or an explicitly separate reduced-risk direct-rejection model."
+    ]
+  },
+  "setups": [
+    {
+      "key": "poi_three_drive_reversal",
+      "requirements": [
+        "Price reaches a point of interest marked before arrival.",
+        "Accumulation or distribution contains repeated tests or drives; three drives and a final liquidity sweep increase quality but are not mandatory.",
+        "Price closes through the relevant internal swing to create a break of order flow in the intended direction.",
+        "The chosen execution model and its exact entry are recorded before the entry becomes available.",
+        "The nearest predetermined target provides at least the minimum planned reward-to-risk ratio."
+      ],
+      "exclusions": [
+        "The point of interest is selected after the reaction.",
+        "The protected structural level has already invalidated.",
+        "The break of order flow exists only on an irrelevant smaller timeframe."
+      ]
+    },
+    {
+      "key": "trend_reaccumulation_continuation",
+      "requirements": [
+        "The higher-timeframe narrative and controlling structure support continuation.",
+        "Price retraces into a predetermined one-hour, fifteen-minute, or five-minute continuation range.",
+        "Lower-timeframe reaccumulation or redistribution produces a break of order flow in the continuation direction.",
+        "The chosen execution model and its exact entry are recorded before the entry becomes available.",
+        "No opposing point of interest blocks the minimum planned reward-to-risk target."
+      ],
+      "exclusions": [
+        "The controlling protected swing has invalidated.",
+        "A small execution-timeframe shift is the only evidence against strong controlling-timeframe delivery."
+      ]
+    },
+    {
+      "key": "session_liquidity_reversal",
+      "requirements": [
+        "Price sweeps a level marked beforehand such as a previous day, week, month, or session high or low.",
+        "Price fails to sustain acceptance beyond the swept level.",
+        "Accumulation or distribution and a break of order flow confirm the reversal.",
+        "The missing higher-timeframe point of interest is recorded and risk remains below the strategy maximum."
+      ],
+      "exclusions": [
+        "The sweep alone is used as an entry.",
+        "Price accepts and consolidates beyond the swept level without a confirming reversal."
+      ]
+    },
+    {
+      "key": "direct_mitigation_rejection",
+      "requirements": [
+        "The point of interest or source range was marked before the first return.",
+        "The first mitigation produces an observable rejection candle or immediate directional displacement.",
+        "The trade is classified separately from accumulation and break-of-order-flow entries.",
+        "Reduced risk is used because the complete confirmation sequence is absent."
+      ],
+      "exclusions": [
+        "Price consolidates through the point of interest.",
+        "The required stop sits inside ordinary spread or price noise.",
+        "The setup is retrospectively reclassified as a confirmed accumulation or distribution entry."
+      ]
+    }
+  ],
+  "allowed_vocabulary": [
+    "accumulation",
+    "reaccumulation",
+    "distribution",
+    "redistribution",
+    "three drives",
+    "upthrust",
+    "break of order flow",
+    "BoOF",
+    "mitigation",
+    "imbalance",
+    "displacement",
+    "point of interest",
+    "POI",
+    "premium",
+    "discount",
+    "PDH",
+    "PDL",
+    "PWH",
+    "PWL",
+    "PMH",
+    "PML",
+    "session liquidity",
+    "equal highs",
+    "equal lows",
+    "volume profile",
+    "point of control"
+  ],
+  "forbidden_cross_strategy_concepts": [],
+  "mindset": {
+    "caution_emotion_tags": [
+      "uncertain",
+      "overwhelmed",
+      "forcing",
+      "chasing",
+      "fear of missing out"
+    ]
+  },
+  "risk": {
+    "maximum_risk_percent": 1.0,
+    "minimum_planned_r": 3.0,
+    "human_confirms_every_trade": true
+  }
+}

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.config import LEGACY_ENV_BACKEND, Settings, secret_value
 from app.connectors.factory import (
     create_broker_connector,
+    create_market_data_connector,
     create_metatrader_connector,
     create_news_connector,
     create_oanda_connector,
@@ -277,6 +278,40 @@ def integration_verifications(
                 )
             )
             continue
+        if option.key in {"kraken", "alpaca"}:
+            configuration: VerificationState = (
+                "configured"
+                if option.key == "kraken"
+                else _credential_state(
+                    secret_value(settings.alpaca_api_key_id),
+                    secret_value(settings.alpaca_api_secret_key),
+                )
+            )
+            reports.append(
+                IntegrationVerification(
+                    key=option.key,
+                    kind=option.kind,
+                    name=option.name,
+                    implementation="implemented",
+                    configuration=configuration,
+                    reachability="not tested",
+                    evidence="not observed",
+                    last_success_at=None,
+                    detail=(
+                        "Public read-only crypto market data is available without an API key."
+                        if option.key == "kraken"
+                        else "Read-only market-data credentials are complete."
+                        if configuration == "configured"
+                        else "Alpaca market-data credentials are not configured."
+                    ),
+                    next_action=(
+                        "Run `trade integrations --verify-live` to test read-only access."
+                        if configuration == "configured"
+                        else None
+                    ),
+                )
+            )
+            continue
         if option.key in {"trading-economics", "forex-factory"}:
             configuration = (
                 _credential_state(secret_value(settings.trading_economics_api_key))
@@ -514,6 +549,20 @@ async def verify_live_integrations(
                         if report.key == "trading-economics"
                         else ". Forex Factory does not provide a headline API."
                     )
+                )
+            elif report.key in {"kraken", "alpaca"}:
+                connector = create_market_data_connector(settings, report.key)
+                instrument = "BTC_USD" if report.key == "kraken" else "AAPL"
+                try:
+                    quote, candles = await asyncio.gather(
+                        connector.latest_quote(instrument),
+                        connector.candles(instrument, "H1", count=1),
+                    )
+                finally:
+                    await connector.aclose()
+                detail = (
+                    f"Read-only quote and candle endpoints responded for {quote.instrument}; "
+                    f"{len(candles)} candle(s) returned."
                 )
             elif report.key == "brave":
                 response = await asyncio.to_thread(

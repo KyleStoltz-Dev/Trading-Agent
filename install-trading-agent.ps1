@@ -47,7 +47,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "Could not synchronize the locked Trading Agent environment."
 }
 if (-not $NoSetup) {
-    & ".venv\Scripts\trade.exe" setup
+    & ".venv\Scripts\trade.exe" setup --yes
     if ($LASTEXITCODE -ne 0) {
         throw "Trading Agent setup did not complete."
     }

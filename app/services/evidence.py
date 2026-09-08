@@ -19,6 +19,12 @@ EXTENSIONS = {
     "image/png": ".png",
     "image/webp": ".webp",
 }
+CHART_FEEDBACK_CATEGORIES = {
+    "wrong_phase",
+    "correct_observation",
+    "not_my_strategy",
+    "other",
+}
 
 
 def _sha256(value: bytes) -> str:
@@ -105,6 +111,7 @@ def record_chart_analysis(
     venue: str | None,
     timeframe: str | None,
     trade_plan_id: uuid.UUID | None = None,
+    evidence_stage: str | None = None,
 ) -> tuple[EvidenceItem, AnalysisRun]:
     validate_scope(db, scope)
     if trade_plan_id is not None:
@@ -149,10 +156,31 @@ def record_chart_analysis(
                 "instrument": instrument,
                 "venue": venue,
                 "timeframe": timeframe,
+                "stage": evidence_stage,
             },
         )
         db.add(evidence)
         db.flush()
+    else:
+        if (
+            trade_plan_id is not None
+            and evidence.trade_plan_id is not None
+            and evidence.trade_plan_id != trade_plan_id
+        ):
+            raise ValueError("this chart is already attached to a different trade plan")
+        if trade_plan_id is not None and evidence.trade_plan_id is None:
+            evidence.trade_plan_id = trade_plan_id
+        metadata = dict(evidence.metadata_json or {})
+        updates = {
+            "instrument": instrument,
+            "venue": venue,
+            "timeframe": timeframe,
+            "stage": evidence_stage,
+        }
+        for key, value in updates.items():
+            if value is not None:
+                metadata[key] = value
+        evidence.metadata_json = metadata
 
     output = analysis.model_dump(mode="json")
     output_bytes = json.dumps(output, sort_keys=True, separators=(",", ":")).encode()
@@ -204,3 +232,52 @@ def record_chart_analysis(
     db.refresh(evidence)
     db.refresh(run)
     return evidence, run
+
+
+def record_chart_feedback(
+    db: Session,
+    *,
+    scope: RequestScope,
+    evidence_reference: str,
+    category: str,
+    feedback: str,
+) -> Observation:
+    """Attach one trader correction to exact chart evidence without changing rules."""
+    validate_scope(db, scope)
+    normalized_category = category.strip().lower()
+    if normalized_category not in CHART_FEEDBACK_CATEGORIES:
+        raise ValueError("unsupported chart feedback category")
+    normalized_feedback = " ".join(feedback.split())
+    if not normalized_feedback:
+        raise ValueError("chart feedback cannot be empty")
+    if len(normalized_feedback) > 2000:
+        raise ValueError("chart feedback cannot exceed 2000 characters")
+    raw_reference = evidence_reference.removeprefix("evidence:")
+    try:
+        evidence_id = uuid.UUID(raw_reference)
+    except ValueError as exc:
+        raise ValueError("chart evidence reference is invalid") from exc
+    evidence = db.scalar(
+        select(EvidenceItem).where(
+            EvidenceItem.workspace_id == scope.workspace_id,
+            EvidenceItem.account_id == scope.account_id,
+            EvidenceItem.id == evidence_id,
+            EvidenceItem.evidence_type == "chart",
+        )
+    )
+    if evidence is None:
+        raise LookupError("chart evidence was not found in the selected account")
+    observation = Observation(
+        workspace_id=scope.workspace_id,
+        account_id=scope.account_id,
+        trade_plan_id=evidence.trade_plan_id,
+        evidence_id=evidence.id,
+        kind="confirmation",
+        text=f"{normalized_category}: {normalized_feedback}",
+        actor_type="human",
+        observed_at=datetime.now(UTC),
+    )
+    db.add(observation)
+    db.commit()
+    db.refresh(observation)
+    return observation

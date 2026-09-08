@@ -49,6 +49,26 @@ class TradingAccountRead(BaseModel):
     created_at: datetime
 
 
+class BrokerPositionRead(BaseModel):
+    external_id: str
+    instrument: str
+    net_quantity: Decimal
+    average_price: Decimal | None
+    unrealized_pnl: Decimal | None
+    market_time: datetime
+
+
+class BrokerStateRead(BaseModel):
+    provider: str
+    currency: str
+    balance: Decimal
+    equity: Decimal
+    margin_used: Decimal | None
+    margin_available: Decimal | None
+    retrieved_at: datetime
+    positions: list[BrokerPositionRead]
+
+
 class TradingViewAlertCreate(BaseModel):
     """Strict TradingView payload; every text field remains untrusted evidence."""
 

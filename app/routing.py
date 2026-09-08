@@ -33,6 +33,9 @@ ROUTINE_PATTERNS = (
     r"\bsummarize (?:this|these)\b",
     r"\blist (?:my )?(?:trades|plans|sessions)\b",
     r"\bhealth\b",
+    r"^\s*(?:explain|define|what (?:is|are)|what do you know about)\s+"
+    r"(?:wyckoff|ict|smc|smart money|market (?:model|models|regime|regimes))\b",
+    r"^\s*what other market models\b",
 )
 
 

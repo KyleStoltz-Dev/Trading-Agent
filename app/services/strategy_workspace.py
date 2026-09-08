@@ -1,6 +1,8 @@
+import json
 import re
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -32,6 +34,31 @@ from app.services.workspaces import (
 
 SEARCH_TERM = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{1,63}")
 KNOWLEDGE_REFERENCE = re.compile(r"^knowledge-([0-9a-f]{12})$")
+
+
+def list_local_strategy_templates() -> list[dict[str, str]]:
+    """List bounded code-owned drafts without treating them as saved strategies."""
+    directory = Path(__file__).parents[2] / "examples" / "strategies"
+    templates: list[dict[str, str]] = []
+    if not directory.is_dir():
+        return templates
+    for path in sorted(directory.glob("*.json"))[:20]:
+        try:
+            definition = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(definition, dict):
+            continue
+        templates.append(
+            {
+                "name": path.stem,
+                "methodology": str(definition.get("methodology") or "Unspecified"),
+                "objective": str(definition.get("objective") or "Unspecified"),
+                "path": str(path.relative_to(Path(__file__).parents[2])),
+                "status": "draft_not_active",
+            }
+        )
+    return templates
 
 
 def get_trader_profile(

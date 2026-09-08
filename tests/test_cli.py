@@ -65,6 +65,233 @@ def test_help_lists_interactive_and_fallback_commands() -> None:
     ):
         assert command in result.stdout
 
+    assert "Resumable discretionary workflow helpers" not in result.stdout
+    assert "Run without a command to start the conversational trade advisor" in result.stdout
+    for panel in (
+        "Core advisor workflow",
+        "Daily records and data",
+        "Strategy, research, and learning",
+        "Setup and administration",
+    ):
+        assert panel in result.stdout
+
+
+def test_cli_entrypoint_hides_unexpected_tracebacks(monkeypatch) -> None:
+    output = StringIO()
+    monkeypatch.setattr(cli_module, "console", Console(file=output, force_terminal=False))
+    monkeypatch.setattr(
+        cli_module,
+        "app",
+        Mock(side_effect=RuntimeError("private implementation detail")),
+    )
+
+    with pytest.raises(SystemExit) as stopped:
+        cli_module.run()
+
+    assert stopped.value.code == 1
+    rendered = output.getvalue()
+    assert "could not complete that command" in rendered
+    assert "RuntimeError" in rendered
+    assert "private implementation detail" not in rendered
+    assert "Traceback" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("selection", "expected"),
+    (
+        ("1", "Show me today's economic news and an operational day-start summary."),
+        ("2", "Show my live broker status and whether I'm ready to size a trade now."),
+        ("3", "Help me build a New York premarket plan for XAUUSD."),
+        ("", None),
+    ),
+)
+def test_startup_quick_actions_translate_to_natural_requests(
+    monkeypatch,
+    selection,
+    expected,
+) -> None:
+    monkeypatch.setattr(cli_module.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr(cli_module.console, "input", Mock(return_value=selection))
+
+    assert cli_module._prompt_startup_action() == expected
+
+
+def test_first_run_applies_recommended_managed_settings(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / ".env"
+    written = Mock()
+    monkeypatch.setattr(cli_module, "environment_files", Mock(return_value=()))
+    monkeypatch.setattr(cli_module, "default_config_path", Mock(return_value=config_path))
+    monkeypatch.setattr(cli_module, "update_env_file", written)
+    monkeypatch.setattr(cli_module.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr(cli_module.console, "input", Mock(return_value=""))
+    monkeypatch.setattr(cli_module.get_settings, "cache_clear", Mock())
+
+    assert cli_module._run_first_time_setup() is True
+
+    assert written.call_args.args[0] == config_path
+    values = written.call_args.args[1]
+    assert values["MODEL_PROVIDER"] == "ollama"
+    assert values["NEWS_PROVIDER"] == "forex-factory"
+    assert values["BROKER_PROVIDER"] == "none"
+    assert not any("KEY" in key or "TOKEN" in key for key in values)
+
+
+def test_first_run_can_exit_without_writing(monkeypatch) -> None:
+    written = Mock()
+    monkeypatch.setattr(cli_module, "environment_files", Mock(return_value=()))
+    monkeypatch.setattr(cli_module, "update_env_file", written)
+    monkeypatch.setattr(cli_module.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr(cli_module.console, "input", Mock(return_value="3"))
+
+    assert cli_module._run_first_time_setup() is False
+    written.assert_not_called()
+
+
+def test_first_run_does_not_treat_a_missing_explicit_config_as_configured(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "missing" / ".env"
+    written = Mock()
+    monkeypatch.setattr(
+        cli_module,
+        "environment_files",
+        Mock(return_value=(config_path,)),
+    )
+    monkeypatch.setattr(cli_module, "default_config_path", Mock(return_value=config_path))
+    monkeypatch.setattr(cli_module, "update_env_file", written)
+    monkeypatch.setattr(cli_module.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr(cli_module.console, "input", Mock(return_value=""))
+    monkeypatch.setattr(cli_module.get_settings, "cache_clear", Mock())
+
+    assert cli_module._run_first_time_setup() is True
+    written.assert_called_once()
+
+
+def test_automatic_setup_fails_when_required_ollama_is_missing(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / ".env"
+    monkeypatch.setattr(cli_module.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(
+        cli_module,
+        "install_user_launcher",
+        Mock(side_effect=FileNotFoundError("test launcher unavailable")),
+    )
+
+    result = runner.invoke(
+        app,
+        ["setup", "--yes", "--config", str(config_path)],
+    )
+
+    assert result.exit_code == 1
+    assert "Install Ollama" in result.output
+    assert config_path.is_file()
+
+
+def test_starter_profile_uses_safe_defaults_and_commits(monkeypatch) -> None:
+    database = Mock()
+    settings = Settings(maximum_trade_risk_percent=1)
+    profile = SimpleNamespace(id=uuid.uuid4())
+    upsert = Mock(return_value=profile)
+    curriculum = Mock()
+    update = Mock()
+    monkeypatch.setattr(cli_module, "upsert_trader_profile", upsert)
+    monkeypatch.setattr(cli_module, "configure_learning_curriculum", curriculum)
+    monkeypatch.setattr(cli_module, "update_env_file", update)
+    monkeypatch.setattr(cli_module, "snapshot_env_file", Mock(return_value=None))
+
+    cli_module._create_starter_profile(database, settings, scope=TEST_SCOPE)
+
+    request = upsert.call_args.args[1]
+    assert request.experience_level == "beginner"
+    assert request.markets == ["EURUSD"]
+    assert request.risk_preferences == {"maximum_trade_risk_percent": 0.5}
+    assert update.call_args.args[1] == {"MAXIMUM_TRADE_RISK_PERCENT": "0.5"}
+    assert curriculum.call_args.kwargs["teaching_mode"] == "guided"
+    database.commit.assert_called_once_with()
+
+
+def test_chat_loop_routes_entry_decisions_to_deterministic_preflight(
+    monkeypatch,
+) -> None:
+    settings = Settings(
+        database_auto_migrate=False,
+        startup_news_sync=False,
+        startup_model_smoke_test=False,
+    )
+    conversation = SimpleNamespace(
+        id=uuid.uuid4(),
+        workspace_id=TEST_SCOPE.workspace_id,
+        account_id=TEST_SCOPE.account_id,
+        name="decision-flow",
+        active_playbook_version_id=uuid.uuid4(),
+    )
+    database = Mock()
+
+    class SessionContext:
+        def __enter__(self):
+            return database
+
+        def __exit__(self, *_args):
+            return False
+
+    provider = SimpleNamespace(name="test", model="test-model")
+    policy = Mock()
+    route_preflight = Mock(
+        side_effect=lambda _db, target, _message: setattr(
+            target,
+            "active_playbook_version_id",
+            conversation.active_playbook_version_id,
+        )
+        or True
+    )
+    active_strategy = (
+        SimpleNamespace(name="selected-strategy"),
+        SimpleNamespace(id=conversation.active_playbook_version_id, version=1),
+    )
+    monkeypatch.setattr(cli_module, "get_settings", Mock(return_value=settings))
+    monkeypatch.setattr(cli_module, "_runtime_policy", Mock(return_value=policy))
+    monkeypatch.setattr(cli_module, "ensure_local_services", Mock(return_value=()))
+    monkeypatch.setattr(
+        cli_module,
+        "check_health",
+        Mock(return_value=HealthReport((HealthCheck("database", "ok", "ready"),))),
+    )
+    monkeypatch.setattr(cli_module, "_render_startup_health", Mock())
+    monkeypatch.setattr(cli_module, "create_model_provider", Mock(return_value=provider))
+    monkeypatch.setattr(cli_module, "SessionLocal", Mock(return_value=SessionContext()))
+    monkeypatch.setattr(cli_module, "_current_scope", Mock(return_value=TEST_SCOPE))
+    monkeypatch.setattr(cli_module, "get_trader_profile", Mock(return_value=object()))
+    monkeypatch.setattr(cli_module, "latest_conversation", Mock(return_value=conversation))
+    strategy_lookup = Mock(side_effect=(None, active_strategy))
+    monkeypatch.setattr(cli_module, "active_session_strategy", strategy_lookup)
+    monkeypatch.setattr(cli_module, "list_strategy_summaries", Mock(return_value=[]))
+    monkeypatch.setattr(
+        cli_module,
+        "build_startup_memory",
+        Mock(return_value=SimpleNamespace(has_content=False)),
+    )
+    monkeypatch.setattr(cli_module, "_render_startup_memory", Mock())
+    monkeypatch.setattr(cli_module, "conversation_transcript", Mock(return_value=[]))
+    monkeypatch.setattr(cli_module, "_prompt_startup_action", Mock(return_value=None))
+    monkeypatch.setattr(cli_module, "_handle_chat_preflight_intent", route_preflight)
+    monkeypatch.setattr(
+        cli_module.console,
+        "input",
+        Mock(side_effect=("Should I take this trade?", "/exit")),
+    )
+
+    cli_module._run_chat(None, False, None)
+
+    route_preflight.assert_called_once_with(
+        database,
+        conversation,
+        "Should I take this trade?",
+    )
+    assert strategy_lookup.call_count == 2
+
 
 def test_api_refuses_plaintext_non_loopback_binding(monkeypatch) -> None:
     run_server = Mock()
@@ -205,6 +432,18 @@ def test_chat_trade_intent_offers_existing_preflight_with_default_yes(
     confirm = Mock(return_value=True)
     monkeypatch.setattr(cli_module, "add_turn", add_turn)
     monkeypatch.setattr(cli_module, "preflight", launch)
+    monkeypatch.setattr(
+        cli_module,
+        "get_settings",
+        Mock(
+            return_value=Settings(
+                broker_provider="none",
+                metatrader_platform="mt5",
+                metatrader_mode="practice",
+                metatrader_bridge_url="http://127.0.0.1:8765",
+            )
+        ),
+    )
     monkeypatch.setattr(cli_module.typer, "confirm", confirm)
 
     handled = cli_module._handle_chat_preflight_intent(
@@ -231,6 +470,54 @@ def test_chat_trade_intent_offers_existing_preflight_with_default_yes(
     assert all(call.kwargs["playbook_version_id"] == version_id for call in add_turn.call_args_list)
     assert all(call.kwargs["scope"] == TEST_SCOPE for call in add_turn.call_args_list)
     assert "No broker order was placed" in add_turn.call_args_list[-1].args[3]
+
+
+def test_chat_trade_intent_enables_live_market_when_broker_ready(
+    monkeypatch,
+) -> None:
+    version_id = uuid.uuid4()
+    conversation = SimpleNamespace(
+        workspace_id=TEST_SCOPE.workspace_id,
+        account_id=TEST_SCOPE.account_id,
+        name="gold-entry",
+        active_playbook_version_id=version_id,
+    )
+    add_turn = Mock()
+    launch = Mock()
+    monkeypatch.setattr(cli_module, "add_turn", add_turn)
+    monkeypatch.setattr(cli_module, "preflight", launch)
+    monkeypatch.setattr(cli_module, "_configured_broker_connection", Mock(return_value=object()))
+    monkeypatch.setattr(
+        cli_module,
+        "get_settings",
+        Mock(
+            return_value=Settings(
+                broker_provider="oanda",
+                metatrader_platform="mt5",
+                metatrader_mode="practice",
+                metatrader_bridge_url="http://127.0.0.1:8765",
+            )
+        ),
+    )
+    monkeypatch.setattr(cli_module.typer, "confirm", Mock(return_value=True))
+
+    handled = cli_module._handle_chat_preflight_intent(
+        Mock(),
+        conversation,
+        "Should I take this trade?",
+    )
+
+    assert handled is True
+    launch.assert_called_once_with(
+        file=None,
+        session="gold-entry",
+        setup_key=None,
+        live_market=True,
+        candle_timeframe="M5",
+        candle_count=50,
+        yes=False,
+    )
+    assert [call.args[2] for call in add_turn.call_args_list] == ["user", "assistant"]
 
 
 def test_chat_trade_intent_decline_records_turns_without_launching(
@@ -273,6 +560,11 @@ def test_chat_returns_after_preflight_validation_exit(monkeypatch) -> None:
         "preflight",
         Mock(side_effect=typer.Exit(code=2)),
     )
+    monkeypatch.setattr(
+        cli_module,
+        "get_settings",
+        Mock(return_value=Settings(broker_provider="none")),
+    )
     monkeypatch.setattr(cli_module.typer, "confirm", Mock(return_value=True))
 
     assert cli_module._handle_chat_preflight_intent(
@@ -309,6 +601,11 @@ def test_chat_no_strategy_guides_recovery_then_resumes_preflight(
         Mock(side_effect=recover),
     )
     monkeypatch.setattr(cli_module, "preflight", launch)
+    monkeypatch.setattr(
+        cli_module,
+        "get_settings",
+        Mock(return_value=Settings(broker_provider="none")),
+    )
     monkeypatch.setattr(cli_module.typer, "confirm", Mock(return_value=True))
 
     assert cli_module._handle_chat_preflight_intent(

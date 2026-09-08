@@ -3,386 +3,345 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Trading Agent — Market Dashboard</title>
-    <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+    <meta name="theme-color" content="#090b11" />
+    <title>Trading Agent — Dashboard</title>
     <style>
       :root {
         color-scheme: dark;
-        font-family: Inter, system-ui, -apple-system, sans-serif;
-        line-height: 1.35;
+        --bg: #090b11;
+        --rail: #0b0e15;
+        --panel: #11151f;
+        --panel-raised: #151b27;
+        --panel-soft: #0e121b;
+        --line: #242b39;
+        --line-soft: #1b2230;
+        --text: #f3f6fb;
+        --muted: #7f899b;
+        --muted-2: #a4acba;
+        --teal: #35e4b5;
+        --teal-soft: rgba(53, 228, 181, 0.12);
+        --cyan: #4da3ff;
+        --red: #ff667a;
+        --amber: #f0b85d;
+        --radius: 16px;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
 
-      body {
-        margin: 0;
-        background: #061716;
-        color: #e6fff2;
-      }
+      * { box-sizing: border-box; }
+      html { scroll-behavior: smooth; }
+      body { margin: 0; min-width: 320px; background: radial-gradient(circle at 78% -10%, #162033 0, var(--bg) 37%); color: var(--text); }
+      button, input, select { font: inherit; }
+      button { cursor: pointer; }
+      .app { min-height: 100vh; display: grid; grid-template-columns: 76px minmax(0, 1fr); }
+      .rail { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 22px 12px; border-right: 1px solid var(--line-soft); background: rgba(9, 12, 18, .92); backdrop-filter: blur(18px); z-index: 5; }
+      .logo { width: 42px; height: 42px; display: grid; place-items: center; border: 1px solid rgba(53,228,181,.35); border-radius: 13px; background: linear-gradient(145deg, #19392f, #101b1b); color: var(--teal); font-weight: 900; letter-spacing: -.06em; box-shadow: 0 0 34px rgba(53,228,181,.08); }
+      .rail-nav { display: grid; gap: 11px; margin-top: 40px; }
+      .nav-button { position: relative; width: 42px; height: 42px; display: grid; place-items: center; border: 0; border-radius: 11px; background: transparent; color: #657083; text-decoration: none; }
+      .nav-button:hover, .nav-button.active { color: var(--teal); background: var(--teal-soft); }
+      .nav-button.active::before { content: ""; position: absolute; left: -13px; width: 3px; height: 20px; border-radius: 3px; background: var(--teal); box-shadow: 0 0 12px rgba(53,228,181,.55); }
+      .nav-button svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+      .rail-bottom { margin-top: auto; display: grid; gap: 12px; }
+      .avatar { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; border: 1px solid #334055; background: #182131; color: #cbd6e6; font-weight: 700; }
 
-      main {
-        max-width: 980px;
-        margin: 0 auto;
-        padding: 24px;
-        display: grid;
-        gap: 16px;
-      }
+      .page { min-width: 0; padding: 0 30px 34px; }
+      .topbar { min-height: 84px; display: flex; align-items: center; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--line-soft); }
+      .title-row { display: flex; align-items: center; gap: 13px; }
+      h1, h2, h3, p { margin-top: 0; }
+      h1 { margin-bottom: 3px; font-size: 20px; letter-spacing: -.03em; }
+      .subtitle { margin: 0; color: var(--muted); font-size: 12px; }
+      .top-actions { display: flex; align-items: center; gap: 10px; }
+      .search { width: 245px; display: flex; align-items: center; gap: 8px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px; background: #0d1119; color: var(--muted); }
+      .search input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 12px; }
+      .search svg, .icon-btn svg, .button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+      .icon-btn, .button { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--muted-2); }
+      .icon-btn { width: 38px; height: 38px; display: grid; place-items: center; }
+      .icon-btn:hover, .button:hover { border-color: #3b465a; color: var(--text); }
+      .button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 38px; padding: 0 14px; font-size: 12px; font-weight: 700; }
+      .button.primary { color: #04130f; border-color: var(--teal); background: var(--teal); box-shadow: 0 8px 24px rgba(53,228,181,.12); }
+      .button.ghost { background: transparent; }
+      .button.small { min-height: 31px; padding: 0 10px; font-size: 11px; }
+      .button:disabled { opacity: .55; cursor: progress; }
 
-      section {
-        border: 1px solid #214e48;
-        border-radius: 14px;
-        background: #0d2d2a;
-        padding: 16px;
-      }
+      .content { max-width: 1480px; margin: 0 auto; }
+      .welcome { display: flex; align-items: end; justify-content: space-between; gap: 20px; padding: 27px 0 18px; }
+      .welcome h2 { margin-bottom: 6px; font-size: 24px; letter-spacing: -.04em; }
+      .welcome p { margin: 0; color: var(--muted); font-size: 13px; }
+      .status-pill, .chip { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; border: 1px solid var(--line); border-radius: 999px; background: rgba(17,21,31,.75); color: var(--muted-2); font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+      .status-pill { padding: 8px 11px; }
+      .chip { padding: 5px 8px; }
+      .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+      .dot.live { background: var(--teal); box-shadow: 0 0 10px rgba(53,228,181,.7); }
+      .dot.warn { background: var(--amber); }
 
-      h1 {
-        margin: 0;
-        font-size: 1.7rem;
-      }
+      .metric-grid { display: grid; grid-template-columns: 1.55fr repeat(4, 1fr); gap: 12px; }
+      .card { border: 1px solid var(--line); border-radius: var(--radius); background: linear-gradient(145deg, rgba(20,25,36,.97), rgba(14,18,27,.97)); box-shadow: 0 16px 45px rgba(0,0,0,.16); }
+      .metric { min-height: 142px; padding: 18px; position: relative; overflow: hidden; }
+      .metric::after { content: ""; position: absolute; right: -30px; bottom: -45px; width: 120px; height: 120px; border-radius: 50%; background: radial-gradient(circle, rgba(53,228,181,.07), transparent 70%); }
+      .metric-label { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 11px; }
+      .metric-value { margin: 18px 0 6px; font-size: 27px; font-weight: 750; letter-spacing: -.045em; }
+      .metric-sub { color: var(--muted); font-size: 10px; }
+      .up { color: var(--teal); }
+      .down { color: var(--red); }
+      .mini-line { position: absolute; right: 14px; bottom: 16px; width: 72px; height: 32px; }
+      .mini-line path { fill: none; stroke: var(--teal); stroke-width: 2; }
+      .progress { height: 4px; margin-top: 17px; border-radius: 99px; background: #202736; overflow: hidden; }
+      .progress span { display: block; height: 100%; width: 71%; border-radius: inherit; background: linear-gradient(90deg, var(--teal), #4b9fff); }
 
-      .lede {
-        color: #90c7b2;
-        margin: 8px 0 0;
-      }
+      .dashboard-grid { display: grid; grid-template-columns: minmax(0, 1.75fr) minmax(300px, .72fr); gap: 14px; margin-top: 14px; }
+      .dashboard-grid > *, .bottom-grid > *, .stack > * { min-width: 0; }
+      .stack { display: grid; gap: 14px; align-content: start; }
+      .card-head { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 17px 18px; border-bottom: 1px solid var(--line-soft); }
+      .card-head h3 { margin: 0 0 3px; font-size: 13px; }
+      .card-head p { margin: 0; color: var(--muted); font-size: 10px; }
+      .filters { display: flex; align-items: center; gap: 7px; }
+      .select, .field { border: 1px solid var(--line); border-radius: 8px; background: #0c1018; color: var(--muted-2); outline: none; }
+      .select { min-height: 31px; padding: 0 28px 0 9px; font-size: 10px; }
+      .field { width: 100%; min-height: 38px; padding: 0 11px; font-size: 12px; }
+      .chart-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--line-soft); border-bottom: 1px solid var(--line-soft); }
+      .chart-summary > div { padding: 12px 16px; background: var(--panel-soft); }
+      .chart-summary span { display: block; color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .08em; }
+      .chart-summary strong { display: block; margin-top: 5px; font-size: 12px; font-weight: 650; }
+      .chart-wrap { position: relative; height: 305px; padding: 18px 14px 10px; overflow: hidden; }
+      .chart-wrap::before { content: ""; position: absolute; inset: 18px 14px 28px; background-image: linear-gradient(var(--line-soft) 1px, transparent 1px), linear-gradient(90deg, var(--line-soft) 1px, transparent 1px); background-size: 100% 52px, 96px 100%; opacity: .58; }
+      #equity-chart { position: relative; width: 100%; height: 100%; overflow: visible; }
+      #equity-area { fill: url(#area-gradient); opacity: .8; }
+      #equity-line { fill: none; stroke: var(--cyan); stroke-width: 2.2; vector-effect: non-scaling-stroke; filter: drop-shadow(0 0 6px rgba(77,163,255,.25)); }
+      .axis-labels { position: absolute; inset: 20px 20px 20px auto; display: flex; flex-direction: column; justify-content: space-between; color: #526075; font-size: 9px; text-align: right; pointer-events: none; }
+      .chart-empty { position: absolute; inset: 0; display: none; place-items: center; color: var(--muted); font-size: 12px; }
 
-      .grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-        gap: 16px;
-      }
+      .allocation-body { display: grid; grid-template-columns: 122px 1fr; align-items: center; gap: 16px; padding: 20px 18px; }
+      .donut { --value: 68%; width: 112px; height: 112px; display: grid; place-items: center; border-radius: 50%; background: conic-gradient(var(--teal) 0 58%, var(--cyan) 58% 79%, var(--red) 79% 86%, #242b39 86% 100%); position: relative; }
+      .donut::before { content: ""; position: absolute; width: 74px; height: 74px; border-radius: 50%; background: var(--panel); box-shadow: inset 0 0 20px rgba(0,0,0,.25); }
+      .donut strong, .donut span { position: relative; z-index: 1; }
+      .donut strong { font-size: 20px; }
+      .donut span { display: block; color: var(--muted); font-size: 8px; text-align: center; text-transform: uppercase; letter-spacing: .08em; }
+      .legend { display: grid; gap: 12px; }
+      .legend-row { display: grid; grid-template-columns: 8px 1fr auto; align-items: center; gap: 8px; font-size: 10px; color: var(--muted-2); }
+      .legend-row i { width: 7px; height: 7px; border-radius: 50%; background: var(--teal); }
+      .legend-row:nth-child(2) i { background: var(--cyan); }
+      .legend-row:nth-child(3) i { background: var(--red); }
+      .legend-row strong { color: var(--text); font-size: 10px; }
 
-      label {
-        display: grid;
-        gap: 6px;
-        margin-bottom: 10px;
-      }
+      .connections { padding: 8px 18px 15px; }
+      .connection { display: grid; grid-template-columns: 34px 1fr auto; align-items: center; gap: 10px; padding: 11px 0; border-bottom: 1px solid var(--line-soft); }
+      .connection:last-child { border-bottom: 0; }
+      .connection-icon { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 9px; border: 1px solid #293649; background: #141c29; color: var(--teal); font-size: 10px; font-weight: 800; }
+      .connection strong { display: block; font-size: 11px; }
+      .connection small { color: var(--muted); font-size: 9px; }
+      .connection .chip { font-size: 8px; }
 
-      input,
-      select,
-      button {
-        width: 100%;
-        border-radius: 8px;
-        border: 1px solid #2f645e;
-        background: #08201d;
-        color: #e8ffef;
-        padding: 8px;
-        font-size: 0.95rem;
-      }
+      .risk-body { padding: 15px 18px 18px; }
+      .empty-state { padding: 24px 18px; color: var(--muted); font-size: 11px; line-height: 1.6; }
+      .risk-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+      label { display: grid; gap: 5px; color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .05em; }
+      .risk-grid .wide { grid-column: 1 / -1; }
+      output { display: block; min-height: 0; margin-top: 10px; padding: 0; color: var(--muted-2); font-size: 11px; white-space: pre-wrap; }
 
-      button {
-        margin-top: 8px;
-        background: #57f3c4;
-        color: #06251f;
-        font-weight: 700;
-        cursor: pointer;
-      }
+      .bottom-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(300px, .75fr); gap: 14px; margin-top: 14px; }
+      .table-wrap { overflow-x: auto; }
+      table { width: 100%; border-collapse: collapse; font-size: 10px; }
+      th { padding: 10px 17px; color: var(--muted); font-size: 8px; font-weight: 700; letter-spacing: .08em; text-align: left; text-transform: uppercase; background: #0e121b; }
+      td { padding: 13px 17px; border-top: 1px solid var(--line-soft); color: var(--muted-2); white-space: nowrap; }
+      td strong { color: var(--text); }
+      .side { display: inline-flex; align-items: center; gap: 6px; }
+      .side::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--teal); }
+      .side.short::before { background: var(--red); }
+      .news-list { padding: 6px 18px 14px; }
+      .news-item { display: grid; grid-template-columns: 45px 1fr auto; align-items: start; gap: 10px; padding: 13px 0; border-bottom: 1px solid var(--line-soft); }
+      .news-item:last-child { border: 0; }
+      .news-time { color: var(--muted); font-size: 9px; }
+      .news-item strong { display: block; font-size: 10px; line-height: 1.35; }
+      .news-item small { color: var(--muted); font-size: 9px; }
+      .impact { width: 7px; height: 7px; margin-top: 3px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 8px rgba(240,184,93,.3); }
+      .impact.high { background: var(--red); box-shadow: 0 0 8px rgba(255,102,122,.3); }
+      .footer { display: flex; justify-content: space-between; gap: 16px; padding: 20px 3px 0; color: #566174; font-size: 9px; }
 
-      button:disabled {
-        opacity: 0.6;
-        cursor: progress;
-      }
+      dialog { width: min(520px, calc(100vw - 30px)); padding: 0; border: 1px solid #313a4c; border-radius: 16px; background: #111620; color: var(--text); box-shadow: 0 30px 100px rgba(0,0,0,.65); }
+      dialog::backdrop { background: rgba(2,4,8,.72); backdrop-filter: blur(5px); }
+      .dialog-body { padding: 18px; }
+      .dialog-grid { display: grid; gap: 12px; }
+      .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+      .secure-note { padding: 10px; border-radius: 9px; background: var(--teal-soft); color: #8fe8cc; font-size: 10px; line-height: 1.5; }
 
-      #chart-wrap {
-        height: 420px;
-        border: 1px solid #2f645e;
-        border-radius: 12px;
-        overflow: hidden;
+      @media (max-width: 1180px) {
+        .metric-grid { grid-template-columns: repeat(3, 1fr); }
+        .metric:first-child { grid-column: span 2; }
+        .dashboard-grid, .bottom-grid { grid-template-columns: 1fr; }
+        .stack { grid-template-columns: 1fr 1fr; }
       }
-
-      #market-chart {
-        width: 100%;
-        height: 100%;
+      @media (max-width: 760px) {
+        .app { grid-template-columns: 1fr; }
+        .rail { position: fixed; inset: auto 0 0; width: 100%; height: 62px; flex-direction: row; justify-content: center; padding: 8px 12px; border: 0; border-top: 1px solid var(--line); }
+        .logo, .rail-bottom { display: none; }
+        .rail-nav { display: flex; gap: 12px; margin: 0; }
+        .nav-button.active::before { left: 11px; top: -9px; width: 20px; height: 3px; }
+        .page { padding: 0 16px 82px; }
+        .topbar { min-height: 72px; }
+        .search { display: none; }
+        .welcome { align-items: flex-start; }
+        .metric-grid { grid-template-columns: 1fr 1fr; }
+        .metric:first-child { grid-column: 1 / -1; }
+        .stack { grid-template-columns: 1fr; }
+        .chart-summary { grid-template-columns: 1fr 1fr; }
+        .filters { flex-wrap: wrap; justify-content: flex-end; }
+        .footer { margin-bottom: 10px; }
       }
-
-      .inline {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 12px;
-      }
-
-      .inline > div {
-        background: #092f2b;
-        border: 1px solid #215e57;
-        border-radius: 10px;
-        padding: 10px;
-      }
-
-      .label {
-        color: #97d4b5;
-        margin-bottom: 4px;
-      }
-
-      .value {
-        font-size: 1.1rem;
-        font-weight: 700;
-      }
-
-      .note {
-        color: #95c8b4;
-      }
-
-      output {
-        display: block;
-        margin-top: 12px;
-        white-space: pre-wrap;
-        color: #d4fbef;
+      @media (max-width: 480px) {
+        .metric-grid { grid-template-columns: 1fr; }
+        .metric:first-child { grid-column: auto; }
+        .welcome { display: block; }
+        .welcome .status-pill { margin-top: 14px; }
+        .top-actions .button span { display: none; }
+        .allocation-body { grid-template-columns: 1fr; justify-items: center; }
+        .legend { width: 100%; }
       }
     </style>
   </head>
   <body>
-    <main>
-      <section>
-        <p class="note">JOURNAL-FIRST TOOLING</p>
-        <h1>Market feed + risk sanity checks</h1>
-        <p class="lede">
-          Keep OANDA for FX, add Kraken for crypto, and Alpaca for equities. This page uses
-          <strong>Lightweight Charts</strong> for normalized candle feeds and keeps all calls
-          read-only.
-        </p>
-      </section>
+    <svg width="0" height="0" aria-hidden="true" style="position:absolute"><symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol><symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 19V9m6 10V4m6 15v-7m4 7H2"/></symbol><symbol id="i-book" viewBox="0 0 24 24"><path d="M4 4h11a3 3 0 0 1 3 3v13H7a3 3 0 0 1-3-3V4Z"/><path d="M7 16h11M8 8h6M8 11h5"/></symbol><symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 4 6v5c0 5 3.4 8.5 8 10 4.6-1.5 8-5 8-10V6l-8-3Z"/><path d="m9 12 2 2 4-5"/></symbol><symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H3v-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6V3h4v.1a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></symbol><symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol><symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 6v5h-5M4 18v-5h5"/><path d="M6.1 9a7 7 0 0 1 11.2-2.1L20 11M4 13l2.7 4.1A7 7 0 0 0 17.9 15"/></symbol><symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h10m4 0h2M4 17h2m4 0h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></symbol></svg>
+    <div class="app">
+      <aside class="rail" aria-label="Primary navigation">
+        <div class="logo" title="Trading Agent">TA</div>
+        <nav class="rail-nav">
+          <a class="nav-button active" href="#overview" title="Overview"><svg><use href="#i-grid"/></svg></a>
+          <a class="nav-button" href="#market" title="Market"><svg><use href="#i-chart"/></svg></a>
+          <a class="nav-button" href="#journal" title="Journal"><svg><use href="#i-book"/></svg></a>
+          <a class="nav-button" href="#risk" title="Risk"><svg><use href="#i-shield"/></svg></a>
+        </nav>
+        <div class="rail-bottom"><button class="nav-button" id="rail-settings" title="Settings"><svg><use href="#i-settings"/></svg></button><div class="avatar">KS</div></div>
+      </aside>
 
-      <section>
-        <h2>Live provider feed</h2>
-        <form id="market-form" class="grid" autocomplete="off">
-          <label>
-            API key
-            <input id="api-key" type="password" autocomplete="off" required />
-          </label>
-          <label>
-            Provider
-            <select id="provider" required>
-              <option value="oanda">OANDA (forex)</option>
-              <option value="kraken">Kraken (crypto)</option>
-              <option value="alpaca">Alpaca (stocks)</option>
-            </select>
-          </label>
-          <label>
-            Instrument
-            <input id="instrument" value="XAU_USD" required />
-          </label>
-          <label>
-            Timeframe
-            <select id="timeframe">
-              <option>1M</option>
-              <option>2M</option>
-              <option>5M</option>
-              <option>15M</option>
-              <option selected>4H</option>
-              <option>1D</option>
-            </select>
-          </label>
-          <label>
-            Count
-            <input id="count" type="number" min="1" max="5000" value="150" />
-          </label>
-          <button id="load-market">Load market data</button>
-        </form>
-        <output id="market-output"></output>
+      <main class="page">
+        <header class="topbar">
+          <div class="title-row"><div><h1>Trading dashboard</h1><p class="subtitle" id="current-date">Account command center</p></div></div>
+          <div class="top-actions">
+            <label class="search"><svg><use href="#i-search"/></svg><input id="symbol-search" aria-label="Instrument" value="XAU_USD" /></label>
+            <button class="button" id="sync-all"><svg><use href="#i-refresh"/></svg><span>Sync dashboard</span></button>
+            <button class="icon-btn" id="open-settings" aria-label="Settings"><svg><use href="#i-sliders"/></svg></button>
+          </div>
+        </header>
 
-        <div class="inline" style="margin-top: 12px;">
-          <div>
-            <div class="label">Latest quote</div>
-            <div class="value" id="market-quote">—</div>
-          </div>
-          <div>
-            <div class="label">Spread</div>
-            <div class="value" id="market-spread">—</div>
-          </div>
-          <div>
-            <div class="label">Last market time</div>
-            <div class="value" id="market-time">—</div>
-          </div>
-          <div>
-            <div class="label">Candle count / provider</div>
-            <div class="value" id="market-summary">—</div>
-          </div>
+        <div class="content">
+          <section class="welcome" id="overview">
+            <div><h2>Overview</h2><p>Live broker state, market context, risk and journal activity in one place.</p></div>
+            <span class="status-pill" id="dashboard-status"><span class="dot warn"></span> Data not loaded</span>
+          </section>
+
+          <section class="metric-grid" aria-label="Account metrics">
+            <article class="card metric"><div class="metric-label"><span>Total balance</span><span class="chip" id="account-source">Not loaded</span></div><div class="metric-value" id="account-balance">—</div><div class="metric-sub"><span id="balance-change">Sync your read-only broker account</span></div><div class="progress"><span id="account-progress" style="width:0"></span></div></article>
+            <article class="card metric"><div class="metric-label"><span>Equity</span><span id="equity-state">Not loaded</span></div><div class="metric-value" id="account-equity">—</div><div class="metric-sub"><span id="floating-pnl">—</span> floating P&amp;L</div></article>
+            <article class="card metric"><div class="metric-label"><span>Profit target</span><span>Account rule</span></div><div class="metric-value">—</div><div class="metric-sub">Load verified account constraints</div><div class="progress"><span style="width:0"></span></div></article>
+            <article class="card metric"><div class="metric-label"><span>Win rate</span><span>Reviewed trades</span></div><div class="metric-value">—</div><div class="metric-sub">No performance sample loaded</div></article>
+            <article class="card metric"><div class="metric-label"><span>Max drawdown</span><span class="chip">Unknown</span></div><div class="metric-value">—</div><div class="metric-sub">Requires verified account history</div></article>
+          </section>
+
+          <section class="dashboard-grid">
+            <article class="card" id="market">
+              <header class="card-head"><div><h3>Timestamped market evidence</h3><p id="chart-caption">Connect a provider to load recent candles</p></div><div class="filters"><select class="select" id="provider" aria-label="Provider"><option value="oanda">OANDA</option><option value="kraken">Kraken</option><option value="alpaca">Alpaca</option></select><select class="select" id="timeframe" aria-label="Timeframe"><option value="M15">15M</option><option value="H1">1H</option><option value="H4" selected>4H</option><option value="D">1D</option></select><button class="button small primary" id="load-market">Load market</button></div></header>
+              <div class="chart-summary"><div><span>Latest quote</span><strong id="market-quote">—</strong></div><div><span>Spread</span><strong id="market-spread">—</strong></div><div><span>Instrument</span><strong id="market-instrument">XAU_USD</strong></div><div><span>Data source</span><strong id="market-source">Not loaded</strong></div></div>
+              <div class="chart-wrap"><svg id="equity-chart" viewBox="0 0 1000 280" preserveAspectRatio="none" role="img" aria-label="Recent market candles"><defs><linearGradient id="area-gradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4da3ff" stop-opacity=".28"/><stop offset="1" stop-color="#4da3ff" stop-opacity="0"/></linearGradient></defs><path id="equity-area" d=""/><path id="equity-line" d=""/></svg><div class="chart-empty" id="chart-empty" style="display:grid">Load market data to view timestamped candles.</div></div>
+            </article>
+
+            <div class="stack">
+              <article class="card"><header class="card-head"><div><h3>Risk distribution</h3><p>Verified exposure by market group</p></div><span class="chip">Not loaded</span></header><div class="empty-state">Sync a read-only broker account before relying on exposure or available-margin information.</div></article>
+              <article class="card"><header class="card-head"><div><h3>Broker connections</h3><p>Read-only account sources</p></div><button class="button small ghost" id="sync-broker">Sync</button></header><div class="connections"><div class="connection"><span class="connection-icon">OA</span><div><strong>OANDA</strong><small>FX market &amp; account data</small></div><span class="chip" id="oanda-status">Not checked</span></div><div class="connection"><span class="connection-icon">MT</span><div><strong>MetaTrader 4/5</strong><small>Read-only bridge when configured</small></div><span class="chip">Not checked</span></div><div class="connection"><span class="connection-icon">TV</span><div><strong>TradingView</strong><small>Verified alerts when configured</small></div><span class="chip">Optional</span></div></div></article>
+            </div>
+          </section>
+
+          <section class="bottom-grid">
+            <article class="card" id="journal"><header class="card-head"><div><h3>Recent journal activity</h3><p>Plans and reviewed trades from Trading-Agent</p></div><button class="button small ghost" id="load-journal">Load journal</button></header><div class="table-wrap"><table><thead><tr><th>Market</th><th>Side</th><th>Setup</th><th>Entry</th><th>Planned R</th><th>Status</th></tr></thead><tbody id="trade-rows"><tr><td colspan="6">Choose an exact strategy version, then load its journal.</td></tr></tbody></table></div></article>
+
+            <article class="card" id="risk"><header class="card-head"><div><h3>Position sizing</h3><p>Deterministic risk sanity check</p></div><span class="chip">Policy checked</span></header><form class="risk-body" id="risk-form"><div class="risk-grid"><label>Account equity<input class="field" name="account_equity" type="number" step="any" placeholder="10000" required></label><label>Risk %<input class="field" name="risk_percent" type="number" step="any" placeholder="0.5" required></label><label>Entry<input class="field" name="entry" type="number" step="any" placeholder="2486.20" required></label><label>Stop<input class="field" name="stop" type="number" step="any" placeholder="2478.60" required></label><label>Target<input class="field" name="target" type="number" step="any" placeholder="2512.00"></label><label>Value / unit<input class="field" name="value_per_price_unit" type="number" step="any" placeholder="Instrument-specific" required></label><button class="button primary wide" type="submit">Calculate position size</button></div><output id="risk-output"></output></form></article>
+          </section>
+
+          <section class="bottom-grid">
+            <article class="card"><header class="card-head"><div><h3>Open positions</h3><p>Read-only broker positions</p></div><span class="chip" id="position-count">Not loaded</span></header><div class="table-wrap"><table><thead><tr><th>Instrument</th><th>Direction</th><th>Quantity</th><th>Average</th><th>Unrealized P&amp;L</th></tr></thead><tbody id="position-rows"><tr><td colspan="5">Sync your broker to load current positions.</td></tr></tbody></table></div></article>
+            <article class="card"><header class="card-head"><div><h3>Market calendar</h3><p>Timestamped event reminders</p></div><span class="chip">Not loaded</span></header><div class="empty-state">No calendar evidence is loaded in this dashboard. Use the conversational agent or <strong>trade news upcoming</strong> for stored events.</div></article>
+          </section>
+          <div class="footer"><span>Trading-Agent · decision support only · no order execution</span><span id="last-updated">No live data loaded</span></div>
         </div>
-      </section>
+      </main>
+    </div>
 
-      <section>
-        <h2>Normalized market chart</h2>
-        <div id="chart-wrap">
-          <div id="market-chart"></div>
-        </div>
-      </section>
-
-      <section>
-        <h2>Risk sanity check</h2>
-        <form id="risk-form" class="grid">
-          <label>Account equity <input name="account_equity" type="number" step="any" required /></label>
-          <label>Risk % <input name="risk_percent" type="number" step="any" value="1" required /></label>
-          <label>Entry <input name="entry" type="number" step="any" required /></label>
-          <label>Stop <input name="stop" type="number" step="any" required /></label>
-          <label>Target <input name="target" type="number" step="any" /></label>
-          <label>Value per price unit <input name="value_per_price_unit" type="number" step="any" value="1" required /></label>
-          <button>Calculate</button>
-        </form>
-        <output id="risk-output"></output>
-      </section>
-    </main>
+    <dialog id="settings-dialog"><form method="dialog" class="dialog-body" id="settings-form"><header class="card-head" style="margin:-18px -18px 18px"><div><h3>Dashboard connection</h3><p>Connection values remain in memory for this page only.</p></div><button class="icon-btn" value="cancel" aria-label="Close">×</button></header><div class="dialog-grid"><label>Trading-Agent API key<input class="field" id="api-key" type="password" autocomplete="off" placeholder="Required for API calls"></label><label>Workspace ID<input class="field" id="workspace-id" autocomplete="off" placeholder="Required to load scoped journal data"></label><label>Account ID<input class="field" id="account-id" autocomplete="off" placeholder="Required to load scoped journal data"></label><label>Strategy version ID<input class="field" id="strategy-version" autocomplete="off" placeholder="Required to load journal plans"></label><label>Market instrument<input class="field" id="settings-instrument" value="XAU_USD"></label><label>Candle count<input class="field" id="count" type="number" min="10" max="5000" value="150"></label><div class="secure-note">These values are attached only to requests made to this Trading-Agent server and are not persisted by the page. Find the selected workspace, account, and strategy identifiers with the CLI account and strategy commands.</div></div><div class="dialog-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="default" id="save-settings">Use these settings</button></div></form></dialog>
 
     <script>
-      const chartContainer = document.getElementById("market-chart");
-      const chart = LightweightCharts.createChart(chartContainer, {
-        layout: {
-          background: { color: "#0d2d2a" },
-          textColor: "#e8ffef",
-        },
-        grid: {
-          vertLines: { color: "#184240" },
-          horzLines: { color: "#184240" },
-        },
-        rightPriceScale: {
-          borderColor: "#204d46",
-        },
-        timeScale: {
-          borderColor: "#204d46",
-          timeVisible: true,
-          secondsVisible: false,
-        },
-      });
-
-      chart.applyOptions({ width: chartContainer.clientWidth, height: 420 });
-      const candleSeries = chart.addCandlestickSeries({
-        upColor: "#4bf5b0",
-        downColor: "#ff8a8a",
-        borderVisible: false,
-        wickUpColor: "#4bf5b0",
-        wickDownColor: "#ff8a8a",
-      });
-      const quoteSeries = chart.addLineSeries({
-        color: "#7be2a4",
-        lineWidth: 2,
-        title: "Last quote",
-      });
-
-      const setChartSize = () => {
-        chart.applyOptions({ width: chartContainer.clientWidth, height: 420 });
+      const state = { apiKey: "", workspaceId: "", accountId: "", strategyVersion: "", instrument: "XAU_USD" };
+      const $ = (id) => document.getElementById(id);
+      const money = (value, currency = "USD", signed = false) => {
+        const number = Number(value || 0);
+        const formatted = new Intl.NumberFormat(undefined, { style: "currency", currency, maximumFractionDigits: 2 }).format(Math.abs(number));
+        return `${signed && number > 0 ? "+" : number < 0 ? "−" : ""}${formatted}`;
       };
-      if (window.ResizeObserver) {
-        const observer = new ResizeObserver(() => setChartSize());
-        observer.observe(chartContainer);
+      const numeric = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+      const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
+      const apiHeaders = () => {
+        const headers = { "X-API-Key": state.apiKey };
+        if (state.workspaceId) headers["X-Workspace-ID"] = state.workspaceId;
+        if (state.accountId) headers["X-Account-ID"] = state.accountId;
+        return headers;
+      };
+      const showSettings = () => $("settings-dialog").showModal();
+      const requireKey = () => { if (state.apiKey) return true; showSettings(); return false; };
+      const requireBrokerScope = () => { if (state.workspaceId && state.accountId) return true; showSettings(); setStatus("Add workspace and account IDs to load broker state", false); return false; };
+      const requireJournalScope = () => { if (state.workspaceId && state.accountId && state.strategyVersion) return true; showSettings(); setStatus("Add workspace, account, and strategy IDs to load the journal", false); return false; };
+      const setStatus = (label, live = false) => { const dot = document.createElement("span"); dot.className = `dot ${live ? "live" : "warn"}`; $("dashboard-status").replaceChildren(dot, document.createTextNode(String(label))); };
+      const markUpdated = () => { $("last-updated").textContent = `Updated ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`; };
+
+      $("current-date").textContent = new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" }).format(new Date());
+      $("open-settings").addEventListener("click", showSettings);
+      $("rail-settings").addEventListener("click", showSettings);
+      $("settings-form").addEventListener("submit", () => {
+        state.apiKey = $("api-key").value.trim(); state.workspaceId = $("workspace-id").value.trim(); state.accountId = $("account-id").value.trim(); state.strategyVersion = $("strategy-version").value.trim(); state.instrument = $("settings-instrument").value.trim() || "XAU_USD";
+        $("symbol-search").value = state.instrument; $("market-instrument").textContent = state.instrument;
+      });
+      $("symbol-search").addEventListener("change", (event) => { state.instrument = event.target.value.trim() || "XAU_USD"; $("settings-instrument").value = state.instrument; $("market-instrument").textContent = state.instrument; });
+
+      const pathFor = (values) => {
+        if (!values.length) return "";
+        const min = Math.min(...values), max = Math.max(...values), range = max - min || 1;
+        return values.map((value, index) => `${index ? "L" : "M"}${(index / Math.max(values.length - 1, 1) * 1000).toFixed(2)} ${(252 - ((value - min) / range) * 205).toFixed(2)}`).join(" ");
+      };
+      const drawValues = (values) => {
+        const line = pathFor(values); if (!line) { $("chart-empty").style.display = "grid"; return; }
+        $("chart-empty").style.display = "none"; $("equity-line").setAttribute("d", line); $("equity-area").setAttribute("d", `${line} L1000 280 L0 280 Z`);
+      };
+
+      async function loadMarket() {
+        if (!requireKey()) return;
+        const button = $("load-market"); button.disabled = true; button.textContent = "Loading…";
+        try {
+          state.instrument = $("symbol-search").value.trim() || state.instrument;
+          const url = new URL("/api/market-data", location.origin); url.searchParams.set("provider", $("provider").value); url.searchParams.set("instrument", state.instrument); url.searchParams.set("timeframe", $("timeframe").value); url.searchParams.set("count", $("count").value || "150");
+          const response = await fetch(url, { headers: apiHeaders() }); const data = await response.json(); if (!response.ok) throw new Error(data.detail || `Request failed (${response.status})`);
+          const closes = data.candles.map((item) => numeric(item.close)).filter(Number.isFinite); drawValues(closes);
+          $("market-quote").textContent = `${numeric(data.quote.bid).toFixed(2)} / ${numeric(data.quote.ask).toFixed(2)}`; $("market-spread").textContent = numeric(data.quote.spread).toFixed(5); $("market-instrument").textContent = data.instrument; $("market-source").textContent = data.provider; $("chart-caption").textContent = `${data.instrument} · ${data.timeframe} · ${closes.length} normalized candles`; setStatus("Live market data", true); markUpdated();
+        } catch (error) { setStatus(error.message, false); } finally { button.disabled = false; button.textContent = "Load market"; }
       }
 
-      const form = document.getElementById("market-form");
-      const marketOutput = document.getElementById("market-output");
-      const quoteCell = document.getElementById("market-quote");
-      const spreadCell = document.getElementById("market-spread");
-      const marketTimeCell = document.getElementById("market-time");
-      const summaryCell = document.getElementById("market-summary");
-
-      const setFeedback = (message, isError = false) => {
-        marketOutput.textContent = message;
-        marketOutput.style.color = isError ? "#ffb4b4" : "#d4fbef";
-      };
-
-      const normalizeSeries = (payload) => {
-        const candles = payload.candles
-          .map((item) => {
-            const started = Math.floor(new Date(item.started_at).getTime() / 1000);
-            return {
-              time: started,
-              open: Number(item.open),
-              high: Number(item.high),
-              low: Number(item.low),
-              close: Number(item.close),
-            };
-          })
-          .filter((item) => Number.isFinite(item.open) && Number.isFinite(item.high) && Number.isFinite(item.low) && Number.isFinite(item.close));
-        candles.sort((a, b) => a.time - b.time);
-        return candles;
-      };
-
-      const normalizeQuotePoints = (payload) => {
-        const quote = payload.quote;
-        if (!quote) {
-          return [];
-        }
-        return [
-          {
-            time: Math.floor(new Date(quote.market_time).getTime() / 1000),
-            value: (Number(quote.ask) + Number(quote.bid)) / 2,
-          },
-        ];
-      };
-
-      const loadMarketData = async (event) => {
-        event.preventDefault();
-        setFeedback("Fetching live market data...");
-        const apiKey = document.getElementById("api-key").value;
-        const provider = document.getElementById("provider").value;
-        const instrument = document.getElementById("instrument").value.trim();
-        const timeframe = document.getElementById("timeframe").value;
-        const count = Number(document.getElementById("count").value || 150);
-
-        const submit = document.getElementById("load-market");
-        submit.disabled = true;
-
+      async function loadBroker() {
+        if (!requireKey() || !requireBrokerScope()) return;
+        const button = $("sync-broker"); button.disabled = true; button.textContent = "Syncing…";
         try {
-          const url = new URL("/api/market-data", window.location.origin);
-          url.searchParams.set("provider", provider);
-          url.searchParams.set("instrument", instrument);
-          url.searchParams.set("timeframe", timeframe);
-          url.searchParams.set("count", String(count));
+          const response = await fetch("/api/broker-state", { headers: apiHeaders() }); const data = await response.json(); if (!response.ok) throw new Error(data.detail || `Broker request failed (${response.status})`);
+          const floating = numeric(data.equity) - numeric(data.balance); $("account-balance").textContent = money(data.balance, data.currency); $("account-equity").textContent = money(data.equity, data.currency); $("floating-pnl").textContent = money(floating, data.currency, true); $("floating-pnl").className = floating >= 0 ? "up" : "down"; $("balance-change").textContent = "Broker-reported balance"; $("equity-state").textContent = "Live"; $("account-source").textContent = data.provider; $("oanda-status").textContent = "Live";
+          const rows = data.positions.map((position) => { const qty = numeric(position.net_quantity), pnl = numeric(position.unrealized_pnl); return `<tr><td><strong>${escapeHtml(position.instrument)}</strong></td><td><span class="side ${qty < 0 ? "short" : ""}">${qty < 0 ? "Short" : "Long"}</span></td><td>${qty.toLocaleString()}</td><td>${position.average_price == null ? "—" : numeric(position.average_price).toLocaleString()}</td><td class="${pnl >= 0 ? "up" : "down"}">${money(pnl, data.currency, true)}</td></tr>`; }).join("");
+          $("position-rows").innerHTML = rows || '<tr><td colspan="5">No open positions.</td></tr>'; $("position-count").textContent = `${data.positions.length} open`; setStatus("Broker connected", true); markUpdated();
+        } catch (error) { setStatus(error.message, false); } finally { button.disabled = false; button.textContent = "Sync"; }
+      }
 
-          const response = await fetch(url, {
-            headers: { "X-API-Key": apiKey },
-          });
-          const payload = await response.json();
+      async function loadJournal() {
+        if (!requireKey() || !requireJournalScope()) return;
+        const button = $("load-journal"); button.disabled = true;
+        try {
+          const response = await fetch("/api/trades", { headers: { ...apiHeaders(), "X-Strategy-Version": state.strategyVersion } }); const data = await response.json(); if (!response.ok) throw new Error(data.detail || `Journal request failed (${response.status})`);
+          $("trade-rows").innerHTML = data.slice(0, 8).map((trade) => `<tr><td><strong>${escapeHtml(trade.instrument || trade.symbol || "—")}</strong><br><span>${escapeHtml(new Date(trade.created_at).toLocaleDateString())}</span></td><td><span class="side ${trade.direction === "short" ? "short" : ""}">${escapeHtml(trade.direction || "—")}</span></td><td>${escapeHtml(trade.setup || trade.setup_family || "Trade plan")}</td><td>${escapeHtml(trade.entry_price || trade.entry || "—")}</td><td class="up">${trade.planned_r == null ? "—" : `${escapeHtml(trade.planned_r)}R`}</td><td><span class="chip">Journal</span></td></tr>`).join("") || '<tr><td colspan="6">No trade plans for this strategy.</td></tr>'; markUpdated();
+        } catch (error) { setStatus(error.message, false); } finally { button.disabled = false; }
+      }
 
-          if (!response.ok) {
-            setFeedback(`Error ${response.status}: ${JSON.stringify(payload, null, 2)}`, true);
-            return;
-          }
-
-          const candles = normalizeSeries(payload);
-          const points = normalizeQuotePoints(payload);
-          if (!candles.length) {
-            setFeedback("No normalized candles were returned for those inputs.", true);
-            return;
-          }
-
-          const spread = Number(payload.quote.ask) - Number(payload.quote.bid);
-
-          candleSeries.setData(candles);
-          quoteSeries.setData(points);
-
-          quoteCell.textContent = `Bid ${Number(payload.quote.bid)} / Ask ${Number(payload.quote.ask)}`;
-          spreadCell.textContent = spread.toFixed(8);
-          marketTimeCell.textContent = payload.quote.market_time;
-          summaryCell.textContent = `${payload.instrument} · ${payload.timeframe} · ${candles.length} bars · ${payload.provider}`;
-
-          setFeedback(`Updated from ${provider} at ${payload.quote.retrieved_at}`);
-          chart.timeScale().fitContent();
-        } catch (error) {
-          setFeedback(`Request failed: ${error.message}`, true);
-        } finally {
-          submit.disabled = false;
-        }
-      };
-
-      form.addEventListener("submit", loadMarketData);
-
-      document.getElementById("risk-form").addEventListener("submit", async (event) => {
-        event.preventDefault();
-        const apiKey = document.getElementById("api-key").value;
-        const payload = Object.fromEntries(new FormData(event.target));
-        if (!payload.target) {
-          delete payload.target;
-        }
-        const response = await fetch("/api/risk/position-size", {
-          method: "POST",
-          headers: { "content-type": "application/json", "X-API-Key": apiKey },
-          body: JSON.stringify(payload),
-        });
-        const data = await response.json();
-        const out = document.getElementById("risk-output");
-        if (!response.ok) {
-          out.style.color = "#ffb4b4";
-          out.textContent = JSON.stringify(data, null, 2);
-          return;
-        }
-        out.style.color = "#d4fbef";
-        out.textContent = `Risk: $${data.risk_amount}\nQuantity: ${data.quantity}\nPlanned R: ${data.planned_r ?? "—"}`;
-      });
+      $("load-market").addEventListener("click", loadMarket); $("sync-broker").addEventListener("click", loadBroker); $("load-journal").addEventListener("click", loadJournal);
+      $("sync-all").addEventListener("click", async () => { if (!requireKey()) return; await Promise.allSettled([loadBroker(), loadMarket()]); });
+      $("risk-form").addEventListener("submit", async (event) => { event.preventDefault(); if (!requireKey()) return; const output = $("risk-output"), payload = Object.fromEntries(new FormData(event.currentTarget)); if (!payload.target) delete payload.target; output.textContent = "Calculating…"; try { const response = await fetch("/api/risk/position-size", { method: "POST", headers: { ...apiHeaders(), "content-type": "application/json" }, body: JSON.stringify(payload) }); const data = await response.json(); if (!response.ok) throw new Error(data.detail ? JSON.stringify(data.detail) : `Request failed (${response.status})`); output.innerHTML = `<span class="up">Risk ${money(data.risk_amount)}</span> · Quantity ${Number(data.quantity).toLocaleString()} · Planned R ${data.planned_r ?? "—"}`; } catch (error) { output.textContent = error.message; output.className = "down"; } });
     </script>
   </body>
 </html>

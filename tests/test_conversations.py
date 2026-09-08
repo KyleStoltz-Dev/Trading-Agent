@@ -480,3 +480,51 @@ def test_incomplete_turns_are_durable_but_not_reused_as_model_history(
             "error_type": "ProviderTimeout",
         },
     ]
+
+
+def test_legacy_completed_clarification_pair_is_not_reused_as_model_history(
+    db_session,
+) -> None:
+    suffix = uuid.uuid4().hex[:10]
+    _, _, scope = _workspace_scope(db_session, suffix=f"clarification-{suffix}")
+    conversation = create_conversation(
+        db_session,
+        name=f"clarification-{suffix}",
+        scope=scope,
+    )
+    add_turn(
+        db_session,
+        conversation,
+        "user",
+        "Can you pull the last 3",
+        scope=scope,
+        playbook_version_id=None,
+    )
+    add_turn(
+        db_session,
+        conversation,
+        "assistant",
+        "Which releases should I retrieve?",
+        scope=scope,
+        playbook_version_id=None,
+    )
+    add_turn(
+        db_session,
+        conversation,
+        "user",
+        "What other market models do you have?",
+        scope=scope,
+        playbook_version_id=None,
+    )
+
+    assert conversation_history(
+        db_session,
+        conversation,
+        scope=scope,
+        playbook_version_id=None,
+    ) == [
+        {
+            "role": "user",
+            "content": "What other market models do you have?",
+        }
+    ]

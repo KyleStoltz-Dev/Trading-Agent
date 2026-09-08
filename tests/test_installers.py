@@ -36,6 +36,8 @@ def test_primary_installers_include_hosted_provider_adapters() -> None:
     assert "--extra metatrader" in powershell
     assert "--no-setup" in shell
     assert "$NoSetup" in powershell
+    assert "trade setup --yes" in shell
+    assert "trade.exe\" setup --yes" in powershell
     assert powershell.count("if ($LASTEXITCODE -ne 0)") >= 8
 
 
