@@ -4544,6 +4544,105 @@ def _handle_chat_preflight_intent(
     return True
 
 
+def _detect_clipboard_chart_intent(message: str) -> bool:
+    """Recognize explicit requests to analyze the image currently on the clipboard."""
+    normalized = " ".join(message.casefold().replace("screen shot", "screenshot").split())
+    if not re.search(r"\b(?:analy[sz]e|review|inspect|check|look at)\b", normalized):
+        return False
+    return bool(
+        re.search(
+            r"\b(?:clipboard|copied (?:chart|image|screenshot)|"
+            r"(?:chart|image|screenshot) (?:i |i've |was )?copied|"
+            r"(?:my|this) (?:chart|image|screenshot))\b",
+            normalized,
+        )
+    )
+
+
+def _handle_chat_clipboard_chart_intent(
+    db,
+    conversation: ConversationSession,
+    message: str,
+    *,
+    model: str | None,
+    reasoning_effort: str,
+) -> bool:
+    """Analyze a copied chart without making the trader leave interactive chat."""
+    if not _detect_clipboard_chart_intent(message):
+        return False
+
+    scope = RequestScope(
+        workspace_id=conversation.workspace_id,
+        account_id=conversation.account_id,
+    )
+    playbook_version_id = conversation.active_playbook_version_id
+    add_turn(
+        db,
+        conversation,
+        "user",
+        message,
+        scope=scope,
+        playbook_version_id=playbook_version_id,
+    )
+    console.print(
+        "[dim]Reading the copied image, checking what is visible, and preparing "
+        "a chart review…[/dim]"
+    )
+    try:
+        chart(
+            image=None,
+            clipboard=True,
+            context=message,
+            instrument=None,
+            venue=None,
+            timeframe=None,
+            market_time=None,
+            trade_plan=None,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+    except typer.Exit as exc:
+        add_turn(
+            db,
+            conversation,
+            "assistant",
+            "The copied chart was not analyzed. Nothing was saved, and the "
+            "conversation remained open.",
+            scope=scope,
+            playbook_version_id=playbook_version_id,
+        )
+        if exc.exit_code != 0:
+            console.print("[dim]Returning to chat. Copy an image and try again.[/dim]")
+        return True
+    except Exception as exc:
+        add_turn(
+            db,
+            conversation,
+            "assistant",
+            "The copied chart could not be analyzed. Nothing was saved, and the "
+            "conversation remained open.",
+            scope=scope,
+            playbook_version_id=playbook_version_id,
+        )
+        console.print(
+            f"[red]Chart review stopped: {type(exc).__name__}.[/red]\n"
+            "[dim]Returning to chat. Copy an image and try again.[/dim]"
+        )
+        return True
+
+    add_turn(
+        db,
+        conversation,
+        "assistant",
+        "The copied chart was analyzed and saved as chart evidence. No trade was "
+        "placed or authorized.",
+        scope=scope,
+        playbook_version_id=playbook_version_id,
+    )
+    console.print("[dim]Chart saved. You are still in the same chat.[/dim]")
+    return True
+
+
 def _automatic_chat_trade_context(
     db,
     settings: Settings,
@@ -5037,7 +5136,8 @@ def _run_chat(
                     "/model unload · release this session's local model from memory\n"
                     "/develop <change> · hand a software change to the coding agent\n"
                     "Clear software-change requests also offer a development handoff.\n"
-                    "Everything else is natural language; include a local chart path when needed."
+                    "Everything else is natural language. Copy a chart image, then say "
+                    "'analyze my copied chart'—no file path needed."
                 )
                 continue
             if message == "/onboard":
@@ -5342,6 +5442,20 @@ def _run_chat(
                     f"[green]This session now uses {selected_model}; /mode still controls "
                     "reasoning effort.[/green]"
                 )
+                continue
+            chart_effort = {
+                "economy": "low",
+                "balanced": "medium",
+                "deep": "high",
+                "auto": "medium",
+            }[current_mode]
+            if _handle_chat_clipboard_chart_intent(
+                db,
+                conversation,
+                message,
+                model=current_model_override,
+                reasoning_effort=chart_effort,
+            ):
                 continue
             if _handle_chat_preflight_intent(db, conversation, message):
                 active_strategy = active_session_strategy(

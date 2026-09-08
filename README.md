@@ -306,9 +306,11 @@ The agent can calculate risk, inspect the journal, create a confirmed plan or re
 analyze a local chart path, and report system health. Journal mutations always require a
 terminal confirmation. There are no broker execution tools.
 
-For a chart already copied as an image, `trade chart --clipboard` avoids saving it manually.
-Clipboard capture accepts only PNG, JPEG, or WebP bytes up to 10 MB and never treats clipboard
-text as a path. Hosted-provider analysis still requires an exact outbound disclosure
+For a chart already copied as an image, stay inside `trade` and say “analyze my copied chart.”
+The agent reads the current image, runs the existing confirmed chart-evidence workflow, and
+returns to the same conversation. `trade chart --clipboard` remains available as a direct-command
+fallback. Clipboard capture accepts only PNG, JPEG, or WebP bytes up to 10 MB and never treats
+clipboard text as a path. Hosted-provider analysis still requires an exact outbound disclosure
 confirmation, and accepted clipboard images use the same content-addressed evidence storage as
 path-based charts.
 

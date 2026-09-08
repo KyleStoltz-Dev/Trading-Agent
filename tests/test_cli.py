@@ -472,6 +472,101 @@ def test_chat_trade_intent_offers_existing_preflight_with_default_yes(
     assert "No broker order was placed" in add_turn.call_args_list[-1].args[3]
 
 
+@pytest.mark.parametrize(
+    "message",
+    (
+        "Analyze my copied chart",
+        "Review the screenshot I copied",
+        "Inspect this chart",
+        "Look at the image on my clipboard",
+        "analyze my screen shot",
+    ),
+)
+def test_clipboard_chart_intent_recognizes_natural_requests(message: str) -> None:
+    assert cli_module._detect_clipboard_chart_intent(message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    (
+        "Why can't I paste a screenshot?",
+        "Copy this text",
+        "Review /Users/trader/chart.png",
+        "What is stored on the clipboard?",
+    ),
+)
+def test_clipboard_chart_intent_does_not_capture_questions_or_paths(
+    message: str,
+) -> None:
+    assert not cli_module._detect_clipboard_chart_intent(message)
+
+
+def test_chat_clipboard_chart_intent_runs_chart_and_returns_to_chat(
+    monkeypatch,
+) -> None:
+    conversation = SimpleNamespace(
+        workspace_id=TEST_SCOPE.workspace_id,
+        account_id=TEST_SCOPE.account_id,
+        name="chart-review",
+        active_playbook_version_id=uuid.uuid4(),
+    )
+    add_turn = Mock()
+    chart = Mock()
+    monkeypatch.setattr(cli_module, "add_turn", add_turn)
+    monkeypatch.setattr(cli_module, "chart", chart)
+
+    handled = cli_module._handle_chat_clipboard_chart_intent(
+        Mock(),
+        conversation,
+        "Analyze my copied chart",
+        model="qwen3.5:9b",
+        reasoning_effort="medium",
+    )
+
+    assert handled is True
+    chart.assert_called_once_with(
+        image=None,
+        clipboard=True,
+        context="Analyze my copied chart",
+        instrument=None,
+        venue=None,
+        timeframe=None,
+        market_time=None,
+        trade_plan=None,
+        model="qwen3.5:9b",
+        reasoning_effort="medium",
+    )
+    assert [call.args[2] for call in add_turn.call_args_list] == ["user", "assistant"]
+    assert "analyzed and saved" in add_turn.call_args_list[-1].args[3]
+
+
+def test_chat_clipboard_chart_failure_stays_in_chat(monkeypatch) -> None:
+    conversation = SimpleNamespace(
+        workspace_id=TEST_SCOPE.workspace_id,
+        account_id=TEST_SCOPE.account_id,
+        name="chart-review",
+        active_playbook_version_id=None,
+    )
+    add_turn = Mock()
+    monkeypatch.setattr(cli_module, "add_turn", add_turn)
+    monkeypatch.setattr(
+        cli_module,
+        "chart",
+        Mock(side_effect=typer.Exit(code=2)),
+    )
+
+    assert cli_module._handle_chat_clipboard_chart_intent(
+        Mock(),
+        conversation,
+        "Review the image on my clipboard",
+        model=None,
+        reasoning_effort="low",
+    )
+
+    assert "not analyzed" in add_turn.call_args_list[-1].args[3]
+    assert "conversation remained open" in add_turn.call_args_list[-1].args[3]
+
+
 def test_chat_trade_intent_enables_live_market_when_broker_ready(
     monkeypatch,
 ) -> None:
