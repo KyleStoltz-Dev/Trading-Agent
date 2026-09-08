@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -15,6 +16,8 @@ from app.providers.factory import create_named_model_provider
 from app.providers.ollama_provider import OllamaProvider
 from app.services.model_credentials import model_api_key_configured
 from app.services.secrets import SecretBackendError
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -188,5 +191,8 @@ class SessionModelController:
             if callable(close):
                 try:
                     close()
-                except Exception:
-                    continue
+                except Exception as exc:
+                    logger.warning(
+                        "model provider client cleanup failed: %s",
+                        type(exc).__name__,
+                    )
