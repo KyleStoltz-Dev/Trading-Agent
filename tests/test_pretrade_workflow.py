@@ -70,6 +70,11 @@ def fresh_news() -> NewsReadiness:
 def test_preflight_intent_requires_explicit_near_term_entry_language() -> None:
     for message in (
         "Should I take this trade?",
+        "Should I buy gold?",
+        "Can I enter here?",
+        "Could we go short now?",
+        "Is this a valid setup?",
+        "Buy now or wait?",
         "Review this setup before entry.",
         "Check this trade before I enter.",
         "I'm thinking about taking a short.",
@@ -84,6 +89,9 @@ def test_preflight_intent_requires_explicit_near_term_entry_language() -> None:
         "Should I take this trade example into my backtest?",
         "What does taking a short mean?",
         "Compare my Wyckoff and ICT rules.",
+        "Should I buy a data subscription?",
+        "Can I open the dashboard in a browser?",
+        "Could we open this chart in the app?",
     ):
         assert not detect_preflight_intent(message), message
 
@@ -434,6 +442,25 @@ def test_preflight_orchestration_rolls_back_every_record_on_failure(
         name=strategy_name,
         definition=DEFINITION,
     )
+    scoped = (
+        MindsetCheckIn.workspace_id == request_scope.workspace_id,
+        MindsetCheckIn.account_id == request_scope.account_id,
+    )
+    assessment_scoped = (
+        PretradeAssessment.workspace_id == request_scope.workspace_id,
+        PretradeAssessment.account_id == request_scope.account_id,
+    )
+    trade_scoped = (
+        TradePlan.workspace_id == request_scope.workspace_id,
+        TradePlan.account_id == request_scope.account_id,
+    )
+    before = (
+        db_session.scalar(select(func.count()).select_from(MindsetCheckIn).where(*scoped)),
+        db_session.scalar(
+            select(func.count()).select_from(PretradeAssessment).where(*assessment_scoped)
+        ),
+        db_session.scalar(select(func.count()).select_from(TradePlan).where(*trade_scoped)),
+    )
 
     def fail_trade(*args, **kwargs):
         raise RuntimeError("injected trade failure")
@@ -459,8 +486,14 @@ def test_preflight_orchestration_rolls_back_every_record_on_failure(
             scope=request_scope,
         )
 
-    assert db_session.scalar(select(func.count()).select_from(MindsetCheckIn)) == 0
-    assert db_session.scalar(select(func.count()).select_from(PretradeAssessment)) == 0
+    after = (
+        db_session.scalar(select(func.count()).select_from(MindsetCheckIn).where(*scoped)),
+        db_session.scalar(
+            select(func.count()).select_from(PretradeAssessment).where(*assessment_scoped)
+        ),
+        db_session.scalar(select(func.count()).select_from(TradePlan).where(*trade_scoped)),
+    )
+    assert after == before
 
 
 def test_preflight_orchestration_refuses_unrelated_pending_session_work(

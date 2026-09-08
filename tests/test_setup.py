@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from app.setup import (
+    beginner_setup_settings,
     dependency_guidance,
     estimate_ollama_download_size,
     install_user_launcher,
@@ -43,6 +44,17 @@ def test_setup_normalizes_duplicate_provider_without_touching_secrets(
 def test_setup_refuses_to_write_secret_settings(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unsupported"):
         update_env_file(tmp_path / ".env", {"OPENAI_API_KEY": "secret"})
+
+
+def test_beginner_setup_is_usable_without_storing_secrets() -> None:
+    values = beginner_setup_settings()
+
+    assert values["MODEL_PROVIDER"] == "ollama"
+    assert values["DATABASE_MODE"] == "local"
+    assert values["BROKER_PROVIDER"] == "none"
+    assert values["NEWS_PROVIDER"] == "forex-factory"
+    assert values["TRADINGVIEW_WEBHOOK_ENABLED"] == "false"
+    assert not any("KEY" in key or "TOKEN" in key or "PASSWORD" in key for key in values)
 
 
 def test_setup_writes_runtime_scope_and_risk_without_touching_secrets(

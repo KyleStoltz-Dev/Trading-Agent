@@ -1,5 +1,5 @@
 {
-  "version": "1.8.0",
+  "version": "1.9.0",
   "rules": [
     {
       "id": "human_controls_orders",
@@ -122,6 +122,7 @@
       "add_trade_reflection",
       "record_mindset_check_in",
       "analyze_chart",
+      "record_chart_feedback",
       "add_learning_module",
       "create_strategy_version",
       "set_learning_preferences",

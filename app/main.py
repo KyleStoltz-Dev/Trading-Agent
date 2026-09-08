@@ -29,13 +29,15 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings, secret_value
 from app.connectors import BrokerConfigurationError
 from app.connectors.alpaca import AlpacaConnectorError
-from app.connectors.factory import create_market_data_connector
+from app.connectors.factory import create_broker_connector, create_market_data_connector
 from app.connectors.kraken import KrakenConnectorError
+from app.connectors.metatrader_bridge import MetaTraderBridgeError
 from app.connectors.oanda import OandaConnectorError
 from app.db import (
     SessionLocal,
@@ -44,10 +46,12 @@ from app.db import (
     upgrade_database,
     verify_hosted_rls,
 )
-from app.models import TradePlan, TradeReflection
+from app.models import BrokerConnection, TradePlan, TradeReflection, TradingAccount
 from app.policy import PolicyEngine, ToolContext
 from app.providers import create_model_provider
 from app.schemas import (
+    BrokerPositionRead,
+    BrokerStateRead,
     ChartAnalysis,
     ChatWebhookMessageRead,
     ChatWebhookReceipt,
@@ -725,10 +729,91 @@ def health(policy: RuntimePolicyDependency) -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/broker-state", response_model=BrokerStateRead)
+def broker_state(
+    db: DatabaseSession,
+    policy: RuntimePolicyDependency,
+    scope: ScopeDependency,
+    _api_key: ApiKeyDependency,
+) -> BrokerStateRead:
+    authorize_api_call(policy, name="get_broker_state", arguments={})
+
+    async def fetch_state() -> BrokerStateRead:
+        connector = None
+        try:
+            settings = get_settings()
+            account = db.scalar(
+                select(TradingAccount).where(
+                    TradingAccount.workspace_id == scope.workspace_id,
+                    TradingAccount.id == scope.account_id,
+                )
+            )
+            if account is None:
+                raise BrokerConfigurationError(
+                    "the selected trading account was not found"
+                )
+            if settings.broker_provider == "oanda":
+                provider = "oanda-v20"
+            elif settings.broker_provider == "metatrader":
+                provider = f"metatrader-{settings.metatrader_platform}-bridge"
+            else:
+                raise BrokerConfigurationError(
+                    "select a supported read-only broker before loading account state"
+                )
+            connection = db.scalar(
+                select(BrokerConnection).where(
+                    BrokerConnection.workspace_id == scope.workspace_id,
+                    BrokerConnection.account_id == scope.account_id,
+                    BrokerConnection.provider == provider,
+                )
+            )
+            connector = create_broker_connector(
+                settings,
+                account=account,
+                connection=connection,
+            )
+            account, positions = await asyncio.gather(
+                connector.account(),
+                connector.positions(),
+            )
+        except BrokerConfigurationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except (OandaConnectorError, MetaTraderBridgeError) as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        finally:
+            if connector is not None:
+                await connector.aclose()
+        return BrokerStateRead(
+            provider=account.source,
+            currency=account.currency,
+            balance=account.balance,
+            equity=account.equity,
+            margin_used=account.margin_used,
+            margin_available=account.margin_available,
+            retrieved_at=account.retrieved_at,
+            positions=[
+                BrokerPositionRead(
+                    external_id=item.external_id,
+                    instrument=item.instrument,
+                    net_quantity=item.net_quantity,
+                    average_price=item.average_price,
+                    unrealized_pnl=item.unrealized_pnl,
+                    market_time=item.market_time,
+                )
+                for item in positions
+            ],
+        )
+
+    return asyncio.run(fetch_state())
+
+
 @app.get("/api/market-data", response_model=MarketDataRead)
 def market_data(
+    db: DatabaseSession,
     policy: RuntimePolicyDependency,
     _api_key: ApiKeyDependency,
+    workspace_id: WorkspaceHeader = None,
+    account_id: AccountHeader = None,
     provider: str = Query(default="oanda", description="market data provider"),
     instrument: str = Query(default="XAU_USD", description="provider symbol"),
     timeframe: str = Query(default="H4", description="market timeframe"),
@@ -748,7 +833,41 @@ def market_data(
         connector = None
         try:
             settings = get_settings()
-            connector = create_market_data_connector(settings, provider)
+            normalized_provider = provider.strip().casefold()
+            scoped_oanda = normalized_provider in {"oanda", "oanda-v20", "oanda-v2"} and (
+                workspace_id is not None or account_id is not None
+            )
+            if scoped_oanda:
+                if workspace_id is None or account_id is None:
+                    raise HTTPException(
+                        status_code=428,
+                        detail=(
+                            "both X-Workspace-ID and X-Account-ID are required to use "
+                            "saved OANDA credentials"
+                        ),
+                    )
+                scope = RequestScope(workspace_id=workspace_id, account_id=account_id)
+                try:
+                    account = validate_scope(db, scope)
+                except LookupError as exc:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="workspace/account scope was not found",
+                    ) from exc
+                connection = db.scalar(
+                    select(BrokerConnection).where(
+                        BrokerConnection.workspace_id == scope.workspace_id,
+                        BrokerConnection.account_id == scope.account_id,
+                        BrokerConnection.provider == "oanda-v20",
+                    )
+                )
+                connector = create_broker_connector(
+                    settings,
+                    account=account,
+                    connection=connection,
+                )
+            else:
+                connector = create_market_data_connector(settings, provider)
             quote = await connector.latest_quote(instrument)
             candles = await connector.candles(instrument, timeframe, count=count)
         except BrokerConfigurationError as exc:

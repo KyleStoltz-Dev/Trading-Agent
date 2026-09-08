@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from app.config import Settings
-from app.market_data.contracts import AccountState
+from app.market_data.contracts import AccountState, Candle, Quote
 from app.models import (
     AccountSnapshot,
     BrokerConnection,
@@ -50,7 +50,7 @@ def test_qualification_does_not_confuse_implemented_with_live_verified(
     assert oanda.reachability == "not tested"
     assert oanda.evidence == "not observed"
 
-    for key in ("ibkr", "alpaca", "twelve-data", "ctrader"):
+    for key in ("ibkr", "twelve-data", "ctrader"):
         report = _report(reports, key)
         assert report.implementation == "planned"
         assert report.configuration == "not applicable"
@@ -58,6 +58,10 @@ def test_qualification_does_not_confuse_implemented_with_live_verified(
         assert report.evidence == "not applicable"
     assert _report(reports, "ctrader").implementation == "planned"
     assert _report(reports, "ctrader").configuration == "not applicable"
+    assert _report(reports, "kraken").implementation == "implemented"
+    assert _report(reports, "kraken").configuration == "configured"
+    assert _report(reports, "alpaca").implementation == "implemented"
+    assert _report(reports, "alpaca").configuration == "not configured"
     assert _report(reports, "trading-economics").evidence == "not observed"
 
 
@@ -220,6 +224,69 @@ def test_live_verification_is_read_only_and_redacts_provider_failure(
     assert result.detail == "Read-only verification failed (RuntimeError)."
     assert result.verification_source == "real"
     assert secret not in result.detail
+
+
+def test_live_verification_checks_implemented_public_market_data(monkeypatch) -> None:
+    timestamp = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
+
+    class PublicMarketConnector:
+        closed = False
+
+        async def latest_quote(self, instrument: str):
+            return Quote(
+                instrument=instrument,
+                bid=Decimal("100"),
+                ask=Decimal("101"),
+                market_time=timestamp,
+                retrieved_at=timestamp,
+                source="kraken",
+                venue="KRAKEN",
+            )
+
+        async def candles(self, instrument: str, timeframe: str, *, count: int):
+            return (
+                Candle(
+                    instrument=instrument,
+                    timeframe=timeframe,
+                    started_at=timestamp,
+                    open=Decimal("99"),
+                    high=Decimal("102"),
+                    low=Decimal("98"),
+                    close=Decimal("100"),
+                    volume=Decimal("10"),
+                    complete=True,
+                    retrieved_at=timestamp,
+                    source="kraken",
+                    venue="KRAKEN",
+                ),
+            )[:count]
+
+        async def aclose(self):
+            self.closed = True
+
+    connector = PublicMarketConnector()
+    monkeypatch.setattr(
+        "app.services.integration_verification.create_market_data_connector",
+        lambda _settings, _provider: connector,
+    )
+    report = IntegrationVerification(
+        key="kraken",
+        kind="market-data",
+        name="Kraken public market data",
+        implementation="implemented",
+        configuration="configured",
+        reachability="not tested",
+        evidence="not observed",
+        last_success_at=None,
+        detail="configured",
+    )
+
+    result = asyncio.run(verify_live_integrations(Settings(_env_file=None), (report,)))[0]
+
+    assert result.reachability == "verified now"
+    assert result.evidence == "observed"
+    assert "BTC_USD" in result.detail
+    assert connector.closed is True
 
 
 def test_live_oanda_verification_checks_account_without_persisting(

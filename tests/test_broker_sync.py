@@ -116,8 +116,22 @@ def test_broker_sync_is_idempotent_and_reconciles(
         )
     )
 
-    event_count = db_session.scalar(select(func.count()).select_from(ExecutionEvent))
-    fill_count = db_session.scalar(select(func.count()).select_from(Fill))
+    event_count = db_session.scalar(
+        select(func.count())
+        .select_from(ExecutionEvent)
+        .where(
+            ExecutionEvent.workspace_id == workspace.id,
+            ExecutionEvent.account_id == account.id,
+        )
+    )
+    fill_count = db_session.scalar(
+        select(func.count())
+        .select_from(Fill)
+        .where(
+            Fill.workspace_id == workspace.id,
+            Fill.account_id == account.id,
+        )
+    )
     assert first.imported_events == 1
     assert first.imported_fills == 1
     assert first.reconciliation_issues == ()
@@ -274,23 +288,46 @@ def test_broker_sync_tracks_lifecycle_costs_and_snapshot_links(
 
     trades = {
         item.external_trade_id: item
-        for item in db_session.scalars(select(Trade).order_by(Trade.opened_at))
+        for item in db_session.scalars(
+            select(Trade)
+            .where(
+                Trade.workspace_id == workspace.id,
+                Trade.account_id == account.id,
+            )
+            .order_by(Trade.opened_at)
+        )
     }
     closed = trades["trade-long"]
     active = trades["trade-short"]
     close_fill = db_session.scalar(
-        select(Fill).where(Fill.external_fill_id == "fill-close-long")
+        select(Fill).where(
+            Fill.workspace_id == workspace.id,
+            Fill.account_id == account.id,
+            Fill.external_fill_id == "fill-close-long",
+        )
     )
     close_event = db_session.scalar(
         select(ExecutionEvent).where(
-            ExecutionEvent.external_event_id == "fill-close-long"
+            ExecutionEvent.workspace_id == workspace.id,
+            ExecutionEvent.account_id == account.id,
+            ExecutionEvent.external_event_id == "fill-close-long",
         )
     )
     latest_position = db_session.scalar(
-        select(PositionSnapshot).order_by(PositionSnapshot.retrieved_at.desc())
+        select(PositionSnapshot)
+        .where(
+            PositionSnapshot.workspace_id == workspace.id,
+            PositionSnapshot.account_id == account.id,
+        )
+        .order_by(PositionSnapshot.retrieved_at.desc())
     )
     latest_account = db_session.scalar(
-        select(AccountSnapshot).order_by(AccountSnapshot.retrieved_at.desc())
+        select(AccountSnapshot)
+        .where(
+            AccountSnapshot.workspace_id == workspace.id,
+            AccountSnapshot.account_id == account.id,
+        )
+        .order_by(AccountSnapshot.retrieved_at.desc())
     )
 
     assert first.imported_events == 4
@@ -298,8 +335,16 @@ def test_broker_sync_tracks_lifecycle_costs_and_snapshot_links(
     assert first.reconciliation_issues == ()
     assert second.imported_events == 0
     assert second.duplicate_events == 4
-    assert db_session.scalar(select(func.count()).select_from(Trade)) == 2
-    assert db_session.scalar(select(func.count()).select_from(Fill)) == 4
+    assert db_session.scalar(
+        select(func.count())
+        .select_from(Trade)
+        .where(Trade.workspace_id == workspace.id, Trade.account_id == account.id)
+    ) == 2
+    assert db_session.scalar(
+        select(func.count())
+        .select_from(Fill)
+        .where(Fill.workspace_id == workspace.id, Fill.account_id == account.id)
+    ) == 4
     assert closed.status == "closed"
     assert closed.closed_at == NOW.replace(minute=2)
     assert active.status == "open"
@@ -390,8 +435,17 @@ def test_broker_sync_does_not_invent_missing_trade_open_history(
 
     assert result.imported_events == 1
     assert result.imported_fills == 1
-    assert db_session.scalar(select(func.count()).select_from(Trade)) == 0
-    execution = db_session.scalar(select(ExecutionEvent))
+    assert db_session.scalar(
+        select(func.count())
+        .select_from(Trade)
+        .where(Trade.workspace_id == workspace.id, Trade.account_id == account.id)
+    ) == 0
+    execution = db_session.scalar(
+        select(ExecutionEvent).where(
+            ExecutionEvent.workspace_id == workspace.id,
+            ExecutionEvent.account_id == account.id,
+        )
+    )
     assert execution is not None
     assert execution.trade_id is None
     assert execution.provider_metadata["trade_effects"][0]["effect"] == "closed"
@@ -455,8 +509,17 @@ def test_broker_sync_preserves_ambiguous_external_trade_without_inventing_lifecy
 
     assert result.imported_events == 1
     assert result.imported_fills == 1
-    assert db_session.scalar(select(func.count()).select_from(Trade)) == 0
-    execution = db_session.scalar(select(ExecutionEvent))
+    assert db_session.scalar(
+        select(func.count())
+        .select_from(Trade)
+        .where(Trade.workspace_id == workspace.id, Trade.account_id == account.id)
+    ) == 0
+    execution = db_session.scalar(
+        select(ExecutionEvent).where(
+            ExecutionEvent.workspace_id == workspace.id,
+            ExecutionEvent.account_id == account.id,
+        )
+    )
     assert execution is not None
     assert execution.external_trade_id == "position-unknown"
     assert execution.trade_id is None
@@ -594,8 +657,19 @@ def test_broker_sync_surfaces_conflicting_external_event_ids_and_holds_cursor(
     assert second.conflicting_events == 1
     assert second.cursor_before == "1"
     assert second.cursor_after == "2"
-    assert db_session.scalar(select(func.count()).select_from(ExecutionEvent)) == 1
-    assert db_session.scalar(select(func.count()).select_from(Fill)) == 1
+    assert db_session.scalar(
+        select(func.count())
+        .select_from(ExecutionEvent)
+        .where(
+            ExecutionEvent.workspace_id == workspace.id,
+            ExecutionEvent.account_id == account.id,
+        )
+    ) == 1
+    assert db_session.scalar(
+        select(func.count())
+        .select_from(Fill)
+        .where(Fill.workspace_id == workspace.id, Fill.account_id == account.id)
+    ) == 1
     assert cursor is not None
     assert cursor.cursor_value == "1"
     assert connection.status == "degraded"

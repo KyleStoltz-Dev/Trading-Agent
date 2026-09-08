@@ -272,6 +272,7 @@ def list_trade_plans(
     *,
     scope: RequestScope,
     playbook_version_id: uuid.UUID | None = None,
+    instrument: str | None = None,
 ) -> list[TradePlan]:
     validate_strategy_scope(db, scope, playbook_version_id)
     statement = (
@@ -286,6 +287,12 @@ def list_trade_plans(
         statement = statement.where(
             TradePlan.playbook_version_id == playbook_version_id
         )
+    if instrument is not None:
+        compact_instrument = re.sub(r"[^A-Z0-9]", "", instrument.upper())
+        normalized_column = func.upper(
+            func.replace(func.replace(TradePlan.instrument, "_", ""), "/", "")
+        )
+        statement = statement.where(normalized_column == compact_instrument)
     if limit is not None:
         statement = statement.limit(limit)
     return list(db.scalars(statement))

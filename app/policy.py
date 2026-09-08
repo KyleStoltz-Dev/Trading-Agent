@@ -65,6 +65,7 @@ DIRECT_ACTION_METADATA = {
     "create_strategy_version": {"mutating": True, "deterministic": False},
     "create_trade_plan": {"mutating": True, "deterministic": False},
     "get_market_data": {"mutating": False, "deterministic": False},
+    "get_broker_state": {"mutating": False, "deterministic": False},
     "exclude_strategy_knowledge": {"mutating": True, "deterministic": False},
     "get_live_quote": {"mutating": False, "deterministic": False},
     "get_system_health": {"mutating": False, "deterministic": False},

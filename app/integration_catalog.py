@@ -56,17 +56,25 @@ INTEGRATIONS = (
         documentation="https://www.interactivebrokers.com/campus/ibkr-api-page/webapi-doc/",
     ),
     IntegrationOption(
-        kind="broker",
+        kind="market-data",
+        key="kraken",
+        name="Kraken public market data",
+        status="ready",
+        capability="read-only crypto quotes and historical candles; no account access",
+        setup="No API key required for public market data",
+        documentation="https://docs.kraken.com/api/docs/rest-api/get-ticker-information/",
+    ),
+    IntegrationOption(
+        kind="market-data",
         key="alpaca",
-        name="Alpaca",
-        status="planned",
+        name="Alpaca market data",
+        status="ready",
         capability=(
-            "stocks, ETFs, and crypto market data with optional account/equity read-only "
-            "feeds for retail and prop-like workflows"
+            "read-only stocks, ETFs, and crypto quotes and historical candles; "
+            "account access is not implemented"
         ),
         setup=(
-            "Future API keys via ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY; "
-            "market-data-only mode by default"
+            "ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY; market-data-only mode"
         ),
         documentation="https://alpaca.markets/docs/",
     ),

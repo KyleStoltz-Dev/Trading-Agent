@@ -48,7 +48,7 @@ fi
   --requirement requirements-bootstrap.txt
 .venv/bin/uv sync --locked --inexact --extra ai
 if [ "$RUN_SETUP" = true ]; then
-  .venv/bin/trade setup
+  .venv/bin/trade setup --yes
 else
   echo "Locked Trading Agent environment installed; guided setup was skipped."
 fi

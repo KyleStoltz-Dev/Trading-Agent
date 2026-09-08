@@ -122,7 +122,13 @@ def test_credential_rotation_and_removal_are_audited_without_plaintext(
     )
     assert removed.connection.status == "disabled"
     assert removed.connection.config_reference is None
-    assert [event.action for event in db_session.scalars(select(SecurityAuditEvent))] == [
+    scoped_events = db_session.scalars(
+        select(SecurityAuditEvent).where(
+            SecurityAuditEvent.workspace_id == request_scope.workspace_id,
+            SecurityAuditEvent.account_id == request_scope.account_id,
+        )
+    )
+    assert [event.action for event in scoped_events] == [
         "credential_created",
         "credential_removed",
     ]

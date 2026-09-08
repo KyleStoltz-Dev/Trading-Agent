@@ -47,6 +47,20 @@ SAFE_SETUP_KEYS = frozenset(
 )
 
 
+def beginner_setup_settings(*, model: str = "qwen3.5:9b") -> dict[str, str]:
+    """Return the safe, key-free settings used by the first-run experience."""
+    values = provider_settings("ollama", model)
+    values.update(
+        {
+            "DATABASE_MODE": "local",
+            "BROKER_PROVIDER": "none",
+            "NEWS_PROVIDER": "forex-factory",
+            "TRADINGVIEW_WEBHOOK_ENABLED": "false",
+        }
+    )
+    return values
+
+
 def update_env_file(path: Path, values: dict[str, str]) -> None:
     unknown = set(values) - SAFE_SETUP_KEYS
     if unknown:

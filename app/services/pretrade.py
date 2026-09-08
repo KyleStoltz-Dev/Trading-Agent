@@ -46,6 +46,20 @@ TRADE_INTENT = re.compile(
 
 PREFLIGHT_INTENT_PATTERNS = (
     re.compile(
+        r"\b(?:should|can|could|would)\s+(?:i|we)\s+"
+        r"(?:buy|sell|enter|go\s+long|go\s+short|take|open)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bis\s+(?:this|that|the)\s+(?:a\s+)?"
+        r"(?:good|valid|safe|high[- ]quality)\s+(?:trade|setup|entry)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:buy|sell|enter|go\s+long|go\s+short)\s+(?:now|here)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
         r"\bshould\s+(?:i|we)\s+(?:take|enter|open)\s+"
         r"(?:this|the|a|an)?\s*(?:trade|long|short|position)\b",
         re.IGNORECASE,
@@ -78,12 +92,23 @@ NON_PREFLIGHT_CONTEXT = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+NON_TRADING_ACTION_CONTEXT = re.compile(
+    r"\b("
+    r"api|app|application|browser|chart|dashboard|data\s+(?:feed|plan|subscription)|"
+    r"file|folder|model|settings|software|subscription|web(?:page|site)?"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 def detect_preflight_intent(message: str) -> bool:
     """Detect explicit near-term entry-review requests without broad trade chatter."""
     normalized = " ".join(message.strip().split())
-    if not normalized or NON_PREFLIGHT_CONTEXT.search(normalized):
+    if (
+        not normalized
+        or NON_PREFLIGHT_CONTEXT.search(normalized)
+        or NON_TRADING_ACTION_CONTEXT.search(normalized)
+    ):
         return False
     return any(pattern.search(normalized) for pattern in PREFLIGHT_INTENT_PATTERNS)
 

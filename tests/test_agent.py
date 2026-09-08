@@ -20,6 +20,7 @@ from app.services.agent import (
 from app.services.agent import TradingAgent as _TradingAgent
 from app.services.catalog import create_playbook_version
 from app.services.learning import MODULE_CATALOG
+from app.services.trading_workflow import is_dangling_count_clarification
 from app.services.web_fetch import WebPage
 from app.services.workspaces import RequestScope
 
@@ -187,6 +188,156 @@ class StaticProvider:
         raise AssertionError("not used")
 
 
+def test_agent_compacts_repeated_clarification_for_dangling_count() -> None:
+    response = (
+        "It looks like your message got cut off. Could you complete the request? "
+        "For example: last 3 FOMC decisions, last 3 CPI releases, or something else. "
+        "What exactly are you looking to review? I need clarification on your "
+        "incomplete request. Which event type do you mean?"
+    )
+    agent = TradingAgent(
+        settings=Settings(),
+        db=Mock(),
+        engine=Mock(),
+        confirm_mutation=Mock(return_value=False),
+        provider=StaticProvider(response),
+    )
+
+    result = agent.respond("last 3")
+
+    assert result == (
+        "Your request ends at “last 3,” so I’m missing what you want counted. "
+        "What should I retrieve?"
+    )
+    assert result.count("?") == 1
+
+
+def test_agent_preserves_resolved_answer_for_dangling_count() -> None:
+    response = "The last three closed trades were A, B, and C."
+    agent = TradingAgent(
+        settings=Settings(),
+        db=Mock(),
+        engine=Mock(),
+        confirm_mutation=Mock(return_value=False),
+        provider=StaticProvider(response),
+    )
+
+    assert agent.respond("last 3") == response
+    assert not is_dangling_count_clarification("last 3", response)
+
+
+def test_single_count_clarification_is_excluded_from_future_context() -> None:
+    assert is_dangling_count_clarification(
+        "Can you pull the last 3",
+        "Which releases should I retrieve?",
+    )
+
+
+def test_dangling_count_is_resolved_from_the_recent_exchange() -> None:
+    agent = TradingAgent(
+        settings=Settings(),
+        db=Mock(),
+        engine=Mock(),
+        confirm_mutation=Mock(return_value=False),
+        provider=StaticProvider("Resolved."),
+    )
+
+    prepared = agent.prepare(
+        "Can you pull the last 3",
+        [
+            {"role": "user", "content": "Reflect on previous FOMC rate decisions."},
+            {"role": "assistant", "content": "No history is stored locally."},
+        ],
+    )
+
+    assert "DANGLING REFERENCE RESOLUTION" in prepared.instructions
+    assert "previous FOMC rate decisions" in prepared.instructions
+    assert "continue that request without asking" in prepared.instructions
+
+
+def test_preloaded_trade_context_prevents_duplicate_broker_reads(monkeypatch) -> None:
+    stored = Mock(side_effect=AssertionError("context must not be loaded twice"))
+    monkeypatch.setattr("app.services.agent.stored_trade_context", stored)
+    agent = TradingAgent(
+        settings=Settings(),
+        db=Mock(),
+        engine=Mock(),
+        confirm_mutation=Mock(return_value=False),
+        provider=StaticProvider("Assessment."),
+    )
+    agent.prepare(
+        "Analyze XAUUSD",
+        evidence_context="CURRENT READ-ONLY TRADE CONTEXT\n{}",
+    )
+
+    result = json.loads(
+        agent._execute_tool(
+            "get_trade_context",
+            {
+                "instrument": "XAU_USD",
+                "context_timeframe": "H4",
+                "trigger_timeframe": "M5",
+                "candle_count": 50,
+                "trade_reference": None,
+            },
+        )
+    )
+
+    assert result["result"]["already_supplied"] is True
+    stored.assert_not_called()
+
+
+def test_inactive_strategy_lookup_returns_saved_options_and_local_drafts(
+    monkeypatch,
+) -> None:
+    saved = SimpleNamespace(
+        name="saved-wyckoff",
+        version=2,
+        description="Observed range behavior.",
+        content_hash="a" * 64,
+    )
+    monkeypatch.setattr("app.services.agent.strategy_by_version_id", Mock(return_value=None))
+    monkeypatch.setattr(
+        "app.services.agent.list_strategy_summaries",
+        Mock(return_value=[saved]),
+    )
+    monkeypatch.setattr(
+        "app.services.agent.list_local_strategy_templates",
+        Mock(return_value=[{"name": "kyle-price-action", "status": "draft_not_active"}]),
+    )
+    agent = TradingAgent(
+        settings=Settings(),
+        db=Mock(),
+        engine=Mock(),
+        confirm_mutation=Mock(return_value=False),
+        provider=StaticProvider("Assessment."),
+    )
+
+    result = json.loads(agent._execute_tool("get_active_strategy", {}))["result"]
+
+    assert result["active"] is None
+    assert result["available_saved_strategies"][0]["name"] == "saved-wyckoff"
+    assert result["local_draft_templates"][0]["name"] == "kyle-price-action"
+
+
+def test_agent_instructions_require_operational_advisor_framing() -> None:
+    agent = TradingAgent(
+        settings=Settings(),
+        db=Mock(),
+        engine=Mock(),
+        confirm_mutation=Mock(return_value=False),
+        provider=StaticProvider("Assessment."),
+    )
+
+    prepared = agent.prepare("Assess my setup without making a trade decision.")
+
+    assert "strongest disconfirming fact" in prepared.instructions
+    assert "single next best action" in prepared.instructions
+    assert "deterministic" in prepared.instructions
+    assert "guided preflight" in prepared.instructions
+    assert "participant-intent labels remain hypotheses" in prepared.instructions
+
+
 class HostileOutlookNewsConnector:
     async def calendar(self, **kwargs):
         now = datetime.now(UTC)
@@ -311,7 +462,7 @@ def test_agent_executes_risk_tool_and_loads_runtime_policy() -> None:
 
     assert result == "Risk is $100 and planned R is 4."
     assert provider.max_output_tokens == 900
-    assert "Runtime policy 1.8.0" in provider.instructions
+    assert "Runtime policy 1.9.0" in provider.instructions
     assert "human_controls_orders" in provider.instructions
     assert "TASK-RELEVANT TRADING HARNESS" in provider.instructions
     assert "skills/position-planning/SKILL.md" in provider.instructions

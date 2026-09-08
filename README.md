@@ -68,9 +68,9 @@ Set-ExecutionPolicy -Scope Process Bypass
 ```
 
 Each installer creates an isolated `.venv`, bootstraps the pinned `uv` installer, synchronizes
-the checked-in lock file, and starts the guided setup. Windows also installs the locked MT5
-bridge extra. Setup configures the provider, starts Ollama when selected, and downloads the
-configured local model. It installs `trade` under `~/.local/bin` on macOS/Linux and as a
+the checked-in lock file, and applies the recommended beginner setup. Windows also installs
+the locked MT5 bridge extra. Setup configures the provider, starts Ollama when selected, and
+downloads the configured local model. It installs `trade` under `~/.local/bin` on macOS/Linux and as a
 command file under `%LOCALAPPDATA%\TradingAgent\bin` on Windows; it never collects API keys,
 broker tokens, or database passwords. The default installer includes both hosted model
 adapters, so choosing OpenAI or Anthropic does not leave a missing SDK.
@@ -82,6 +82,14 @@ After that, start the agent from any directory:
 trade
 ```
 
+On a first run, Trading Agent offers a one-step beginner setup inside the terminal. Press
+Enter to use the private defaults: local Ollama, local PostgreSQL, the free Forex Factory
+calendar, no broker, and no inbound alerts. It then offers a conservative starter profile
+that can be changed later in natural language. Trading Agent manages the underlying settings
+file; beginners do not need to find or edit it. Broker tokens are stored separately in the
+operating-system credential vault, and the starter setup never writes API keys, passwords,
+or tokens.
+
 From the repo checkout, you can also run a starter script:
 
 ```bash
@@ -89,7 +97,8 @@ bash scripts/start-trading-agent.sh --auto
 ```
 
 If the launcher directory is not already on `PATH`, setup prints platform-specific
-instructions. The longer manual installation remains available:
+instructions. The longer manual installation remains available for developers and custom
+deployments:
 
 ```bash
 cp .env.example .env
@@ -466,6 +475,17 @@ trade preflight
 Inside `trade`, explicit near-term requests such as “Should I take this trade?” offer to
 launch the same workflow with a default-yes prompt. Declining returns to normal chat without
 creating an assessment. A validation error is contained and also returns to chat.
+
+For an instrument-specific chart, setup, or entry conversation, the agent now assembles the
+current read-only context before responding: the active plan, broker account and quote,
+higher- and trigger-timeframe candle measurements, linked screenshots, nearby economic events,
+and recent comparable plans. One unavailable broker read is reported as missing without erasing
+the rest of the evidence or forcing the trader to repeat known values.
+
+Saved chart screenshots can be attached to the current trade as before-entry, entry,
+management, or exit evidence. Trader corrections such as “wrong phase” or “not part of my
+strategy” are stored against that exact screenshot for later evaluation; they do not silently
+rewrite immutable strategy rules.
 
 If the named session has no exact strategy, the CLI shows saved strategies or walks through
 building, reviewing, saving, and activating a new immutable definition before automatically

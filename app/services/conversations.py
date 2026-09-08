@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import ConversationSession, ConversationTurn
+from app.services.trading_workflow import is_dangling_count_clarification
 from app.services.workspaces import (
     RequestScope,
     validate_scope,
@@ -240,7 +241,26 @@ def conversation_history(
         )
     )
     recent.reverse()
-    return [{"role": turn.role, "content": turn.content} for turn in recent]
+    history = [{"role": turn.role, "content": turn.content} for turn in recent]
+    reusable: list[dict[str, str]] = []
+    index = 0
+    while index < len(history):
+        current = history[index]
+        following = history[index + 1] if index + 1 < len(history) else None
+        if (
+            current["role"] == "user"
+            and following is not None
+            and following["role"] == "assistant"
+            and is_dangling_count_clarification(
+                current["content"],
+                following["content"],
+            )
+        ):
+            index += 2
+            continue
+        reusable.append(current)
+        index += 1
+    return reusable
 
 
 def conversation_transcript(

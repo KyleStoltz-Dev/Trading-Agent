@@ -48,6 +48,11 @@ def test_strategy_language_alone_is_not_software_development() -> None:
     assert classify_task("I need to change how I enter this setup") == "analysis"
 
 
+def test_framework_definition_questions_use_the_fast_routine_route() -> None:
+    assert classify_task("What do you know about Wyckoff?") == "routine"
+    assert classify_task("What other market models do you have?") == "routine"
+
+
 def test_ollama_uses_local_model_profiles() -> None:
     settings = Settings(
         model_provider="ollama",
