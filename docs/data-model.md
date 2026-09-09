@@ -59,6 +59,7 @@ session, and a broker fill cannot attach to another account's connection or trad
 | Decision | `trade_plans`, `market_contexts`, `observations`, `evidence_items`, `analysis_runs` | Separates facts from hypotheses and records content, policy, prompt, model, input, and output provenance. |
 | Events | `economic_events`, `news_items` | Retains provider IDs, source/retrieval timestamps, importance, values, and links without copying full articles. |
 | Chart alerts | `tradingview_alerts` | Retains verified, replay-safe alert facts and OHLCV without treating alert text as instructions or broker truth. |
+| Paper trade imports | `broker_connections`, `trades`, `execution_events`, `fills` | Normalizes bounded TradingView Paper Trading CSV exports into the same account-scoped journal ledger as read-only broker history. |
 | Lifecycle | `trades`, `trade_management_events` | Connects planning, broker records, fills, management decisions, and review for one position lifecycle. |
 | Future preview | `order_intents`, `order_approvals` | Records a policy-bound proposal and the trader's separate decision. No connector exposes submission methods yet. |
 | Execution | `execution_events`, `fills` | Stores normalized broker truth with external IDs, occurrence/ingestion times, and uniqueness constraints. |

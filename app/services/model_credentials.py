@@ -52,18 +52,17 @@ def resolve_model_credentials(
     *,
     provider: CloudModelProvider,
 ) -> ModelCredentials | None:
-    environment_key = _environment_key(settings, provider)
-    if environment_key:
-        return ModelCredentials(api_key=environment_key)
     if settings.broker_secret_backend == LEGACY_ENV_BACKEND:
-        return None
+        environment_key = _environment_key(settings, provider)
+        return ModelCredentials(api_key=environment_key) if environment_key else None
     values = secret_backend(settings).get(_reference(settings, provider))
-    if values is None:
-        return None
-    api_key = values.get("api_key", "").strip()
-    if not api_key:
-        raise SecretBackendError("model credential vault entry is incomplete")
-    return ModelCredentials(api_key=api_key)
+    if values is not None:
+        api_key = values.get("api_key", "").strip()
+        if not api_key:
+            raise SecretBackendError("model credential vault entry is incomplete")
+        return ModelCredentials(api_key=api_key)
+    environment_key = _environment_key(settings, provider)
+    return ModelCredentials(api_key=environment_key) if environment_key else None
 
 
 def model_api_key_configured(

@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import uvicorn
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 
 from app.config import get_settings, secret_value
 
@@ -108,10 +109,19 @@ class MetaTrader5Terminal:
             )
         return value
 
+    def _verified_account(self) -> Any:
+        """Read and attest the terminal login while the IPC lock is held."""
+        account = self._required(self.module.account_info(), "account_info")
+        if str(account.login) != self.account_id:
+            raise MetaTraderTerminalError(
+                "the active MT5 account changed; reconnect the bridge before reading data"
+            )
+        return account
+
     def health(self) -> dict[str, Any]:
         with self._lock:
             terminal = self._required(self.module.terminal_info(), "terminal_info")
-            account = self._required(self.module.account_info(), "account_info")
+            account = self._verified_account()
             return {
                 "platform": self.platform,
                 "account_id": str(account.login),
@@ -123,16 +133,39 @@ class MetaTrader5Terminal:
 
     def quote(self, instrument: str) -> dict[str, Any]:
         with self._lock:
+            self._verified_account()
             tick = self._required(
                 self.module.symbol_info_tick(instrument),
                 "symbol_info_tick",
             )
+            self._verified_account()
             return {
                 "symbol": instrument,
                 "bid": str(tick.bid),
                 "ask": str(tick.ask),
                 "time_msc": int(tick.time_msc),
             }
+
+    def symbols(self) -> dict[str, Any]:
+        with self._lock:
+            self._verified_account()
+            raw_symbols = self._required(self.module.symbols_get(), "symbols_get")
+            symbols = []
+            for raw in raw_symbols:
+                item = _values(raw)
+                symbol = str(item.get("name") or "").strip()
+                if not symbol:
+                    continue
+                symbols.append(
+                    {
+                        "symbol": symbol,
+                        "description": str(item.get("description") or symbol),
+                        "path": str(item.get("path") or "unknown"),
+                        "tradable": int(item.get("trade_mode", 1)) != 0,
+                    }
+                )
+            account = self._verified_account()
+            return {"account_id": str(account.login), "symbols": symbols}
 
     def candles(
         self,
@@ -145,6 +178,7 @@ class MetaTrader5Terminal:
         if mt5_timeframe is None:
             raise ValueError(f"unsupported MT5 timeframe: {timeframe}")
         with self._lock:
+            self._verified_account()
             rates = self._required(
                 self.module.copy_rates_from_pos(instrument, mt5_timeframe, 0, count),
                 "copy_rates_from_pos",
@@ -165,11 +199,12 @@ class MetaTrader5Terminal:
                         "complete": index < len(rates) - 1,
                     }
                 )
+            self._verified_account()
             return {"candles": items}
 
     def account(self) -> dict[str, Any]:
         with self._lock:
-            account = self._required(self.module.account_info(), "account_info")
+            account = self._verified_account()
             return {
                 "account_id": str(account.login),
                 "currency": str(account.currency),
@@ -182,6 +217,7 @@ class MetaTrader5Terminal:
 
     def positions(self) -> dict[str, Any]:
         with self._lock:
+            self._verified_account()
             raw_positions = self._required(self.module.positions_get(), "positions_get")
             grouped: dict[str, dict[str, Any]] = {}
             for raw in raw_positions:
@@ -234,19 +270,23 @@ class MetaTrader5Terminal:
                         "time_msc": latest_time_msc,
                     }
                 )
-            return {"account_id": self.account_id, "positions": items}
+            account = self._verified_account()
+            return {"account_id": str(account.login), "positions": items}
 
     def events(self, cursor: str | None) -> dict[str, Any]:
         if cursor is None:
-            baseline = f"{int(datetime.now(UTC).timestamp() * 1_000)}:0"
-            return {
-                "account_id": self.account_id,
-                "events": [],
-                "next_cursor": baseline,
-                "baseline_only": True,
-            }
+            with self._lock:
+                account = self._verified_account()
+                baseline = f"{int(datetime.now(UTC).timestamp() * 1_000)}:0"
+                return {
+                    "account_id": str(account.login),
+                    "events": [],
+                    "next_cursor": baseline,
+                    "baseline_only": True,
+                }
         start, key = _cursor_start(cursor)
         with self._lock:
+            self._verified_account()
             now = datetime.now(UTC)
             window_end = min(start + _MAX_HISTORY_WINDOW, now)
             raw_deals = self._required(
@@ -391,8 +431,9 @@ class MetaTrader5Terminal:
                 next_key = (int(window_end.timestamp() * 1_000), 0)
             else:
                 next_key = key
+            account = self._verified_account()
             return {
-                "account_id": self.account_id,
+                "account_id": str(account.login),
                 "events": events,
                 "next_cursor": f"{next_key[0]}:{next_key[1]}",
                 "has_more": has_more,
@@ -408,6 +449,15 @@ def create_bridge_app(terminal: MetaTrader5Terminal, *, token: str) -> FastAPI:
         redoc_url=None,
         openapi_url=None,
     )
+
+    @app.exception_handler(MetaTraderTerminalError)
+    async def terminal_error(
+        _request: Request,
+        error: MetaTraderTerminalError,
+    ) -> JSONResponse:
+        detail = str(error)
+        status_code = 409 if "active MT5 account changed" in detail else 503
+        return JSONResponse(status_code=status_code, content={"detail": detail})
 
     def authorize(
         authorization: Annotated[str | None, Header()] = None,
@@ -427,6 +477,10 @@ def create_bridge_app(terminal: MetaTrader5Terminal, *, token: str) -> FastAPI:
         instrument: Annotated[str, Query(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}$")],
     ) -> dict[str, Any]:
         return terminal.quote(instrument)
+
+    @app.get("/v1/symbols", dependencies=read_only)
+    def symbols() -> dict[str, Any]:
+        return terminal.symbols()
 
     @app.get("/v1/candles", dependencies=read_only)
     def candles(

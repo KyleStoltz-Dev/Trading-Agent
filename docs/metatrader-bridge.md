@@ -16,8 +16,8 @@ cursors, source hashes, and reconciliation results. It does not store every tick
 
 ## Run the MT5 companion on Windows
 
-Use a dedicated Windows machine or VPS with MT5 installed and logged into the intended
-practice account:
+Use a dedicated Windows machine or VPS with MT5 installed and logged into a demo or live
+account:
 
 ```powershell
 py -m venv .venv
@@ -60,13 +60,13 @@ METATRADER_PLATFORM=mt5
 METATRADER_BRIDGE_URL=https://private-bridge.example
 METATRADER_BRIDGE_TOKEN=the-same-dedicated-token
 METATRADER_ACCOUNT_ID=12345678
-METATRADER_MODE=practice
+METATRADER_MODE=demo
 ```
 
 Run:
 
 ```bash
-trade broker configure-metatrader --label mt5-practice
+trade broker configure-metatrader --label mt5-demo
 trade broker quote XAUUSD
 trade broker sync
 trade data status
@@ -88,12 +88,13 @@ The stored cursor is `<time_milliseconds>:<deal_ticket>`. Each bridge response i
 5,000 deals and the client response is byte-bounded. Run sync again to continue when more
 history remains. Broker event IDs make repeated imports idempotent.
 
-MT5 deal records preserve their position ID, direction, volume, price, profit, commission,
-fee, and swap. A historical deal alone does not always prove whether an exit was a partial
-reduction, full close, or reversal. The included service therefore marks these histories as
-non-inferable: fills and current snapshots are stored, but the ledger does not manufacture a
-trade lifecycle link. A future lifecycle reconstruction must prove the complete position
-history before adding authoritative `trade_effects`.
+MT5 deal records preserve their position ID, explicit entry/exit classification, direction,
+volume, price, profit, commission, fee, and swap. The included bridge emits an `opened`
+effect only for MT5 entry deals. It marks an exit as `closed` only when the position is no
+longer active and that deal is the final known exit in the terminal's position history;
+otherwise it records a `reduced` effect. Bridges that cannot prove those facts must send no
+effects and keep `infer_trade_open=false`. The ledger never guesses a lifecycle from price or
+direction alone.
 
 ## Bridge contract for MT4 or another terminal host
 

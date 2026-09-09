@@ -4,7 +4,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Settings
-from app.metatrader_bridge_server import MetaTrader5Terminal, create_bridge_app, run
+from app.metatrader_bridge_server import (
+    MetaTrader5Terminal,
+    MetaTraderTerminalError,
+    create_bridge_app,
+    run,
+)
 
 
 class FakeMT5:
@@ -45,6 +50,22 @@ class FakeMT5:
             ask=2400,
             time_msc=1785081600000,
         )
+
+    def symbols_get(self):
+        return [
+            {
+                "name": "XAUUSD.a",
+                "description": "Gold vs US Dollar",
+                "path": "Forex\\Metals",
+                "trade_mode": 1,
+            },
+            {
+                "name": "EURUSD.a",
+                "description": "Euro vs US Dollar",
+                "path": "Forex\\Majors",
+                "trade_mode": 1,
+            },
+        ]
 
     def copy_rates_from_pos(self, _instrument, _timeframe, _start, _count):
         return [
@@ -127,11 +148,37 @@ def test_bridge_server_requires_bearer_auth_and_exposes_only_read_routes() -> No
         assert paths == {
             "/v1/health",
             "/v1/quote",
+            "/v1/symbols",
             "/v1/candles",
             "/v1/account",
             "/v1/positions",
             "/v1/events",
         }
+
+
+def test_bridge_server_returns_every_terminal_symbol_with_broker_suffixes() -> None:
+    headers = {"Authorization": f"Bearer {'x' * 32}"}
+    with _client() as client:
+        response = client.get("/v1/symbols", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "account_id": "123456",
+        "symbols": [
+            {
+                "symbol": "XAUUSD.a",
+                "description": "Gold vs US Dollar",
+                "path": "Forex\\Metals",
+                "tradable": True,
+            },
+            {
+                "symbol": "EURUSD.a",
+                "description": "Euro vs US Dollar",
+                "path": "Forex\\Majors",
+                "tradable": True,
+            },
+        ],
+    }
 
 
 def test_bridge_server_normalizes_net_positions_and_bounded_history_cursor() -> None:
@@ -230,6 +277,67 @@ def test_paginated_history_marks_only_the_true_final_exit_closed(monkeypatch) ->
     assert first["has_more"] is True
     assert first["events"][0]["trade_effects"][0]["effect"] == "closed"
     assert second["events"][0]["trade_effects"][0]["effect"] == "closed"
+
+
+def test_every_market_read_rejects_a_terminal_account_switch() -> None:
+    module = FakeMT5()
+    terminal = MetaTrader5Terminal(module, account_id="123456")
+    terminal.connect()
+
+    module.account_info = lambda: SimpleNamespace(login=999999)
+
+    reads = (
+        terminal.health,
+        lambda: terminal.quote("XAUUSD"),
+        terminal.symbols,
+        lambda: terminal.candles("XAUUSD", "M5", 1),
+        terminal.account,
+        terminal.positions,
+        lambda: terminal.events(None),
+        lambda: terminal.events("2026-01-01T00:00:00Z"),
+    )
+    for read in reads:
+        with pytest.raises(MetaTraderTerminalError, match="active MT5 account changed"):
+            read()
+
+
+def test_market_read_rechecks_account_after_terminal_ipc() -> None:
+    class SwitchingMT5(FakeMT5):
+        login = 123456
+
+        def account_info(self):
+            account = super().account_info()
+            account.login = self.login
+            return account
+
+        def symbols_get(self):
+            symbols = super().symbols_get()
+            self.login = 999999
+            return symbols
+
+    terminal = MetaTrader5Terminal(SwitchingMT5(), account_id="123456")
+    terminal.connect()
+
+    with pytest.raises(MetaTraderTerminalError, match="active MT5 account changed"):
+        terminal.symbols()
+
+
+def test_bridge_reports_account_switch_without_server_traceback() -> None:
+    module = FakeMT5()
+    terminal = MetaTrader5Terminal(module, account_id="123456")
+    terminal.connect()
+    module.account_info = lambda: SimpleNamespace(login=999999)
+    headers = {"Authorization": f"Bearer {'x' * 32}"}
+
+    with TestClient(create_bridge_app(terminal, token="x" * 32)) as client:
+        response = client.get("/v1/positions", headers=headers)
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": (
+            "the active MT5 account changed; reconnect the bridge before reading data"
+        )
+    }
 
 
 def test_bridge_refuses_plaintext_non_loopback_binding(monkeypatch) -> None:
