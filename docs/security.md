@@ -45,7 +45,9 @@ placement, modification, cancellation, closing, or hedging methods.
   reduces accidental exposure but is not a read or container boundary; host-accessible files
   and staged Codex authentication may still be readable by Codex or child tools.
 - Guided setup rewrites only an allowlist of non-secret configuration keys, uses an atomic
-  replacement, and enforces mode `0600`. It refuses API-key fields.
+  replacement, and enforces mode `0600`. Hosted-model API keys are collected with hidden input
+  and written directly to the configured credential vault; API-key fields remain prohibited in
+  the managed settings file.
 - Harness files are application-owned, size-bounded context. They do not define executable
   tools and cannot override runtime policy or deterministic risk controls.
 - Full-page web reads are GET-only, size/time bounded, content-type limited, restricted to

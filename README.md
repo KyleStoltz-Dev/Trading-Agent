@@ -48,8 +48,9 @@ execution. It does not autonomously place trades.
 
 ## Local setup
 
-Requirements: Python 3.12+ and PostgreSQL. Model-backed chat and chart analysis can use an
-OpenAI or Anthropic API key, or a token-free local Ollama model.
+Requirements: Python 3.12+ and PostgreSQL. Model-backed chat and chart analysis can use a
+signed-in ChatGPT or Claude subscription, a separately billed OpenAI or Anthropic API key,
+or a token-free local Ollama model.
 
 Use the installer for your operating system:
 
@@ -119,10 +120,44 @@ pip install -e ".[dev,openai]"
 pip install -e ".[dev,anthropic]"
 ```
 
-Choose the provider in `.env`:
+For subscription access, install the vendor CLI and sign in through its normal browser flow:
+
+```bash
+# ChatGPT Plus, Pro, Business, Enterprise, or Edu through Codex
+codex login
+
+# Claude Pro, Max, Team, or Enterprise through Claude Code
+claude auth login
+```
+
+Then choose the provider in `.env`:
+
+```text
+MODEL_PROVIDER=openai
+OPENAI_AUTH_MODE=subscription
+OPENAI_MODEL=gpt-5.6-sol
+```
+
+or:
 
 ```text
 MODEL_PROVIDER=anthropic
+ANTHROPIC_AUTH_MODE=subscription
+ANTHROPIC_MODEL=claude-sonnet-5
+```
+
+Trading Agent asks the installed CLI to use its existing sign-in. It does not read, copy, or
+store the vendor OAuth token. Subscription runs remove `OPENAI_API_KEY`, `CODEX_API_KEY`,
+`ANTHROPIC_API_KEY`, and `ANTHROPIC_AUTH_TOKEN` from the child process as applicable, so a shell
+environment key cannot silently change the selected request to API billing. Keep both CLIs current;
+the Claude path relies on current restricted, safe-mode, structured-output, and unattended
+permission controls.
+
+API-key billing remains available when deliberately selected:
+
+```text
+MODEL_PROVIDER=anthropic
+ANTHROPIC_AUTH_MODE=api
 ANTHROPIC_API_KEY=...
 ANTHROPIC_MODEL=claude-sonnet-5
 ```
@@ -131,12 +166,17 @@ or:
 
 ```text
 MODEL_PROVIDER=openai
+OPENAI_AUTH_MODE=api
 OPENAI_API_KEY=...
 OPENAI_MODEL=gpt-5.6-sol
 ```
 
-`MODEL_PROVIDER=auto` works when exactly one provider key is configured. If both keys are
-present, select one explicitly.
+`OPENAI_AUTH_MODE=auto` and `ANTHROPIC_AUTH_MODE=auto` prefer a ready subscription sign-in and
+fall back to the matching API key. Set either mode to `subscription` or `api` to prevent fallback.
+`MODEL_PROVIDER=auto` retains conservative startup behavior: it selects the only configured cloud
+API provider, falls back to local Ollama when no key exists, and requires an explicit provider when
+both cloud API providers are configured. A signed-in subscription is immediately available from
+`/model`, or can be made the startup provider with `MODEL_PROVIDER=openai` or `anthropic`.
 
 For local, token-free use, install Ollama for your operating system from
 [ollama.com/download](https://ollama.com/download). On macOS, Homebrew is also supported:
@@ -179,9 +219,17 @@ trade models pull qwen3.5:35b-a3b
 trade models use qwen3.5:35b-a3b --tier quality
 ```
 
-Inside chat, `/model` shows local profiles, `/model use qwen3.5:35b-a3b` creates a
-session-only override, `/model auto` restores tier routing, and `/model unload` immediately
-releases the model owned by the current session. `/mode` still controls reasoning effort.
+Inside chat, `/model` opens a compact inline picker containing installed local models and cloud
+models available through a signed-in subscription or configured API key and reviewed for the
+agent's tool and chart request shapes. `/model browse` opens the detailed full-screen view. It
+labels each choice as local, subscription, or API and shows a simple cost cue: no API charge for
+local models, included-with-plan for subscriptions, or input/output rates per million tokens for
+API-key models. `/model use qwen3.5:35b-a3b` or
+`/model use openai/gpt-5.6-terra` creates a session-only override, `/model auto` restores tier
+routing within the selected provider, and `/model unload` immediately releases the local model
+owned by the current session. Switching to a different hosted provider discloses that bounded
+recent conversation history will be sent there and requires confirmation. `/mode` still
+controls reasoning effort.
 Chart analysis accepts `--model qwen3.5:35b-a3b --reasoning-effort high`.
 Before local inference, the resource guard recalculates whether the selected model fits the
 current machine. It can warn, refuse an unsafe explicit override, or route an automatic
@@ -190,8 +238,13 @@ Linux, and Windows. A remote Ollama server is not judged using the client comput
 Local model weights expire after two idle minutes by default and are released immediately
 when chat exits. The startup smoke test validates inference without leaving a model resident.
 
-`trade setup` can safely change the selected provider later. It rewrites only non-secret
-provider settings, collapses duplicate provider entries, and never reads or writes API keys.
+`trade setup` can safely change the selected provider later. It detects an existing ChatGPT or
+Claude subscription sign-in first. If no subscription is ready, it explains the exact login
+command and offers separately billed API-key mode instead. It rewrites only non-secret provider
+settings, collapses duplicate provider entries, and collects API keys with hidden input only when
+the trader chooses API mode. The key is written only to the configured credential vault; secret
+fields remain prohibited in the managed settings file. Environment keys remain an advanced
+override.
 Configuration is loaded from exactly one trusted file: an absolute `TRADING_AGENT_CONFIG`,
 the standard user configuration directory, or the editable installation. A current-directory
 `.env` is never loaded. On POSIX systems, the selected file must be owned by the current user,
@@ -339,8 +392,10 @@ Useful chat commands are:
 /memory use           confirm recall disclosure for the next model request only
 /memory off           cancel a pending recall disclosure
 /mode auto|economy|balanced|deep
-/model                show installed/configured local models
-/model use NAME       override the local model for this session
+/model                choose an available reviewed local or cloud model
+/model use NAME       override the current provider's model for this session
+/model use PROVIDER/NAME
+                      switch provider/model after any required disclosure
 /model auto           restore automatic model-profile routing
 /model unload         release this session's local model immediately
 ```

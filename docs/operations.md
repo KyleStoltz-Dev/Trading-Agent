@@ -117,7 +117,12 @@ trade models use qwen3.5:35b-a3b --tier quality
 ```
 
 `quality` changes balanced and deep only, leaving default/economy on the faster model.
-Persistent changes require a restart; `/model use NAME` is an immediate session-only override.
+Persistent changes require a restart; `/model` opens the reviewed local/cloud model picker and
+`/model use NAME` is an immediate session-only override. Use
+`/model use PROVIDER/NAME` to change providers. A different hosted recipient requires explicit
+confirmation before bounded recent conversation history is sent. Cloud discovery is
+time-bounded and cached for the session; models must be available to the configured key and in
+the adapter's reviewed compatibility catalog.
 `/model unload` releases the current session's model immediately. By default, Ollama model
 weights also expire after two idle minutes and are released when chat exits; configure
 `OLLAMA_KEEP_ALIVE` and `OLLAMA_UNLOAD_ON_EXIT` when a different residency policy is needed.

@@ -106,6 +106,7 @@ def _ollama_performance(data: dict[str, Any]) -> dict[str, float]:
 
 
 class OllamaProvider:
+    access_mode = "local"
     name = "ollama"
 
     def __init__(self, settings: Settings, client: httpx.Client | None = None) -> None:
@@ -135,9 +136,14 @@ class OllamaProvider:
             trust_env=False,
         )
 
-    def _installed_model_records(self) -> list[dict[str, Any]]:
+    def _installed_model_records(
+        self,
+        *,
+        timeout: float | None = None,
+    ) -> list[dict[str, Any]]:
         try:
-            response = self.client.get("/api/tags")
+            request_options = {} if timeout is None else {"timeout": timeout}
+            response = self.client.get("/api/tags", **request_options)
             response.raise_for_status()
             data = response.json()
         except (httpx.HTTPError, json.JSONDecodeError) as exc:
@@ -151,12 +157,14 @@ class OllamaProvider:
             item for item in records if isinstance(item, dict) and isinstance(item.get("name"), str)
         ]
 
-    def installed_models(self) -> frozenset[str]:
-        return frozenset(item["name"] for item in self._installed_model_records())
+    def installed_models(self, *, timeout: float | None = None) -> frozenset[str]:
+        return frozenset(
+            item["name"] for item in self._installed_model_records(timeout=timeout)
+        )
 
-    def installed_model_sizes(self) -> dict[str, int]:
+    def installed_model_sizes(self, *, timeout: float | None = None) -> dict[str, int]:
         sizes: dict[str, int] = {}
-        for item in self._installed_model_records():
+        for item in self._installed_model_records(timeout=timeout):
             size = item.get("size")
             if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
                 sizes[item["name"]] = size
@@ -164,9 +172,14 @@ class OllamaProvider:
                 sizes[item["name"]] = 0
         return sizes
 
-    def loaded_model_records(self) -> list[dict[str, Any]]:
+    def loaded_model_records(
+        self,
+        *,
+        timeout: float | None = None,
+    ) -> list[dict[str, Any]]:
         try:
-            response = self.client.get("/api/ps")
+            request_options = {} if timeout is None else {"timeout": timeout}
+            response = self.client.get("/api/ps", **request_options)
             response.raise_for_status()
             data = response.json()
         except (httpx.HTTPError, json.JSONDecodeError) as exc:
@@ -180,8 +193,10 @@ class OllamaProvider:
             item for item in records if isinstance(item, dict) and isinstance(item.get("name"), str)
         ]
 
-    def loaded_models(self) -> frozenset[str]:
-        return frozenset(item["name"] for item in self.loaded_model_records())
+    def loaded_models(self, *, timeout: float | None = None) -> frozenset[str]:
+        return frozenset(
+            item["name"] for item in self.loaded_model_records(timeout=timeout)
+        )
 
     def _runtime_lock(self):
         if not self.local_runtime:

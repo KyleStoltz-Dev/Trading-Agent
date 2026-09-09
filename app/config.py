@@ -63,12 +63,14 @@ class Settings(BaseSettings):
     hosted_principal_auth_enabled: bool = False
     hosted_rls_enforced: bool = False
     model_provider: Literal["auto", "openai", "anthropic", "ollama"] = "auto"
+    openai_auth_mode: Literal["auto", "subscription", "api"] = "auto"
     openai_api_key: SecretStr | None = None
     openai_model: str = "gpt-5.6-sol"
     openai_economy_model: str | None = None
     openai_balanced_model: str | None = None
     openai_deep_model: str | None = None
     openai_safety_identifier: str = "trading-agent-local"
+    anthropic_auth_mode: Literal["auto", "subscription", "api"] = "auto"
     anthropic_api_key: SecretStr | None = None
     anthropic_model: str = "claude-sonnet-5"
     anthropic_economy_model: str | None = None
@@ -104,6 +106,8 @@ class Settings(BaseSettings):
     agent_mode: Literal["auto", "economy", "balanced", "deep"] = "auto"
     model_max_concurrent_requests: int = Field(default=2, ge=1, le=16)
     model_request_queue_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
+    subscription_model_timeout_seconds: float = Field(default=300.0, gt=0, le=1800)
+    model_discovery_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
     model_history_turn_limit: int = Field(default=20, ge=2, le=100)
     app_env: Literal["development", "test", "production"] = "development"
     database_auto_migrate: bool = True

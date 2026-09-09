@@ -1,4 +1,3 @@
-import importlib.util
 import shutil
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Literal
@@ -16,7 +15,11 @@ from app.connectors.factory import (
 )
 from app.db import inspect_schema
 from app.models import BrokerConnection, TradingAccount
-from app.providers import ProviderConfigurationError, resolve_provider_name
+from app.providers import (
+    ProviderConfigurationError,
+    create_named_model_provider,
+    resolve_provider_name,
+)
 from app.providers.ollama_provider import OllamaProvider
 from app.services.secrets import SecretBackendError, validate_secret_backend
 from app.services.tradingview import trusted_proxy_networks
@@ -493,16 +496,18 @@ def check_health(
                 if provider_name == "openai"
                 else settings.anthropic_model
             )
-            package_available = importlib.util.find_spec(provider_name) is not None
+            provider = create_named_model_provider(settings, provider_name)
+            access_mode = getattr(provider, "access_mode", "api")
+            access_label = (
+                "signed-in subscription"
+                if access_mode == "subscription"
+                else "API key"
+            )
             checks.append(
                 HealthCheck(
                     "model_provider",
-                    "ok" if package_available else "warning",
-                    (
-                        f"{provider_name}/{model} is configured"
-                        if package_available
-                        else f"{provider_name}/{model} configured; install the optional adapter"
-                    ),
+                    "ok",
+                    f"{provider_name}/{model} is configured with {access_label}",
                 )
             )
     except (ProviderConfigurationError, RuntimeError) as exc:

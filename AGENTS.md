@@ -28,5 +28,6 @@ Run before committing:
 
 ```bash
 ruff check .
+ruff check --select S app scripts
 pytest
 ```
