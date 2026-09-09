@@ -36,13 +36,13 @@ Issues = "https://github.com/KyleStoltz-Dev/Trading-Agent/issues"
 
 [project.optional-dependencies]
 openai = [
-  "openai>=1.99,<3",
+  "openai>=1.99,<4",
 ]
 anthropic = [
   "anthropic>=0.75,<1",
 ]
 ai = [
-  "openai>=1.99,<3",
+  "openai>=1.99,<4",
   "anthropic>=0.75,<1",
 ]
 metatrader = [
