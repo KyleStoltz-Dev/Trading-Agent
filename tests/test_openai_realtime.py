@@ -33,6 +33,8 @@ def test_realtime_adapter_uses_mini_tools_and_low_eagerness_vad() -> None:
     assert request.headers["Authorization"] == "Bearer private-key"
     assert payload["session"]["model"] == "gpt-realtime-2.1-mini"
     assert payload["session"]["tools"][0]["name"] == "run_trading_agent"
+    assert "complete current tool catalog" in payload["session"]["instructions"]
+    assert "Do not guess any of that context" in payload["session"]["instructions"]
     assert payload["session"]["audio"]["input"]["turn_detection"] == {
         "type": "semantic_vad",
         "eagerness": "low",
