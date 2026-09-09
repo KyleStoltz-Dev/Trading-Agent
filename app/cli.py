@@ -15,7 +15,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 import typer
@@ -84,6 +84,7 @@ from app.models import (
     BrokerConnection,
     ConnectorCursor,
     ConversationSession,
+    ConversationTurn,
     EconomicEvent,
 )
 from app.policy import ExecutionHooks, PolicyEngine, PolicyViolation, ToolContext
@@ -289,6 +290,7 @@ from app.system_resources import (
     assess_model_fit,
     resource_snapshot,
 )
+from app.terminal_status import ThinkingStatus
 
 app = typer.Typer(
     name="trading-agent",
@@ -3371,6 +3373,77 @@ def _provider_display_name(provider: ModelProvider) -> str:
     return provider.name
 
 
+class ChatResponseCancelled(Exception):
+    """Internal signal used when a trader interrupts one model response."""
+
+
+def _respond_with_status(
+    agent: TradingAgent,
+    message: str,
+    history: list[dict[str, str]],
+    *,
+    mode: AgentMode,
+    prepared: PreparedAgentRequest,
+    request_status: str,
+    request_id: uuid.UUID,
+    conversation_session_id: uuid.UUID,
+    user_turn_id: uuid.UUID,
+) -> str:
+    try:
+        with ThinkingStatus(console, request_status):
+            return agent.respond(
+                message,
+                history,
+                mode=mode,
+                prepared=prepared,
+                request_id=request_id,
+                conversation_session_id=conversation_session_id,
+                user_turn_id=user_turn_id,
+            )
+    except KeyboardInterrupt as exc:
+        raise ChatResponseCancelled from exc
+
+
+def _record_cancelled_chat_request(
+    db: Any,
+    *,
+    agent: TradingAgent,
+    user_turn: ConversationTurn,
+    conversation: ConversationSession,
+    scope: RequestScope,
+    playbook_version_id: uuid.UUID | None,
+    request_id: uuid.UUID,
+) -> bool:
+    partial = bool(
+        agent.last_tool_audit is not None and agent.last_tool_audit.succeeded
+    )
+    outcome = "partial" if partial else "failed"
+    update_turn_outcome(
+        db,
+        user_turn,
+        scope=scope,
+        status=outcome,
+        error_type="UserCancelled",
+    )
+    add_turn(
+        db,
+        conversation,
+        "assistant",
+        (
+            "The response was cancelled after at least one confirmed database "
+            "change. The completed tool audit was retained."
+            if partial
+            else "The response was cancelled by the user."
+        ),
+        scope=scope,
+        playbook_version_id=playbook_version_id,
+        request_id=request_id,
+        status=outcome,
+        error_type="UserCancelled",
+    )
+    return partial
+
+
 @dataclass(frozen=True)
 class ResponseDetails:
     route_label: str
@@ -5103,6 +5176,21 @@ def _handle_chat_clipboard_chart_intent(
                 model=model,
                 reasoning_effort=reasoning_effort,
             )
+    except KeyboardInterrupt:
+        add_turn(
+            db,
+            conversation,
+            "assistant",
+            "The copied chart review was cancelled by the user. Nothing was saved, "
+            "and the conversation remained open.",
+            scope=scope,
+            playbook_version_id=playbook_version_id,
+        )
+        console.print()
+        console.print(
+            "[yellow]Chart review cancelled. You are still in this chat.[/yellow]"
+        )
+        return True
     except typer.Exit as exc:
         add_turn(
             db,
@@ -5811,7 +5899,7 @@ def _run_chat(
         console.print(
             "[dim]Type naturally · Ctrl-V attaches a screenshot · /help for commands · "
             "/examples for ideas · "
-            "/exit to leave[/dim]\n"
+            "Ctrl-C cancels a response · /exit to leave[/dim]\n"
         )
         # Quick starts help a brand-new conversation, but become repetitive when
         # reopening an existing session with usable history.
@@ -5891,6 +5979,7 @@ def _run_chat(
                     "/model unload · release this session's local model from memory\n"
                     "/develop <change> · hand a software change to the coding agent\n"
                     "Clear software-change requests also offer a development handoff.\n"
+                    "Press Ctrl-C while the agent is working to cancel only that response.\n"
                     "Everything else is natural language. Press Ctrl-V to attach a copied "
                     "screenshot, or say 'analyze my copied chart'—no file path needed."
                 )
@@ -6577,18 +6666,40 @@ def _run_chat(
                     provider,
                     len(agent.last_harness_context.paths),
                 )
-                with console.status(request_status, spinner="dots"):
-                    reply = agent.respond(
-                        message,
-                        history,
-                        mode=current_mode,
-                        prepared=prepared,
-                        request_id=request_id,
-                        conversation_session_id=conversation.id,
-                        user_turn_id=user_turn.id,
-                    )
+                reply = _respond_with_status(
+                    agent,
+                    message,
+                    history,
+                    mode=current_mode,
+                    prepared=prepared,
+                    request_status=request_status,
+                    request_id=request_id,
+                    conversation_session_id=conversation.id,
+                    user_turn_id=user_turn.id,
+                )
                 if isinstance(provider, OllamaProvider):
                     last_runtime_model = prepared.route.model
+            except (KeyboardInterrupt, ChatResponseCancelled):
+                partial = _record_cancelled_chat_request(
+                    db,
+                    agent=agent,
+                    user_turn=user_turn,
+                    conversation=conversation,
+                    scope=scope,
+                    playbook_version_id=request_playbook_version_id,
+                    request_id=request_id,
+                )
+                console.print()
+                if partial:
+                    console.print(
+                        "[yellow]Response cancelled. A confirmed change completed "
+                        "before cancellation and remains recorded.[/yellow]"
+                    )
+                else:
+                    console.print(
+                        "[yellow]Response cancelled. You are still in this chat.[/yellow]"
+                    )
+                continue
             except Exception as exc:
                 partial = bool(
                     agent.last_tool_audit is not None
@@ -6648,17 +6759,24 @@ def _run_chat(
             )
             context_paths = agent.last_harness_context.paths
             usage = getattr(provider, "last_usage", TokenUsage())
-            last_response_details = _render_agent_reply(
-                reply,
-                route_label,
-                len(context_paths),
-                route.provider if route else provider.name,
-                route.model if route else provider.model,
-                usage,
-                agent.last_references,
-                getattr(provider, "last_performance", None),
-                getattr(provider, "access_mode", "api"),
-            )
+            try:
+                last_response_details = _render_agent_reply(
+                    reply,
+                    route_label,
+                    len(context_paths),
+                    route.provider if route else provider.name,
+                    route.model if route else provider.model,
+                    usage,
+                    agent.last_references,
+                    getattr(provider, "last_performance", None),
+                    getattr(provider, "access_mode", "api"),
+                )
+            except KeyboardInterrupt:
+                console.print()
+                console.print(
+                    "[yellow]Output stopped. The completed response remains in this "
+                    "chat's history.[/yellow]"
+                )
         if (
             settings.ollama_unload_on_exit
             and isinstance(provider, OllamaProvider)

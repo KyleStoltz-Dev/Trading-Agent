@@ -568,6 +568,33 @@ def test_chat_clipboard_chart_failure_stays_in_chat(monkeypatch) -> None:
     assert "conversation remained open" in add_turn.call_args_list[-1].args[3]
 
 
+def test_chat_clipboard_chart_ctrl_c_stays_in_chat(monkeypatch) -> None:
+    conversation = SimpleNamespace(
+        workspace_id=TEST_SCOPE.workspace_id,
+        account_id=TEST_SCOPE.account_id,
+        name="chart-review",
+        active_playbook_version_id=None,
+    )
+    add_turn = Mock()
+    monkeypatch.setattr(cli_module, "add_turn", add_turn)
+    monkeypatch.setattr(
+        cli_module,
+        "chart",
+        Mock(side_effect=KeyboardInterrupt),
+    )
+
+    assert cli_module._handle_chat_clipboard_chart_intent(
+        Mock(),
+        conversation,
+        "Review the image on my clipboard",
+        model=None,
+        reasoning_effort="low",
+    )
+
+    assert "cancelled by the user" in add_turn.call_args_list[-1].args[3]
+    assert "conversation remained open" in add_turn.call_args_list[-1].args[3]
+
+
 def test_chat_ctrl_v_uses_the_exact_attached_image(monkeypatch) -> None:
     conversation = SimpleNamespace(
         workspace_id=TEST_SCOPE.workspace_id,
@@ -2013,6 +2040,76 @@ def test_release_local_model_uses_the_provider_unload_boundary(monkeypatch) -> N
 
     assert cli_module._release_local_model(provider, "qwen3.5:9b")
     unload.assert_called_once_with("qwen3.5:9b")
+
+
+def test_agent_response_ctrl_c_becomes_one_request_cancellation(monkeypatch) -> None:
+    output = StringIO()
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=output, force_terminal=False, width=120),
+    )
+    agent = Mock()
+    agent.respond.side_effect = KeyboardInterrupt
+
+    with pytest.raises(cli_module.ChatResponseCancelled):
+        cli_module._respond_with_status(
+            agent,
+            "Review this chart",
+            [],
+            mode="balanced",
+            prepared=Mock(),
+            request_status="Thinking",
+            request_id=uuid.uuid4(),
+            conversation_session_id=uuid.uuid4(),
+            user_turn_id=uuid.uuid4(),
+        )
+
+    agent.respond.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("tool_succeeded", "expected_status", "expected_partial"),
+    ((False, "failed", False), (True, "partial", True)),
+)
+def test_cancelled_chat_request_is_audited_without_closing_chat(
+    monkeypatch,
+    tool_succeeded: bool,
+    expected_status: str,
+    expected_partial: bool,
+) -> None:
+    update = Mock()
+    add = Mock()
+    monkeypatch.setattr(cli_module, "update_turn_outcome", update)
+    monkeypatch.setattr(cli_module, "add_turn", add)
+    agent = SimpleNamespace(
+        last_tool_audit=(
+            SimpleNamespace(succeeded=True) if tool_succeeded else None
+        )
+    )
+    request_id = uuid.uuid4()
+    user_turn = Mock()
+    conversation = Mock()
+
+    partial = cli_module._record_cancelled_chat_request(
+        Mock(),
+        agent=agent,
+        user_turn=user_turn,
+        conversation=conversation,
+        scope=TEST_SCOPE,
+        playbook_version_id=None,
+        request_id=request_id,
+    )
+
+    assert partial is expected_partial
+    assert update.call_args.kwargs == {
+        "scope": TEST_SCOPE,
+        "status": expected_status,
+        "error_type": "UserCancelled",
+    }
+    assert add.call_args.kwargs["status"] == expected_status
+    assert add.call_args.kwargs["error_type"] == "UserCancelled"
+    assert add.call_args.kwargs["request_id"] == request_id
 
 
 def test_print_model_normalizes_uuid_values(monkeypatch) -> None:
