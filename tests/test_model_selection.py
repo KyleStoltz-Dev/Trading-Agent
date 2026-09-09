@@ -329,6 +329,30 @@ def test_mode_browse_explains_routing_profiles_and_permissions(monkeypatch) -> N
         openai_balanced_model="gpt-5.6-terra",
         openai_deep_model="gpt-5.6-sol",
     )
+    controller = SimpleNamespace(
+        options=Mock(
+            return_value=(
+                SimpleNamespace(
+                    provider="ollama",
+                    model="qwen3.5:9b",
+                    local=True,
+                    access_mode="local",
+                ),
+                SimpleNamespace(
+                    provider="openai",
+                    model="gpt-5.6-sol",
+                    local=False,
+                    access_mode="subscription",
+                ),
+                SimpleNamespace(
+                    provider="anthropic",
+                    model="claude-sonnet-5",
+                    local=False,
+                    access_mode="subscription",
+                ),
+            )
+        )
+    )
 
     selected = cli_module._choose_session_mode(
         "balanced",
@@ -336,20 +360,25 @@ def test_mode_browse_explains_routing_profiles_and_permissions(monkeypatch) -> N
         settings=settings,
         provider_name="openai",
         access_mode="subscription",
+        model_controller=controller,
     )
 
     assert selected == "economy"
     assert browser.call_args.args[0] == "Mode browser"
     summary = browser.call_args.args[1]
-    assert "Current mode: Balanced" in summary
-    assert "Provider: ChatGPT subscription" in summary
-    assert "Routine requests and journaling → Economy" in summary
-    assert "Normal chart and trade analysis → Balanced" in summary
-    assert "Research, comparisons, and backtests → Deep" in summary
+    assert "Current: Balanced · Provider: ChatGPT subscription" in summary
+    assert "Modes work with local, subscription, and API models" in summary
+    assert "Local ×1" in summary
+    assert "ChatGPT subscription ×1, active" in summary
+    assert "Claude subscription ×1" in summary
+    assert "Switch provider/model with /model browse." in summary
+    assert "routine/journal → Economy" in summary
+    assert "normal analysis → Balanced" in summary
+    assert "research/comparisons/backtests → Deep" in summary
     assert "Economy (low effort) → gpt-5.6-luna" in summary
     assert "Balanced (medium effort) → gpt-5.6-terra" in summary
     assert "Deep (high effort) → gpt-5.6-sol" in summary
-    assert "not trading permissions" in summary
+    assert "not provider or trading permissions" in summary
     assert browser.call_args.kwargs == {
         "show_descriptions": False,
         "default": "balanced",

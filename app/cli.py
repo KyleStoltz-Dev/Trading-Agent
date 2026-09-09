@@ -3080,6 +3080,7 @@ def _mode_browser_summary(
     provider_name: str,
     access_mode: str,
     model_override: str | None,
+    model_controller: SessionModelController | None = None,
 ) -> str:
     provider_label = {
         ("ollama", "local"): "Local (Ollama)",
@@ -3089,15 +3090,59 @@ def _mode_browser_summary(
         ("anthropic", "api"): "Claude API",
     }.get((provider_name, access_mode), provider_name.title())
     lines = [
-        f"Current mode: {current_mode.title()}",
-        f"Provider: {provider_label}",
-        "",
-        "Auto routing:",
-        "  Routine requests and journaling → Economy",
-        "  Normal chart and trade analysis → Balanced",
-        "  Research, comparisons, and backtests → Deep",
-        "",
+        f"Current: {current_mode.title()} · Provider: {provider_label}",
+        "Modes work with local, subscription, and API models.",
+        "They change response depth—not provider or trading permissions.",
     ]
+    if model_controller is not None:
+        counts: dict[str, int] = {}
+        access_modes: dict[str, str] = {}
+        try:
+            available = model_controller.options()
+        except (ProviderConfigurationError, RuntimeError):
+            available = ()
+        for option in available:
+            counts[option.provider] = counts.get(option.provider, 0) + 1
+            access_modes[option.provider] = getattr(option, "access_mode", None) or (
+                "local" if option.local else "api"
+            )
+        provider_parts: list[str] = []
+        for candidate, product in (
+            ("ollama", "Local"),
+            ("openai", "ChatGPT"),
+            ("anthropic", "Claude"),
+        ):
+            count = counts.get(candidate, 0)
+            if count:
+                candidate_access = access_modes.get(candidate, "api")
+                access_label = (
+                    "subscription"
+                    if candidate_access == "subscription"
+                    else "local"
+                    if candidate_access == "local"
+                    else "API"
+                )
+                active = ", active" if candidate == provider_name else ""
+                display_name = (
+                    "Local" if candidate_access == "local" else f"{product} {access_label}"
+                )
+                provider_parts.append(f"{display_name} ×{count}{active}")
+            else:
+                provider_parts.append(f"{product} unavailable")
+        lines.extend(
+            (
+                "Available: " + " · ".join(provider_parts),
+                "Switch provider/model with /model browse.",
+            )
+        )
+    lines.extend(
+        (
+        "",
+        "Auto: routine/journal → Economy · normal analysis → Balanced",
+        "      research/comparisons/backtests → Deep",
+        "",
+        )
+    )
     if model_override:
         lines.extend(
             (
@@ -3117,12 +3162,6 @@ def _mode_browser_summary(
             lines.append(f"  {mode.title()} ({effort} effort) → {model}")
     else:
         lines.append("Model profiles are unavailable for this provider.")
-    lines.extend(
-        (
-            "",
-            "Modes change response depth and model routing, not trading permissions.",
-        )
-    )
     return "\n".join(lines)
 
 
@@ -3134,6 +3173,7 @@ def _choose_session_mode(
     provider_name: str = "ollama",
     access_mode: str = "local",
     model_override: str | None = None,
+    model_controller: SessionModelController | None = None,
 ) -> AgentMode | None:
     options = _mode_menu_options(current_mode)
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
@@ -3151,6 +3191,7 @@ def _choose_session_mode(
                 provider_name=provider_name,
                 access_mode=access_mode,
                 model_override=model_override,
+                model_controller=model_controller,
             ),
             options,
             show_descriptions=False,
@@ -6169,6 +6210,7 @@ def _run_chat(
                         provider_name=provider.name,
                         access_mode=str(getattr(provider, "access_mode", "api")),
                         model_override=current_model_override,
+                        model_controller=model_controller,
                     )
                     if selected_mode is None:
                         continue
