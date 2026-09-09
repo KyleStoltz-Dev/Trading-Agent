@@ -8562,7 +8562,11 @@ def _render_tradingview_import_preview(
     display_timezone: ZoneInfo,
 ) -> None:
     record_count = export.rows_received - export.rows_ignored
-    kind = "Account History" if export.export_kind == "account_history" else "History"
+    kind = {
+        "account_history": "Account History",
+        "order_history": "Order History",
+        "trade_history": "Trade History",
+    }[export.export_kind]
     console.print()
     console.print("[bold green]Trading Agent: Import TradingView trades[/bold green]")
     console.print(
@@ -8627,8 +8631,8 @@ def _run_tradingview_import_flow(
         console.print("[bold green]Import TradingView Paper Trading[/bold green]")
         console.print(
             "In TradingView, open Paper Trading → Account Manager, choose "
-            "[bold]Account History[/bold] (best for completed trades) or "
-            "[bold]History[/bold] (fills), then Download data."
+            "[bold]Trade History[/bold] (best for completed trades) or "
+            "[bold]Order History[/bold] (orders and fills), then Download data."
         )
         raw_path = console.input(
             "[bold]Drag the downloaded CSV here, then press Enter ❯[/bold] "
@@ -8708,7 +8712,7 @@ def tradingview_import_history(
     history: Annotated[
         Path | None,
         typer.Argument(
-            help="TradingView Paper Trading History or Account History CSV.",
+            help="TradingView Paper Trading Trade, Order, or Account History CSV.",
         ),
     ] = None,
     timezone: Annotated[
