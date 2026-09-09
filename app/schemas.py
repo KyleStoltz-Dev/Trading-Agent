@@ -822,54 +822,7 @@ class EdgeReport(BaseModel):
     segments: list[EdgeSegment]
 
 
-class ChartObservedMetadata(BaseModel):
-    """Identifiers transcribed from legible labels in the supplied chart."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    instrument: str | None = Field(max_length=80)
-    instrument_evidence: str | None = Field(max_length=300)
-    venue: str | None = Field(max_length=80)
-    venue_evidence: str | None = Field(max_length=300)
-    timeframe: str | None = Field(max_length=20)
-    timeframe_evidence: str | None = Field(max_length=300)
-    market_time: datetime | None
-    market_time_evidence: str | None = Field(max_length=300)
-
-    @field_validator(
-        "instrument",
-        "instrument_evidence",
-        "venue",
-        "venue_evidence",
-        "timeframe",
-        "timeframe_evidence",
-        "market_time_evidence",
-    )
-    @classmethod
-    def normalize_visible_metadata_text(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        normalized = " ".join(value.split())
-        return normalized or None
-
-    @model_validator(mode="after")
-    def require_visible_evidence(self) -> "ChartObservedMetadata":
-        for field_name in ("instrument", "venue", "timeframe", "market_time"):
-            value = getattr(self, field_name)
-            evidence = getattr(self, f"{field_name}_evidence")
-            if (value is None) != (evidence is None):
-                raise ValueError(
-                    f"{field_name} and {field_name}_evidence must be supplied together"
-                )
-        if self.market_time is not None and (
-            self.market_time.tzinfo is None or self.market_time.utcoffset() is None
-        ):
-            raise ValueError("observed chart market_time must include a visible timezone")
-        return self
-
-
 class ChartAnalysis(BaseModel):
-    observed_metadata: ChartObservedMetadata
     visible_facts: list[str]
     unreadable_or_missing: list[str]
     context_hypotheses: list[str]
