@@ -1494,6 +1494,12 @@ def _chart_destination(settings: Settings, provider: ModelProvider) -> str | Non
     return f"hosted-provider:{provider.name}"
 
 
+def _chart_provider_label(provider: ModelProvider) -> str:
+    if getattr(provider, "access_mode", "api") != "subscription":
+        return provider.name
+    return "ChatGPT" if provider.name == "openai" else "Claude"
+
+
 class TradingAgent:
     def __init__(
         self,
@@ -2175,7 +2181,7 @@ class TradingAgent:
             if destination is not None and not self.confirm_external_action(
                 "External disclosure: hosted chart analysis",
                 {
-                    "provider": self.provider.name,
+                    "provider": _chart_provider_label(self.provider),
                     "destination": destination,
                     "image_path": str(path),
                     "content_type": content_type,
@@ -2210,6 +2216,11 @@ class TradingAgent:
                     self.last_route.reasoning_effort if self.last_route else "medium"
                 ),
             )
+            resolved_instrument = instrument or result.observed_metadata.instrument
+            resolved_timeframe = timeframe or result.observed_metadata.timeframe
+            resolved_venue = (
+                trade.venue if trade is not None else result.observed_metadata.venue
+            )
             evidence, analysis_run = record_chart_analysis(
                 self.db,
                 scope=self._require_scope(),
@@ -2240,8 +2251,10 @@ class TradingAgent:
                     "ok": True,
                     "result": {
                         "analysis": result,
-                        "instrument": instrument,
-                        "timeframe": timeframe,
+                        "instrument": resolved_instrument,
+                        "venue": resolved_venue,
+                        "timeframe": resolved_timeframe,
+                        "market_time": result.observed_metadata.market_time,
                         "trade_reference": trade.reference if trade is not None else None,
                         "evidence_stage": arguments.get("evidence_stage"),
                         "evidence_reference": f"evidence:{evidence.id}",
