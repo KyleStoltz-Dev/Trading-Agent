@@ -14,6 +14,129 @@ from app.services.workspaces import (
 )
 
 SESSION_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+GENERIC_SESSION_TITLES = frozenset(
+    {
+        "dashboard trading desk",
+        "pippy voice session",
+        "trading agent session",
+    }
+)
+TITLE_PREFIXES = (
+    r"^hey[,\s]+",
+    r"^(?:hey\s+)?(?:pippy|trading agent)[:,\s]+",
+    r"^(?:could|can|would|will)\s+you\s+(?:please\s+)?",
+    r"^(?:please\s+)?help\s+me\s+(?:to\s+)?",
+    r"^(?:i\s+(?:would|'d)\s+like\s+to|i\s+want\s+(?:you\s+)?to|let'?s)\s+",
+    r"^(?:please\s+)?(?:tell|show|give)\s+me\s+",
+)
+TITLE_STOP_WORDS = frozenset(
+    {"a", "an", "and", "as", "at", "for", "in", "of", "on", "or", "the", "to", "with"}
+)
+TITLE_ACRONYMS = {
+    "ai": "AI",
+    "api": "API",
+    "chatgpt": "ChatGPT",
+    "claude": "Claude",
+    "ict": "ICT",
+    "ollama": "Ollama",
+    "oanda": "OANDA",
+    "openai": "OpenAI",
+    "pippy": "Pippy",
+    "pnl": "PnL",
+    "postgres": "Postgres",
+    "wyckoff": "Wyckoff",
+}
+WEAK_TITLE_PREFIXES = (
+    "continue our previous",
+    "continue the previous",
+    "from our last conversation",
+    "from the last conversation",
+    "pick up where we",
+    "what were we discussing",
+)
+
+
+def is_generic_conversation_title(value: str) -> bool:
+    return " ".join(value.split()).casefold() in GENERIC_SESSION_TITLES
+
+
+def generate_conversation_title(message: str, *, fallback: str = "Pippy conversation") -> str:
+    """Create a short local topic title without another model or external disclosure."""
+
+    topic = re.sub(r"[`*_#]", "", " ".join(message.split())).strip(" \t\r\n.,!?;:-")
+    for pattern in TITLE_PREFIXES:
+        topic = re.sub(pattern, "", topic, count=1, flags=re.IGNORECASE).strip()
+    topic = re.split(r"[.!?](?:\s|$)", topic, maxsplit=1)[0]
+    topic = re.split(
+        r"\b(?:that\s+(?:is|are|was|were)|so\s+from\s+what|because|but)\b",
+        topic,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0].strip(" \t\r\n.,!?;:-")
+    words = re.findall(r"[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*", topic)[:8]
+    if not words:
+        return fallback
+    formatted: list[str] = []
+    for index, word in enumerate(words):
+        lowered = word.casefold()
+        if lowered in TITLE_ACRONYMS:
+            formatted.append(TITLE_ACRONYMS[lowered])
+        elif index and lowered in TITLE_STOP_WORDS:
+            formatted.append(lowered)
+        else:
+            formatted.append(word[:1].upper() + word[1:].lower())
+    title = " ".join(formatted).strip()
+    return title[:160] or fallback
+
+
+def is_weak_conversation_title(value: str) -> bool:
+    normalized = " ".join(value.split()).casefold()
+    return len(normalized.split()) < 3 or normalized.startswith(WEAK_TITLE_PREFIXES)
+
+
+def conversation_topic_title(
+    messages: list[str],
+    *,
+    fallback: str,
+) -> str:
+    generated = [
+        generate_conversation_title(message, fallback=fallback)
+        for message in messages
+        if isinstance(message, str) and message.strip()
+    ]
+    if not generated:
+        return "Empty Session"
+    return next(
+        (title for title in generated if not is_weak_conversation_title(title)),
+        generated[0],
+    )
+
+
+def conversation_display_title(
+    db: Session,
+    conversation: ConversationSession,
+    *,
+    scope: RequestScope,
+) -> str:
+    """Return a useful title for legacy sessions without mutating during a read."""
+
+    _validate_conversation_scope(conversation, scope)
+    if not is_generic_conversation_title(conversation.title):
+        return conversation.title
+    opening_messages = db.scalars(
+        select(ConversationTurn.content)
+        .where(
+            ConversationTurn.workspace_id == scope.workspace_id,
+            ConversationTurn.account_id == scope.account_id,
+            ConversationTurn.session_id == conversation.id,
+            ConversationTurn.role == "user",
+        )
+        .order_by(ConversationTurn.created_at.asc())
+        .limit(4)
+    ).all()
+    if not isinstance(opening_messages, list):
+        return conversation.title
+    return conversation_topic_title(opening_messages, fallback=conversation.title)
 
 
 def normalize_session_name(value: str) -> str:
@@ -182,6 +305,15 @@ def add_turn(
         error_type=error_type,
         created_at=datetime.now(UTC),
     )
+    if role == "user" and (
+        is_generic_conversation_title(conversation.title)
+        or is_weak_conversation_title(conversation.title)
+    ):
+        candidate = generate_conversation_title(content, fallback=conversation.title)
+        if is_generic_conversation_title(conversation.title) or not is_weak_conversation_title(
+            candidate
+        ):
+            conversation.title = candidate
     conversation.updated_at = datetime.now(UTC)
     db.add(turn)
     db.commit()

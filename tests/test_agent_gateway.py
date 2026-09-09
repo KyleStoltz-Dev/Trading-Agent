@@ -96,9 +96,12 @@ def test_pippy_turn_uses_full_agent_tools_and_denies_unconfirmed_mutation(
     assert "get_trade_context" in provider.tool_names
     assert "calculate_position_size" in provider.tool_names
     assert "create_trade_plan" in provider.tool_names
+    assert "list_conversation_sessions" in provider.tool_names
+    assert "get_conversation_history" in provider.tool_names
     assert provider.mutation_error == "trader declined mutation"
-    assert "PIPPY VOICE INTERFACE" in provider.instructions
-    assert "natural back-and-forth conversation" in provider.instructions
+    assert "PIPPY TRADING-AGENT BRIDGE" in provider.instructions
+    assert "separate policy-controlled specialist invoked by Pippy" in provider.instructions
+    assert "Never claim to be Pippy" in provider.instructions
     assert [role for role, _content in written_turns] == ["user", "assistant"]
     assert result.provider == "ollama"
     assert result.model == "qwen3.5:9b"

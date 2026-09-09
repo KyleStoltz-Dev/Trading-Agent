@@ -72,6 +72,8 @@ DIRECT_ACTION_METADATA = {
     "create_realtime_client_secret": {"mutating": False, "deterministic": False},
     "get_realtime_provider": {"mutating": False, "deterministic": False},
     "record_realtime_usage": {"mutating": True, "deterministic": True},
+    "list_agent_sessions": {"mutating": False, "deterministic": False},
+    "get_agent_session_transcript": {"mutating": False, "deterministic": False},
     "list_strategies": {"mutating": False, "deterministic": False},
     "start_agent_session": {"mutating": True, "deterministic": False},
     "run_agent_turn": {"mutating": True, "deterministic": False},

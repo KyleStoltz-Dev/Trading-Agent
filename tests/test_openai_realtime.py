@@ -15,7 +15,7 @@ class FakeResponse:
         return json.dumps({"value": "ephemeral", "expires_at": 1234}).encode()
 
 
-def test_realtime_adapter_uses_mini_tools_and_low_eagerness_vad() -> None:
+def test_realtime_adapter_uses_mini_tools_and_patient_server_vad() -> None:
     with patch(
         "app.providers.openai_realtime.urllib.request.urlopen",
         return_value=FakeResponse(),
@@ -33,11 +33,20 @@ def test_realtime_adapter_uses_mini_tools_and_low_eagerness_vad() -> None:
     assert request.headers["Authorization"] == "Bearer private-key"
     assert payload["session"]["model"] == "gpt-realtime-2.1-mini"
     assert payload["session"]["tools"][0]["name"] == "run_trading_agent"
+    assert payload["session"]["tool_choice"] == "required"
     assert "complete current tool catalog" in payload["session"]["instructions"]
     assert "Do not guess any of that context" in payload["session"]["instructions"]
+    assert "never ask the user to paste strategies" in payload["session"]["instructions"]
+    assert "You are not Trading Agent itself" in payload["session"]["instructions"]
+    assert "one unified agent" in payload["session"]["instructions"]
+    assert "Pippy remains the voice and orchestration layer" in (
+        payload["session"]["tools"][0]["description"]
+    )
     assert payload["session"]["audio"]["input"]["turn_detection"] == {
-        "type": "semantic_vad",
-        "eagerness": "low",
+        "type": "server_vad",
+        "threshold": 0.72,
+        "prefix_padding_ms": 250,
+        "silence_duration_ms": 900,
         "create_response": True,
         "interrupt_response": True,
     }
