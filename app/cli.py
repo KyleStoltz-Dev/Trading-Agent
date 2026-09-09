@@ -152,6 +152,11 @@ from app.services.catalog import (
     configure_instrument_specification,
 )
 from app.services.chart_analysis import SYSTEM_PROMPT, analyze_chart
+from app.services.chat_calendar import (
+    ChatCalendarRequest,
+    calendar_events_for_chat,
+    parse_chat_calendar_request,
+)
 from app.services.chat_webhooks import set_chat_webhook_secret
 from app.services.conversations import (
     add_turn,
@@ -5483,6 +5488,88 @@ def _mutation_confirmation_prompt(action: str, arguments: dict) -> str:
     return labels.get(name, f"Confirm {name.replace('_', ' ')}?")
 
 
+def _render_chat_calendar(
+    request: ChatCalendarRequest,
+    events: tuple[EconomicEvent, ...],
+) -> str:
+    console.print("[bold]Trading Agent: Today's economic news[/bold]")
+    currency_label = ", ".join(request.currencies) if request.currencies else "all currencies"
+    console.print(
+        f"[dim]{request.local_date} · {currency_label} · {request.impact_label}[/dim]"
+    )
+    if not events:
+        console.print("[yellow]No stored events match those filters today.[/yellow]")
+        console.print(
+            "[dim]The calendar was checked at startup. You can broaden the currency "
+            "or impact filter.[/dim]"
+        )
+        return "No stored economic events matched today's requested filters."
+
+    table = Table(show_header=True, box=None, pad_edge=False)
+    table.add_column("Time", no_wrap=True)
+    table.add_column("Currency", no_wrap=True)
+    table.add_column("Impact", no_wrap=True)
+    table.add_column("Event")
+    impact_names = {0: "Info", 1: "Low", 2: "Medium", 3: "High"}
+    for event in events:
+        local_time = event.scheduled_at.astimezone(request.local_timezone)
+        table.add_row(
+            local_time.strftime("%H:%M %Z"),
+            Text(event.currency or "—"),
+            Text(impact_names[event.importance]),
+            Text(event.title),
+        )
+    console.print(table)
+    providers = ", ".join(
+        sorted({event.source.replace("-", " ").title() for event in events})
+    )
+    console.print(
+        f"[dim]{len(events)} event(s) · {providers} · "
+        "ask for one event's details or a narrower filter[/dim]"
+    )
+    event_labels = "; ".join(
+        f"{event.currency or '—'} {event.title}" for event in events[:50]
+    )
+    return (
+        f"Displayed {len(events)} stored economic events for {request.local_date}; "
+        f"filters: {currency_label}, {request.impact_label}. Events: {event_labels}."
+    )
+
+
+def _handle_chat_calendar_intent(
+    db,
+    conversation: ConversationSession,
+    message: str,
+) -> bool:
+    request = parse_chat_calendar_request(message)
+    if request is None:
+        return False
+    scope = RequestScope(
+        workspace_id=conversation.workspace_id,
+        account_id=conversation.account_id,
+    )
+    playbook_version_id = conversation.active_playbook_version_id
+    add_turn(
+        db,
+        conversation,
+        "user",
+        message,
+        scope=scope,
+        playbook_version_id=playbook_version_id,
+    )
+    events = calendar_events_for_chat(db, request)
+    summary = _render_chat_calendar(request, events)
+    add_turn(
+        db,
+        conversation,
+        "assistant",
+        summary,
+        scope=scope,
+        playbook_version_id=playbook_version_id,
+    )
+    return True
+
+
 def _confirm_agent_mutation(action: str, arguments: dict) -> bool:
     return typer.confirm(_mutation_confirmation_prompt(action, arguments))
 
@@ -5933,7 +6020,6 @@ def _run_chat(
                 )
         startup_memory = build_startup_memory(db, conversation, scope=scope)
         startup_memory_pending = startup_memory.has_content
-        _render_startup_memory(startup_memory)
         transcript = conversation_transcript(
             db,
             conversation,
@@ -5959,8 +6045,8 @@ def _run_chat(
                 "checking a chart, evaluating a trade, or reviewing results."
             )
         console.print(
-            "[dim]Type naturally · Ctrl-V attaches a screenshot · /help for commands · "
-            "/examples for ideas · "
+            "[dim]Type naturally · Ctrl-V attaches a screenshot · "
+            "/help for optional controls · /examples for ideas · "
             "Ctrl-C cancels a response · /exit to leave[/dim]\n"
         )
         # Quick starts help a brand-new conversation, but become repetitive when
@@ -6777,6 +6863,9 @@ def _run_chat(
                         )
                 except Exception as exc:
                     console.print(f"[red]{type(exc).__name__}: {exc}[/red]")
+                continue
+
+            if _handle_chat_calendar_intent(db, conversation, message):
                 continue
 
             request_playbook_version_id = conversation.active_playbook_version_id
