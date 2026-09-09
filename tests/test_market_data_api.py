@@ -10,7 +10,13 @@ import app.main as main_module
 from app.config import Settings
 from app.connectors.factory import BrokerConfigurationError
 from app.connectors.kraken import KrakenConnectorError
-from app.market_data.contracts import AccountState, Candle, PositionState, Quote
+from app.market_data.contracts import (
+    AccountState,
+    Candle,
+    MarketInstrument,
+    PositionState,
+    Quote,
+)
 from app.services.workspaces import RequestScope
 
 
@@ -18,11 +24,31 @@ class _TestConnector:
     def __init__(self, *, quote: Quote, candles: tuple[Candle, ...]):
         self.quote = quote
         self._candles = candles
+        self.instrument_calls = 0
         self.name = "kraken"
         self.venue = "KRAKEN"
 
     async def latest_quote(self, _instrument: str) -> Quote:
         return self.quote
+
+    async def instruments(self) -> tuple[MarketInstrument, ...]:
+        self.instrument_calls += 1
+        return (
+            MarketInstrument(
+                symbol="BTC_USD",
+                display_name="BTC/USD",
+                asset_class="currency",
+                source=self.name,
+                venue=self.venue,
+            ),
+            MarketInstrument(
+                symbol="ETH_USD",
+                display_name="ETH/USD",
+                asset_class="currency",
+                source=self.name,
+                venue=self.venue,
+            ),
+        )
 
     async def candles(self, _instrument: str, _timeframe: str, *, count: int):
         return self._candles[:count]
@@ -157,6 +183,56 @@ def test_market_data_endpoint_returns_normalized_payload(monkeypatch) -> None:
     assert payload["candles"][0]["source"] == "kraken"
 
 
+def test_market_instruments_endpoint_returns_full_provider_catalog(monkeypatch) -> None:
+    settings = _api_settings()
+    timestamp = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
+    connector = _TestConnector(
+        quote=Quote(
+            instrument="BTC_USD",
+            bid=Decimal("70000"),
+            ask=Decimal("70001"),
+            market_time=timestamp,
+            retrieved_at=timestamp,
+            source="kraken",
+            venue="KRAKEN",
+        ),
+        candles=(),
+    )
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        main_module,
+        "create_market_data_connector",
+        lambda _settings, _provider: connector,
+    )
+
+    with TestClient(main_module.app) as client:
+        response = client.get(
+            "/api/market-instruments",
+            params={"provider": "kraken"},
+            headers={"X-API-Key": "x" * 32},
+        )
+        filtered_response = client.get(
+            "/api/market-instruments",
+            params={"provider": "kraken", "query": "eth", "limit": 1},
+            headers={"X-API-Key": "x" * 32},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["provider"] == "kraken"
+    assert [item["symbol"] for item in payload["instruments"]] == [
+        "BTC_USD",
+        "ETH_USD",
+    ]
+    assert payload["instruments"][0]["display_name"] == "BTC/USD"
+    assert payload["total"] == 2
+    assert payload["has_more"] is False
+    assert [item["symbol"] for item in filtered_response.json()["instruments"]] == [
+        "ETH_USD"
+    ]
+    assert connector.instrument_calls == 1
+
+
 def test_broker_state_endpoint_returns_account_and_positions(monkeypatch) -> None:
     settings = _api_settings()
     scope = RequestScope(workspace_id=uuid.uuid4(), account_id=uuid.uuid4())
@@ -267,6 +343,63 @@ def test_oanda_market_data_uses_scoped_saved_broker_credentials(monkeypatch) -> 
     assert captured == {"account": account, "connection": connection}
 
 
+def test_metatrader_market_data_uses_scoped_read_only_bridge(monkeypatch) -> None:
+    settings = Settings(
+        database_url="postgresql+psycopg://ignored:ignored@localhost/ignored",
+        database_auto_migrate=False,
+        trading_agent_api_key="x" * 32,
+        broker_provider="metatrader",
+        metatrader_platform="mt5",
+    )
+    scope = RequestScope(workspace_id=uuid.uuid4(), account_id=uuid.uuid4())
+    account = SimpleNamespace(
+        id=scope.account_id,
+        workspace_id=scope.workspace_id,
+        broker="MT5",
+        active=True,
+    )
+    connection = SimpleNamespace(
+        account_id=scope.account_id,
+        workspace_id=scope.workspace_id,
+        provider="metatrader-mt5-bridge",
+        environment="practice",
+        status="healthy",
+    )
+    database = Mock()
+    database.scalar.return_value = connection
+    captured = {}
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(main_module, "validate_scope", lambda _db, _scope: account)
+
+    def create_connector(_settings, *, account, connection):
+        captured["account"] = account
+        captured["connection"] = connection
+        connector = _TestBrokerConnector()
+        connector.name = "metatrader-mt5-bridge"
+        return connector
+
+    monkeypatch.setattr(main_module, "create_broker_connector", create_connector)
+    main_module.app.dependency_overrides[main_module.get_db] = lambda: database
+
+    try:
+        with TestClient(main_module.app) as client:
+            response = client.get(
+                "/api/market-data",
+                params={"provider": "metatrader", "instrument": "XAUUSD"},
+                headers={
+                    "X-API-Key": "x" * 32,
+                    "X-Workspace-ID": str(scope.workspace_id),
+                    "X-Account-ID": str(scope.account_id),
+                },
+            )
+    finally:
+        main_module.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["provider"] == "metatrader-mt5-bridge"
+    assert captured == {"account": account, "connection": connection}
+
+
 def test_market_data_endpoint_maps_invalid_provider_to_400(monkeypatch) -> None:
     settings = _api_settings()
     monkeypatch.setattr(main_module, "get_settings", lambda: settings)
@@ -322,3 +455,51 @@ def test_market_data_endpoint_maps_connector_error_to_503(monkeypatch) -> None:
 
     assert response.status_code == 503
     assert response.json()["detail"] == "temporary failure"
+
+
+def test_market_data_endpoint_does_not_expose_unclassified_provider_errors(
+    monkeypatch,
+) -> None:
+    settings = _api_settings()
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+
+    def fail(_settings: Settings, _provider: str):
+        raise RuntimeError("request contained secret-token-123")
+
+    monkeypatch.setattr(main_module, "create_market_data_connector", fail)
+
+    with TestClient(main_module.app) as client:
+        response = client.get(
+            "/api/market-data",
+            params={"provider": "kraken"},
+            headers={"X-API-Key": "x" * 32},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "market data provider failed unexpectedly"
+    assert "secret-token-123" not in response.text
+
+
+def test_market_instruments_endpoint_does_not_expose_unclassified_provider_errors(
+    monkeypatch,
+) -> None:
+    settings = _api_settings()
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+
+    def fail(_settings: Settings, _provider: str):
+        raise RuntimeError("request contained secret-token-123")
+
+    monkeypatch.setattr(main_module, "create_market_data_connector", fail)
+
+    with TestClient(main_module.app) as client:
+        response = client.get(
+            "/api/market-instruments",
+            params={"provider": "kraken"},
+            headers={"X-API-Key": "x" * 32},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "market instrument catalog failed unexpectedly"
+    )
+    assert "secret-token-123" not in response.text

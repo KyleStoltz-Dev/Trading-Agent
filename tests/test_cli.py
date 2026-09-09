@@ -16,6 +16,7 @@ from app.cli import app
 from app.config import Settings
 from app.connectors import BrokerConfigurationError
 from app.costs import TokenUsage
+from app.providers.subscription_provider import SubscriptionRuntimeStatus
 from app.schemas import MindsetCheckInRead, TraderProfileUpsert
 from app.services.agent import UsedReference
 from app.services.health import HealthCheck, HealthReport
@@ -56,6 +57,7 @@ def test_help_lists_interactive_and_fallback_commands() -> None:
         "plan",
         "review",
         "chart",
+        "dashboard",
         "api",
         "journal",
         "sessions",
@@ -74,6 +76,24 @@ def test_help_lists_interactive_and_fallback_commands() -> None:
         "Setup and administration",
     ):
         assert panel in result.stdout
+
+
+def test_dashboard_command_reuses_local_launcher_without_manual_key(
+    monkeypatch,
+) -> None:
+    plan = SimpleNamespace(service_url="http://127.0.0.1:8000")
+    build = Mock(return_value=plan)
+    run = Mock()
+    monkeypatch.setattr(cli_module, "build_dashboard_launch_plan", build)
+    monkeypatch.setattr(cli_module, "run_dashboard", run)
+
+    result = runner.invoke(app, ["dashboard", "--no-open-browser"])
+
+    assert result.exit_code == 0
+    assert "Reusing your configured workspace" in result.stdout
+    assert "Credentials stay server-side" in result.stdout
+    build.assert_called_once()
+    run.assert_called_once_with(plan, open_browser=False)
 
 
 def test_cli_entrypoint_hides_unexpected_tracebacks(monkeypatch) -> None:
@@ -114,6 +134,123 @@ def test_startup_quick_actions_translate_to_natural_requests(
     monkeypatch.setattr(cli_module.console, "input", Mock(return_value=selection))
 
     assert cli_module._prompt_startup_action() == expected
+
+
+def test_startup_memory_does_not_render_previous_session_metadata() -> None:
+    memory = SimpleNamespace(
+        has_content=True,
+        goals=(),
+        account=None,
+        strategy=None,
+        prior_session=SimpleNamespace(
+            name="daily-2026-09-08",
+            turn_count=2,
+            last_activity_at="2026-09-08T17:14:02-04:00",
+            title="Previous session",
+        ),
+        open_plans=(),
+        recent_reflections=(),
+        recent_mindset=(),
+    )
+    output = StringIO()
+    original_console = cli_module.console
+    cli_module.console = Console(file=output, force_terminal=False)
+    try:
+        cli_module._render_startup_memory(memory)
+    finally:
+        cli_module.console = original_console
+
+    rendered = output.getvalue()
+    assert "Previous session" not in rendered
+    assert "daily-2026-09-08" not in rendered
+
+
+def test_metatrader_mode_accepts_demo_and_normalizes_to_practice() -> None:
+    settings = Settings(metatrader_mode="demo")
+
+    assert settings.metatrader_mode == "practice"
+    assert cli_module._display_account_mode("MT5", settings.metatrader_mode) == "demo"
+    assert cli_module._display_account_mode("OANDA", "practice") == "practice"
+
+
+@pytest.mark.parametrize(
+    "system_name,hint_fragment",
+    [
+        ("Windows", "MetaTrader bridge beside your official MT5 terminal"),
+        ("Darwin", "separate Windows machine"),
+        ("Linux", "this app can be the client"),
+    ],
+    ids=("windows", "macos", "linux"),
+)
+def test_metatrader_runtime_hint_is_os_sensitive(
+    monkeypatch,
+    system_name: str,
+    hint_fragment: str,
+) -> None:
+    monkeypatch.setattr(cli_module, "_platform_system", lambda: system_name)
+
+    assert hint_fragment in cli_module._metatrader_runtime_hint()
+
+
+def test_chat_completions_include_saved_strategies_drafts_and_models(
+    monkeypatch,
+) -> None:
+    controller = Mock()
+    controller.options.return_value = (
+        SimpleNamespace(provider="ollama", model="qwen3.5:9b", local=True),
+        SimpleNamespace(provider="openai", model="gpt-5.6-terra", local=False),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "list_strategy_summaries",
+        Mock(return_value=[SimpleNamespace(name="New York Reversal")]),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "list_local_strategy_templates",
+        Mock(return_value=[{"name": "kyle-price-action"}]),
+    )
+
+    strategy_values = {
+        item.value
+        for item in cli_module._chat_completion_options(
+            "/strategy",
+            db=Mock(),
+            scope=TEST_SCOPE,
+            model_controller=controller,
+            current_provider="ollama",
+            current_model="qwen3.5:9b",
+        )
+    }
+    model_values = {
+        item.value
+        for item in cli_module._chat_completion_options(
+            "/model",
+            db=Mock(),
+            scope=TEST_SCOPE,
+            model_controller=controller,
+            current_provider="ollama",
+            current_model="qwen3.5:9b",
+        )
+    }
+
+    assert "/strategy use New York Reversal" in strategy_values
+    assert "/strategy draft kyle-price-action" in strategy_values
+    assert "/model use ollama/qwen3.5:9b" in model_values
+    assert "/model use openai/gpt-5.6-terra" in model_values
+    assert "/model browse" in model_values
+    assert "/mode browse" in {
+        item.value
+        for item in cli_module._chat_completion_options(
+            "/mode",
+            db=Mock(),
+            scope=TEST_SCOPE,
+            model_controller=controller,
+            current_provider="ollama",
+            current_model="qwen3.5:9b",
+        )
+    }
+    assert cli_module._chat_command_suggestion("/straetedy") == "/strategy"
 
 
 def test_first_run_applies_recommended_managed_settings(monkeypatch, tmp_path: Path) -> None:
@@ -567,6 +704,33 @@ def test_chat_clipboard_chart_failure_stays_in_chat(monkeypatch) -> None:
     assert "conversation remained open" in add_turn.call_args_list[-1].args[3]
 
 
+def test_chat_clipboard_chart_ctrl_c_stays_in_chat(monkeypatch) -> None:
+    conversation = SimpleNamespace(
+        workspace_id=TEST_SCOPE.workspace_id,
+        account_id=TEST_SCOPE.account_id,
+        name="chart-review",
+        active_playbook_version_id=None,
+    )
+    add_turn = Mock()
+    monkeypatch.setattr(cli_module, "add_turn", add_turn)
+    monkeypatch.setattr(
+        cli_module,
+        "chart",
+        Mock(side_effect=KeyboardInterrupt),
+    )
+
+    assert cli_module._handle_chat_clipboard_chart_intent(
+        Mock(),
+        conversation,
+        "Review the image on my clipboard",
+        model=None,
+        reasoning_effort="low",
+    )
+
+    assert "cancelled by the user" in add_turn.call_args_list[-1].args[3]
+    assert "conversation remained open" in add_turn.call_args_list[-1].args[3]
+
+
 def test_chat_ctrl_v_uses_the_exact_attached_image(monkeypatch) -> None:
     conversation = SimpleNamespace(
         workspace_id=TEST_SCOPE.workspace_id,
@@ -594,6 +758,49 @@ def test_chat_ctrl_v_uses_the_exact_attached_image(monkeypatch) -> None:
 
     assert analyze.call_args.kwargs["captured_clipboard_image"] is image
     assert analyze.call_args.kwargs["context"] == "clean distribution during New York"
+    assert analyze.call_args.kwargs["interactive_chat"] is True
+
+
+def test_chat_ctrl_v_uses_submit_as_confirmation_without_policy_dump(
+    monkeypatch,
+) -> None:
+    image = cli_module.ClipboardImage(
+        data=b"\x89PNG\r\n\x1a\nchart",
+        content_type="image/png",
+        source="macOS clipboard",
+    )
+    authorize = Mock()
+    confirm = Mock(side_effect=AssertionError("redundant confirmation must not run"))
+    provider = SimpleNamespace(name="test", model="vision")
+    monkeypatch.setattr(cli_module, "_authorize_direct", authorize)
+    monkeypatch.setattr(cli_module.typer, "confirm", confirm)
+    monkeypatch.setattr(cli_module, "get_settings", Mock(return_value=Settings()))
+    monkeypatch.setattr(cli_module, "_chart_destination", Mock(return_value=None))
+    monkeypatch.setattr(
+        cli_module,
+        "analyze_chart",
+        Mock(side_effect=RuntimeError("stop after authorization")),
+    )
+
+    with pytest.raises(typer.Exit):
+        cli_module._analyze_chart_command(
+            image=None,
+            clipboard=True,
+            captured_clipboard_image=image,
+            context="Review this setup",
+            instrument=None,
+            venue=None,
+            timeframe=None,
+            market_time=None,
+            trade_plan=None,
+            provider=provider,
+            model=None,
+            reasoning_effort="medium",
+            interactive_chat=True,
+        )
+
+    confirm.assert_not_called()
+    assert authorize.call_args.kwargs == {"mutating": True, "assume_yes": True}
 
 
 def test_chat_trade_intent_enables_live_market_when_broker_ready(
@@ -1099,12 +1306,62 @@ def test_setup_accepts_human_provider_names_without_internal_slugs(
     assert "TRADINGVIEW_WEBHOOK_ENABLED=true" in content
 
 
+def test_interactive_cloud_setup_saves_api_key_in_vault_only(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = tmp_path / ".env"
+    launcher = tmp_path / "trade"
+    stored = Mock()
+    monkeypatch.setattr(cli_module, "install_user_launcher", Mock(return_value=launcher))
+    monkeypatch.setattr(cli_module, "shell_path_hint", Mock(return_value=None))
+    monkeypatch.setattr(cli_module, "model_api_key_configured", Mock(return_value=False))
+    monkeypatch.setattr(cli_module, "store_model_api_key", stored)
+    monkeypatch.setattr(
+        cli_module,
+        "codex_subscription_status",
+        lambda: SubscriptionRuntimeStatus(
+            False,
+            False,
+            False,
+            "Codex is not signed in.",
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "setup",
+            "--provider",
+            "OpenAI",
+            "--database",
+            "local",
+            "--broker",
+            "none",
+            "--news",
+            "none",
+            "--tradingview",
+            "disabled",
+            "--config",
+            str(config),
+        ],
+        input="y\ny\nprivate-openai-key\n",
+    )
+
+    assert result.exit_code == 0
+    assert "private-openai-key" not in config.read_text(encoding="utf-8")
+    assert "never in this settings file" in result.stdout
+    assert "never asks for or overwrites API keys" not in result.stdout
+    assert stored.call_args.kwargs["provider"] == "openai"
+    assert stored.call_args.kwargs["api_key"] == "private-openai-key"
+
+
 def test_setup_typo_returns_suggestion_without_traceback() -> None:
     result = runner.invoke(app, ["setup", "--provider", "opnai", "--yes"])
 
     assert result.exit_code == 2
     assert "Did you mean" in result.stdout
-    assert "OpenAI API" in result.stdout
+    assert "OpenAI / ChatGPT" in result.stdout
     assert "Traceback" not in result.stdout
 
 
@@ -1703,6 +1960,73 @@ def test_account_use_restores_real_env_file_when_database_commit_fails(
     db.rollback.assert_called_once_with()
 
 
+def test_tradingview_connection_enables_receiver_and_rotates_scoped_secret(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("TRADINGVIEW_WEBHOOK_ENABLED=false\n", encoding="utf-8")
+    workspace = SimpleNamespace(
+        id=TEST_SCOPE.workspace_id,
+        slug="trading",
+        name="Trading",
+    )
+    account = SimpleNamespace(
+        id=TEST_SCOPE.account_id,
+        label="TradingView paper",
+        external_account_id="paper",
+        active=True,
+    )
+    db = Mock()
+    authorize = Mock()
+    set_secret = Mock(return_value="s" * 43)
+    settings_loader = Mock()
+    settings_loader.cache_clear = Mock()
+    monkeypatch.setattr(cli_module, "_configured_workspace", Mock(return_value=workspace))
+    monkeypatch.setattr(cli_module, "_current_scope", Mock(return_value=TEST_SCOPE))
+    monkeypatch.setattr(cli_module, "resolve_account", Mock(return_value=account))
+    monkeypatch.setattr(cli_module, "_authorize_direct", authorize)
+    monkeypatch.setattr(cli_module, "default_config_path", Mock(return_value=env_file))
+    monkeypatch.setattr(cli_module, "set_tradingview_webhook_secret", set_secret)
+    monkeypatch.setattr(cli_module, "get_settings", settings_loader)
+
+    changed = cli_module._configure_tradingview_alerts(
+        db,
+        public_url="https://alerts.example.com",
+        assume_yes=True,
+    )
+
+    assert changed is True
+    assert "TRADINGVIEW_WEBHOOK_ENABLED=true" in env_file.read_text(encoding="utf-8")
+    set_secret.assert_called_once_with(db, account=account)
+    settings_loader.cache_clear.assert_called_once_with()
+    arguments = authorize.call_args.args[1]
+    assert arguments["account"] == "TradingView paper"
+    assert str(TEST_SCOPE.account_id) in arguments["public_endpoint"]
+    assert "secret" not in arguments
+
+
+def test_tradingview_connection_stops_cleanly_without_public_address(
+    monkeypatch,
+) -> None:
+    workspace = SimpleNamespace(id=TEST_SCOPE.workspace_id, slug="trading")
+    account = SimpleNamespace(id=TEST_SCOPE.account_id, label="Paper")
+    authorize = Mock()
+    monkeypatch.setattr(cli_module, "_configured_workspace", Mock(return_value=workspace))
+    monkeypatch.setattr(cli_module, "_current_scope", Mock(return_value=TEST_SCOPE))
+    monkeypatch.setattr(cli_module, "resolve_account", Mock(return_value=account))
+    monkeypatch.setattr(cli_module, "_authorize_direct", authorize)
+    monkeypatch.setattr(cli_module.console, "input", Mock(return_value=""))
+
+    changed = cli_module._configure_tradingview_alerts(
+        Mock(),
+        public_url=None,
+    )
+
+    assert changed is False
+    authorize.assert_not_called()
+
+
 def test_account_recover_reactivates_legacy_identity_without_moving_history(
     monkeypatch,
     tmp_path: Path,
@@ -1819,6 +2143,28 @@ def test_agent_reply_is_compact_and_details_preserve_the_audit(monkeypatch) -> N
     assert "20 output" in expanded
     assert "$0 API" in expanded
     assert "References" in expanded
+
+
+def test_normal_thinking_status_hides_cost_and_context_internals() -> None:
+    prepared = SimpleNamespace(
+        route=SimpleNamespace(mode="balanced", model="gpt-5.6-sol")
+    )
+
+    rendered = cli_module._request_status_label(prepared, "openai", 3)
+
+    assert rendered == "[green]Thinking[/green] · OpenAI · gpt-5.6-sol"
+    assert "$" not in rendered
+    assert "source" not in rendered
+
+
+def test_mutation_confirmation_is_plain_and_never_displays_credentials() -> None:
+    prompt = cli_module._mutation_confirmation_prompt(
+        "Policy-approved mutation: configure_broker_connection",
+        {"account": "practice", "token": "do-not-display"},
+    )
+
+    assert prompt == "Save this read-only broker connection?"
+    assert "do-not-display" not in prompt
 
 
 def test_terminal_markdown_unwraps_documents_and_stacks_wide_tables_as_cards() -> None:
@@ -1940,6 +2286,76 @@ def test_release_local_model_uses_the_provider_unload_boundary(monkeypatch) -> N
 
     assert cli_module._release_local_model(provider, "qwen3.5:9b")
     unload.assert_called_once_with("qwen3.5:9b")
+
+
+def test_agent_response_ctrl_c_becomes_one_request_cancellation(monkeypatch) -> None:
+    output = StringIO()
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=output, force_terminal=False, width=120),
+    )
+    agent = Mock()
+    agent.respond.side_effect = KeyboardInterrupt
+
+    with pytest.raises(cli_module.ChatResponseCancelled):
+        cli_module._respond_with_status(
+            agent,
+            "Review this chart",
+            [],
+            mode="balanced",
+            prepared=Mock(),
+            request_status="Thinking",
+            request_id=uuid.uuid4(),
+            conversation_session_id=uuid.uuid4(),
+            user_turn_id=uuid.uuid4(),
+        )
+
+    agent.respond.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("tool_succeeded", "expected_status", "expected_partial"),
+    ((False, "failed", False), (True, "partial", True)),
+)
+def test_cancelled_chat_request_is_audited_without_closing_chat(
+    monkeypatch,
+    tool_succeeded: bool,
+    expected_status: str,
+    expected_partial: bool,
+) -> None:
+    update = Mock()
+    add = Mock()
+    monkeypatch.setattr(cli_module, "update_turn_outcome", update)
+    monkeypatch.setattr(cli_module, "add_turn", add)
+    agent = SimpleNamespace(
+        last_tool_audit=(
+            SimpleNamespace(succeeded=True) if tool_succeeded else None
+        )
+    )
+    request_id = uuid.uuid4()
+    user_turn = Mock()
+    conversation = Mock()
+
+    partial = cli_module._record_cancelled_chat_request(
+        Mock(),
+        agent=agent,
+        user_turn=user_turn,
+        conversation=conversation,
+        scope=TEST_SCOPE,
+        playbook_version_id=None,
+        request_id=request_id,
+    )
+
+    assert partial is expected_partial
+    assert update.call_args.kwargs == {
+        "scope": TEST_SCOPE,
+        "status": expected_status,
+        "error_type": "UserCancelled",
+    }
+    assert add.call_args.kwargs["status"] == expected_status
+    assert add.call_args.kwargs["error_type"] == "UserCancelled"
+    assert add.call_args.kwargs["request_id"] == request_id
 
 
 def test_print_model_normalizes_uuid_values(monkeypatch) -> None:

@@ -9,11 +9,13 @@ from typing import Any, Final
 
 import httpx
 
-from app.market_data.contracts import Candle, Quote
+from app.market_data.contracts import Candle, MarketInstrument, Quote
 
 ALPACA_STOCKS_BARS_PATH = "/v2/stocks/{symbol}/bars"
 ALPACA_STOCKS_LATEST_QUOTE_PATH = "/v2/stocks/{symbol}/quotes/latest"
 ALPACA_MAX_RESPONSE_BYTES: Final = 1_000_000
+ALPACA_ASSETS_URL: Final = "https://paper-api.alpaca.markets/v2/assets"
+ALPACA_ASSETS_MAX_RESPONSE_BYTES: Final = 8_000_000
 
 
 class AlpacaConnectorError(RuntimeError):
@@ -184,6 +186,60 @@ class AlpacaReadOnlyConnector:
                 raise AlpacaConnectorError("Alpaca returned an invalid payload")
             return payload
         raise AlpacaConnectorError("Alpaca request failed")
+
+    async def _get_json_array(
+        self,
+        path: str,
+        **params: str | int | None,
+    ) -> list[dict[str, Any]]:
+        filtered = {key: value for key, value in params.items() if value is not None}
+        try:
+            async with self._client.stream("GET", path, params=filtered) as response:
+                response.raise_for_status()
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > ALPACA_ASSETS_MAX_RESPONSE_BYTES:
+                        raise AlpacaConnectorError(
+                            "Alpaca asset catalog exceeded the configured limit"
+                        )
+                    chunks.append(chunk)
+            payload = json.loads(b"".join(chunks))
+        except (httpx.TransportError, httpx.TimeoutException) as exc:
+            raise AlpacaConnectorError(
+                f"Alpaca transport failed: {type(exc).__name__}"
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            raise AlpacaConnectorError(
+                f"Alpaca request failed with status {exc.response.status_code}"
+            ) from exc
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+            raise AlpacaConnectorError("Alpaca returned invalid JSON") from exc
+        if not isinstance(payload, list) or not all(
+            isinstance(item, dict) for item in payload
+        ):
+            raise AlpacaConnectorError("Alpaca asset catalog is malformed")
+        return payload
+
+    async def instruments(self) -> Sequence[MarketInstrument]:
+        assets = await self._get_json_array(
+            ALPACA_ASSETS_URL,
+            status="active",
+            asset_class="us_equity",
+        )
+        return tuple(
+            MarketInstrument(
+                symbol=str(item["symbol"]),
+                display_name=str(item.get("name") or item["symbol"]),
+                asset_class=str(item.get("class") or "us_equity"),
+                source=self.name,
+                venue=str(item.get("exchange") or self.venue),
+                tradable=bool(item.get("tradable", False)),
+            )
+            for item in assets
+            if item.get("symbol")
+        )
 
     async def latest_quote(self, instrument: str) -> Quote:
         symbol = instrument.upper().strip()

@@ -16,7 +16,12 @@ from app.models import (
     TradingAccount,
     Workspace,
 )
-from app.schemas import ChartAnalysis, PlaybookCheck, TradingViewAlertCreate
+from app.schemas import (
+    ChartAnalysis,
+    ChartObservedMetadata,
+    PlaybookCheck,
+    TradingViewAlertCreate,
+)
 from app.services.analytics import build_edge_report
 from app.services.evidence import record_chart_analysis
 from app.services.execution_ledger import (
@@ -178,6 +183,16 @@ def test_chart_evidence_files_and_rows_are_account_scoped(
 ) -> None:
     scope_a, scope_b, _ = _scope_pair(db_session)
     analysis = ChartAnalysis(
+        observed_metadata=ChartObservedMetadata(
+            instrument=None,
+            instrument_evidence=None,
+            venue=None,
+            venue_evidence=None,
+            timeframe=None,
+            timeframe_evidence=None,
+            market_time=None,
+            market_time_evidence=None,
+        ),
         visible_facts=["Price reclaimed the marked low."],
         unreadable_or_missing=[],
         context_hypotheses=["The range may be reaccumulation."],

@@ -23,13 +23,15 @@
         --cyan: #4da3ff;
         --red: #ff667a;
         --amber: #f0b85d;
+        --violet: #9b87ff;
+        --ivory: #f6f3ea;
         --radius: 16px;
         font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
 
       * { box-sizing: border-box; }
       html { scroll-behavior: smooth; }
-      body { margin: 0; min-width: 320px; background: radial-gradient(circle at 78% -10%, #162033 0, var(--bg) 37%); color: var(--text); }
+      body { margin: 0; min-width: 320px; background: radial-gradient(circle at 78% -12%, rgba(77, 163, 255, .13), transparent 32%), radial-gradient(circle at 18% 8%, rgba(155, 135, 255, .07), transparent 24%), var(--bg); color: var(--text); }
       button, input, select { font: inherit; }
       button { cursor: pointer; }
       .app { min-height: 100vh; display: grid; grid-template-columns: 76px minmax(0, 1fr); }
@@ -43,11 +45,11 @@
       .rail-bottom { margin-top: auto; display: grid; gap: 12px; }
       .avatar { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; border: 1px solid #334055; background: #182131; color: #cbd6e6; font-weight: 700; }
 
-      .page { min-width: 0; padding: 0 30px 34px; }
+      .page { min-width: 0; padding: 0 38px 38px; }
       .topbar { min-height: 84px; display: flex; align-items: center; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--line-soft); }
       .title-row { display: flex; align-items: center; gap: 13px; }
       h1, h2, h3, p { margin-top: 0; }
-      h1 { margin-bottom: 3px; font-size: 20px; letter-spacing: -.03em; }
+      h1 { margin-bottom: 3px; font-size: 20px; letter-spacing: -.045em; }
       .subtitle { margin: 0; color: var(--muted); font-size: 12px; }
       .top-actions { display: flex; align-items: center; gap: 10px; }
       .search { width: 245px; display: flex; align-items: center; gap: 8px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px; background: #0d1119; color: var(--muted); }
@@ -62,10 +64,11 @@
       .button.small { min-height: 31px; padding: 0 10px; font-size: 11px; }
       .button:disabled { opacity: .55; cursor: progress; }
 
-      .content { max-width: 1480px; margin: 0 auto; }
-      .welcome { display: flex; align-items: end; justify-content: space-between; gap: 20px; padding: 27px 0 18px; }
-      .welcome h2 { margin-bottom: 6px; font-size: 24px; letter-spacing: -.04em; }
-      .welcome p { margin: 0; color: var(--muted); font-size: 13px; }
+      .content { max-width: 1520px; margin: 0 auto; }
+      .welcome { display: flex; align-items: end; justify-content: space-between; gap: 20px; padding: 34px 0 20px; }
+      .welcome h2 { max-width: 760px; margin: 7px 0 7px; color: var(--ivory); font-size: clamp(26px, 3vw, 42px); font-weight: 620; letter-spacing: -.055em; line-height: 1.04; }
+      .welcome p { max-width: 680px; margin: 0; color: var(--muted-2); font-size: 13px; line-height: 1.6; }
+      .eyebrow { color: var(--teal); font-size: 9px; font-weight: 800; letter-spacing: .17em; text-transform: uppercase; }
       .status-pill, .chip { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; border: 1px solid var(--line); border-radius: 999px; background: rgba(17,21,31,.75); color: var(--muted-2); font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
       .status-pill { padding: 8px 11px; }
       .chip { padding: 5px 8px; }
@@ -74,7 +77,8 @@
       .dot.warn { background: var(--amber); }
 
       .metric-grid { display: grid; grid-template-columns: 1.55fr repeat(4, 1fr); gap: 12px; }
-      .card { border: 1px solid var(--line); border-radius: var(--radius); background: linear-gradient(145deg, rgba(20,25,36,.97), rgba(14,18,27,.97)); box-shadow: 0 16px 45px rgba(0,0,0,.16); }
+      .card { border: 1px solid rgba(142, 157, 184, .15); border-radius: var(--radius); background: linear-gradient(145deg, rgba(20,25,36,.95), rgba(12,16,24,.96)); box-shadow: 0 18px 55px rgba(0,0,0,.22), inset 0 1px rgba(255,255,255,.025); }
+      .card:hover { border-color: rgba(142, 157, 184, .24); }
       .metric { min-height: 142px; padding: 18px; position: relative; overflow: hidden; }
       .metric::after { content: ""; position: absolute; right: -30px; bottom: -45px; width: 120px; height: 120px; border-radius: 50%; background: radial-gradient(circle, rgba(53,228,181,.07), transparent 70%); }
       .metric-label { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 11px; }
@@ -94,6 +98,16 @@
       .card-head h3 { margin: 0 0 3px; font-size: 13px; }
       .card-head p { margin: 0; color: var(--muted); font-size: 10px; }
       .filters { display: flex; align-items: center; gap: 7px; }
+      .instrument-combobox { position: relative; width: 148px; }
+      .instrument-input { width: 100%; min-height: 32px; padding-right: 28px !important; }
+      .instrument-toggle { position: absolute; top: 1px; right: 1px; width: 27px; height: 29px; border: 0; border-left: 1px solid var(--line-soft); border-radius: 0 7px 7px 0; background: #0c1018; color: var(--muted); cursor: pointer; }
+      .instrument-menu { position: absolute; z-index: 30; top: calc(100% + 6px); left: 0; width: 230px; max-height: 260px; padding: 6px; overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; background: #0c1018; box-shadow: 0 18px 48px rgba(0,0,0,.48); }
+      .instrument-menu[hidden] { display: none; }
+      .instrument-option { width: 100%; display: grid; grid-template-columns: 74px 1fr; gap: 10px; padding: 9px 10px; border: 0; border-radius: 7px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+      .instrument-option:hover, .instrument-option.active { background: var(--teal-soft); }
+      .instrument-option strong { font-size: 10px; }
+      .instrument-option span { color: var(--muted); font-size: 9px; }
+      .instrument-empty { padding: 10px; color: var(--muted); font-size: 9px; line-height: 1.45; }
       .select, .field { border: 1px solid var(--line); border-radius: 8px; background: #0c1018; color: var(--muted-2); outline: none; }
       .select { min-height: 31px; padding: 0 28px 0 9px; font-size: 10px; }
       .field { width: 100%; min-height: 38px; padding: 0 11px; font-size: 12px; }
@@ -104,8 +118,14 @@
       .chart-wrap { position: relative; height: 305px; padding: 18px 14px 10px; overflow: hidden; }
       .chart-wrap::before { content: ""; position: absolute; inset: 18px 14px 28px; background-image: linear-gradient(var(--line-soft) 1px, transparent 1px), linear-gradient(90deg, var(--line-soft) 1px, transparent 1px); background-size: 100% 52px, 96px 100%; opacity: .58; }
       #equity-chart { position: relative; width: 100%; height: 100%; overflow: visible; }
-      #equity-area { fill: url(#area-gradient); opacity: .8; }
-      #equity-line { fill: none; stroke: var(--cyan); stroke-width: 2.2; vector-effect: non-scaling-stroke; filter: drop-shadow(0 0 6px rgba(77,163,255,.25)); }
+      .candle-wick { vector-effect: non-scaling-stroke; stroke-width: 1.2; }
+      .candle-body { vector-effect: non-scaling-stroke; stroke-width: .8; }
+      .candle-up { fill: var(--teal); stroke: var(--teal); }
+      .candle-down { fill: var(--red); stroke: var(--red); }
+      .candle-incomplete { opacity: .5; }
+      .market-line { fill: none; stroke: var(--cyan); stroke-width: 2.2; vector-effect: non-scaling-stroke; filter: drop-shadow(0 0 6px rgba(77,163,255,.25)); }
+      .price-guide { stroke: rgba(126, 143, 166, .2); stroke-width: 1; vector-effect: non-scaling-stroke; }
+      .price-label { fill: #77869a; font-size: 10px; text-anchor: end; }
       .axis-labels { position: absolute; inset: 20px 20px 20px auto; display: flex; flex-direction: column; justify-content: space-between; color: #526075; font-size: 9px; text-align: right; pointer-events: none; }
       .chart-empty { position: absolute; inset: 0; display: none; place-items: center; color: var(--muted); font-size: 12px; }
 
@@ -155,6 +175,66 @@
       .impact { width: 7px; height: 7px; margin-top: 3px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 8px rgba(240,184,93,.3); }
       .impact.high { background: var(--red); box-shadow: 0 0 8px rgba(255,102,122,.3); }
       .footer { display: flex; justify-content: space-between; gap: 16px; padding: 20px 3px 0; color: #566174; font-size: 9px; }
+      .view-select { min-height: 38px; max-width: 170px; }
+      .content.focused { max-width: 1120px; }
+      body.density-compact .metric { min-height: 116px; padding: 14px; }
+      body.density-compact .metric-value { margin-top: 12px; font-size: 23px; }
+      body.density-compact .card-head { padding: 13px 15px; }
+      body.density-compact td { padding: 10px 14px; }
+      body.square-cards { --radius: 8px; }
+      [data-widget].widget-hidden { display: none !important; }
+      .customizer-note { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.55; }
+      .accent-options { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+      .accent-choice { min-height: 42px; border: 1px solid var(--line); border-radius: 9px; background: #0c1018; color: var(--muted-2); }
+      .accent-choice::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 7px; border-radius: 50%; background: var(--choice); }
+      .accent-choice.active { border-color: var(--choice); color: var(--text); box-shadow: inset 0 0 0 1px var(--choice); }
+      .widget-options { display: grid; grid-template-columns: 1fr 1fr; gap: 7px 12px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: #0c1018; }
+      .widget-toggle { display: flex; grid-template-columns: none; align-items: center; gap: 8px; color: var(--muted-2); font-size: 10px; letter-spacing: 0; text-transform: none; }
+      .widget-toggle input { accent-color: var(--teal); }
+      .prompt-box { min-height: 76px; padding: 10px 11px; resize: vertical; line-height: 1.45; }
+      .order-list { display: grid; gap: 7px; }
+      .order-item { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 6px; padding: 7px 8px 7px 11px; border: 1px solid var(--line); border-radius: 9px; background: #0c1018; color: var(--muted-2); font-size: 10px; }
+      .order-button { width: 28px; height: 28px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--muted-2); }
+      .customizer-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 15px; }
+      .customizer-actions .wide { grid-column: 1 / -1; }
+      .template-badge { display: inline-flex; align-items: center; gap: 6px; color: var(--teal); font-size: 9px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+      .template-badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--teal); }
+
+      .command-deck { display: grid; grid-template-columns: minmax(0, 1.28fr) minmax(360px, .72fr); gap: 14px; margin-bottom: 14px; }
+      .focus-card { position: relative; min-height: 344px; padding: 30px; overflow: hidden; border-color: rgba(93, 128, 166, .22); background: radial-gradient(circle at 85% 24%, rgba(77,163,255,.13), transparent 27%), linear-gradient(135deg, rgba(21,28,41,.99), rgba(10,14,22,.98)); }
+      .focus-card::before { content: ""; position: absolute; inset: 0; opacity: .22; background-image: linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px); background-size: 42px 42px; mask-image: linear-gradient(to right, transparent 12%, black 70%); pointer-events: none; }
+      .focus-orb { position: absolute; right: 8%; top: 38px; width: 174px; height: 174px; border: 1px solid rgba(77,163,255,.2); border-radius: 50%; background: radial-gradient(circle at 35% 30%, rgba(255,255,255,.16), transparent 8%), radial-gradient(circle at 50% 50%, rgba(77,163,255,.23), rgba(155,135,255,.09) 42%, transparent 68%); box-shadow: 0 0 70px rgba(77,163,255,.11), inset 0 0 45px rgba(77,163,255,.08); }
+      .focus-orb::before, .focus-orb::after { content: ""; position: absolute; inset: 17px; border: 1px solid rgba(255,255,255,.08); border-radius: 50%; }
+      .focus-orb::after { inset: 48px; border-color: rgba(53,228,181,.24); box-shadow: 0 0 30px rgba(53,228,181,.08); }
+      .focus-content { position: relative; z-index: 1; max-width: 65%; }
+      .focus-card h3 { margin: 17px 0 11px; color: var(--ivory); font-size: clamp(28px, 3vw, 45px); font-weight: 590; letter-spacing: -.06em; line-height: 1.02; }
+      .focus-card > .focus-content > p { margin: 0; color: #9da8ba; font-size: 13px; line-height: 1.65; }
+      .desk-meta { position: absolute; z-index: 1; right: 25px; bottom: 24px; display: grid; gap: 8px; min-width: 205px; }
+      .desk-meta-item { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 8px 10px; border: 1px solid rgba(255,255,255,.07); border-radius: 9px; background: rgba(7,10,16,.52); backdrop-filter: blur(10px); color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .07em; }
+      .desk-meta-item strong { color: var(--text); font-size: 9px; font-weight: 700; }
+      .quick-actions { position: absolute; z-index: 1; left: 30px; bottom: 27px; display: flex; flex-wrap: wrap; gap: 8px; max-width: calc(100% - 275px); }
+      .quick-action { min-height: 37px; padding: 0 13px; border: 1px solid rgba(255,255,255,.09); border-radius: 999px; background: rgba(8,12,19,.72); color: #c3ccda; font-size: 10px; font-weight: 680; }
+      .quick-action:hover { border-color: var(--teal); color: var(--text); background: var(--teal-soft); }
+      .quick-action.featured { border-color: rgba(53,228,181,.35); color: var(--teal); }
+
+      .advisor-card { min-height: 344px; display: flex; flex-direction: column; overflow: hidden; background: radial-gradient(circle at 100% 0, rgba(155,135,255,.14), transparent 34%), linear-gradient(150deg, rgba(20,24,36,.98), rgba(12,15,23,.99)); }
+      .advisor-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px; border-bottom: 1px solid var(--line-soft); }
+      .advisor-identity { display: flex; align-items: center; gap: 10px; }
+      .advisor-mark { width: 35px; height: 35px; display: grid; place-items: center; border: 1px solid rgba(155,135,255,.34); border-radius: 11px; background: linear-gradient(145deg, rgba(155,135,255,.22), rgba(77,163,255,.09)); color: #d8d0ff; font-size: 11px; font-weight: 850; box-shadow: 0 0 24px rgba(155,135,255,.09); }
+      .advisor-title strong { display: block; color: var(--ivory); font-size: 12px; }
+      .advisor-title span { display: flex; align-items: center; gap: 6px; margin-top: 3px; color: var(--muted); font-size: 9px; }
+      .agent-model { width: 145px; }
+      .agent-feed { flex: 1; min-height: 184px; max-height: 250px; display: grid; align-content: start; gap: 10px; padding: 16px 18px; overflow-y: auto; }
+      .agent-message { max-width: 92%; padding: 10px 12px; border: 1px solid var(--line-soft); border-radius: 12px 12px 12px 3px; background: rgba(8,12,19,.65); color: #b5bfce; font-size: 11px; line-height: 1.55; white-space: pre-wrap; }
+      .agent-message.user { justify-self: end; border-color: rgba(53,228,181,.2); border-radius: 12px 12px 3px 12px; background: var(--teal-soft); color: #d8f9ef; }
+      .agent-message.pending { color: var(--muted); }
+      .agent-references { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+      .agent-reference { padding: 4px 7px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 8px; }
+      .agent-form { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 12px; border-top: 1px solid var(--line-soft); background: rgba(8,11,17,.58); }
+      .agent-input { min-width: 0; border: 1px solid var(--line); border-radius: 10px; background: #0b0f17; color: var(--text); padding: 0 12px; outline: none; font-size: 11px; }
+      .agent-input:focus { border-color: rgba(53,228,181,.48); box-shadow: 0 0 0 3px rgba(53,228,181,.06); }
+      .connect-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: end; }
+      .context-status { padding: 10px 11px; border: 1px solid var(--line); border-radius: 9px; background: #0c1018; color: var(--muted-2); font-size: 10px; line-height: 1.5; }
 
       dialog { width: min(520px, calc(100vw - 30px)); padding: 0; border: 1px solid #313a4c; border-radius: 16px; background: #111620; color: var(--text); box-shadow: 0 30px 100px rgba(0,0,0,.65); }
       dialog::backdrop { background: rgba(2,4,8,.72); backdrop-filter: blur(5px); }
@@ -164,6 +244,8 @@
       .secure-note { padding: 10px; border-radius: 9px; background: var(--teal-soft); color: #8fe8cc; font-size: 10px; line-height: 1.5; }
 
       @media (max-width: 1180px) {
+        .command-deck { grid-template-columns: 1fr; }
+        .focus-card, .advisor-card { min-height: 330px; }
         .metric-grid { grid-template-columns: repeat(3, 1fr); }
         .metric:first-child { grid-column: span 2; }
         .dashboard-grid, .bottom-grid { grid-template-columns: 1fr; }
@@ -184,6 +266,13 @@
         .stack { grid-template-columns: 1fr; }
         .chart-summary { grid-template-columns: 1fr 1fr; }
         .filters { flex-wrap: wrap; justify-content: flex-end; }
+        .view-select { display: none; }
+        .focus-card { min-height: 430px; padding: 23px; }
+        .focus-content { max-width: 100%; }
+        .focus-orb { top: 150px; right: 50%; width: 138px; height: 138px; transform: translateX(50%); opacity: .8; }
+        .quick-actions { left: 23px; right: 23px; bottom: 22px; max-width: none; }
+        .desk-meta { display: none; }
+        .agent-model { width: 120px; }
         .footer { margin-bottom: 10px; }
       }
       @media (max-width: 480px) {
@@ -194,6 +283,7 @@
         .top-actions .button span { display: none; }
         .allocation-body { grid-template-columns: 1fr; justify-items: center; }
         .legend { width: 100%; }
+        .widget-options, .accent-options { grid-template-columns: 1fr 1fr; }
       }
     </style>
   </head>
@@ -213,60 +303,90 @@
 
       <main class="page">
         <header class="topbar">
-          <div class="title-row"><div><h1>Trading dashboard</h1><p class="subtitle" id="current-date">Account command center</p></div></div>
+          <div class="title-row"><div><h1>Trading Agent</h1><p class="subtitle" id="current-date">Account command center</p></div></div>
           <div class="top-actions">
             <label class="search"><svg><use href="#i-search"/></svg><input id="symbol-search" aria-label="Instrument" value="XAU_USD" /></label>
+            <select class="select view-select" id="saved-view" aria-label="Saved dashboard view"><option value="default">Trading Command Center</option></select>
             <button class="button" id="sync-all"><svg><use href="#i-refresh"/></svg><span>Sync dashboard</span></button>
-            <button class="icon-btn" id="open-settings" aria-label="Settings"><svg><use href="#i-sliders"/></svg></button>
+            <button class="button primary" id="open-customizer"><svg><use href="#i-grid"/></svg><span>Customize</span></button>
+            <button class="icon-btn" id="open-settings" aria-label="Connection settings"><svg><use href="#i-sliders"/></svg></button>
           </div>
         </header>
 
         <div class="content">
           <section class="welcome" id="overview">
-            <div><h2>Overview</h2><p>Live broker state, market context, risk and journal activity in one place.</p></div>
+            <div><span class="eyebrow">Trading command center</span><h2>Your trading day, in one clear view.</h2><p>Live account evidence, market context, disciplined risk, and your Trading-Agent—organized around the next decision.</p></div>
             <span class="status-pill" id="dashboard-status"><span class="dot warn"></span> Data not loaded</span>
           </section>
 
-          <section class="metric-grid" aria-label="Account metrics">
-            <article class="card metric"><div class="metric-label"><span>Total balance</span><span class="chip" id="account-source">Not loaded</span></div><div class="metric-value" id="account-balance">—</div><div class="metric-sub"><span id="balance-change">Sync your read-only broker account</span></div><div class="progress"><span id="account-progress" style="width:0"></span></div></article>
-            <article class="card metric"><div class="metric-label"><span>Equity</span><span id="equity-state">Not loaded</span></div><div class="metric-value" id="account-equity">—</div><div class="metric-sub"><span id="floating-pnl">—</span> floating P&amp;L</div></article>
-            <article class="card metric"><div class="metric-label"><span>Profit target</span><span>Account rule</span></div><div class="metric-value">—</div><div class="metric-sub">Load verified account constraints</div><div class="progress"><span style="width:0"></span></div></article>
-            <article class="card metric"><div class="metric-label"><span>Win rate</span><span>Reviewed trades</span></div><div class="metric-value">—</div><div class="metric-sub">No performance sample loaded</div></article>
-            <article class="card metric"><div class="metric-label"><span>Max drawdown</span><span class="chip">Unknown</span></div><div class="metric-value">—</div><div class="metric-sub">Requires verified account history</div></article>
+          <section class="command-deck" aria-label="Trading-Agent workspace">
+            <article class="card focus-card">
+              <div class="focus-orb" aria-hidden="true"></div>
+              <div class="focus-content"><span class="eyebrow">Today's desk</span><h3>Plan clearly.<br>Protect the downside.</h3><p>Begin with verified context, challenge the setup, size risk deterministically, then journal the decision.</p></div>
+              <div class="quick-actions" aria-label="Trading-Agent shortcuts">
+                <button class="quick-action featured" type="button" data-agent-prompt="Give me a concise day-start brief using available broker, market, news, strategy, and journal evidence. Clearly label anything unavailable.">Day-start brief</button>
+                <button class="quick-action" type="button" data-agent-prompt="Review the latest timestamped market context for the selected instrument. Separate observations from interpretations and scenarios.">Review market</button>
+                <button class="quick-action" type="button" data-agent-prompt="Run a read-only preflight readiness review for the selected instrument. Do not create or modify records; tell me exactly what is missing.">Preflight</button>
+                <button class="quick-action" type="button" data-agent-prompt="Review my recent journal evidence and summarize repeated strengths, mistakes, and the next review action. Do not claim an edge without a reviewed sample.">Journal review</button>
+              </div>
+              <div class="desk-meta"><div class="desk-meta-item"><span>Account</span><strong id="desk-account">Not connected</strong></div><div class="desk-meta-item"><span>Broker</span><strong id="desk-broker">Not checked</strong></div><div class="desk-meta-item"><span>Agent</span><strong id="desk-agent">Offline</strong></div></div>
+            </article>
+
+            <article class="card advisor-card" id="advisor">
+              <header class="advisor-head"><div class="advisor-identity"><span class="advisor-mark">AI</span><div class="advisor-title"><strong>Trading-Agent</strong><span><i class="dot" id="agent-dot"></i><span id="agent-state">Connect to begin</span></span></div></div><select class="select agent-model" id="agent-model" aria-label="Agent model"><option value="">Model not loaded</option></select></header>
+              <div class="agent-feed" id="agent-feed" aria-live="polite"><div class="agent-message">Connect this dashboard once, then use the shortcuts or ask naturally. I’ll inspect the same read-only evidence and policy-controlled tools available in the terminal.</div></div>
+              <form class="agent-form" id="agent-form"><input class="agent-input" id="agent-input" maxlength="20000" autocomplete="off" placeholder="Ask about today, a setup, risk, or your journal…"><button class="button primary" id="agent-send" type="submit">Ask</button></form>
+            </article>
           </section>
 
-          <section class="dashboard-grid">
-            <article class="card" id="market">
-              <header class="card-head"><div><h3>Timestamped market evidence</h3><p id="chart-caption">Connect a provider to load recent candles</p></div><div class="filters"><select class="select" id="provider" aria-label="Provider"><option value="oanda">OANDA</option><option value="kraken">Kraken</option><option value="alpaca">Alpaca</option></select><select class="select" id="timeframe" aria-label="Timeframe"><option value="M15">15M</option><option value="H1">1H</option><option value="H4" selected>4H</option><option value="D">1D</option></select><button class="button small primary" id="load-market">Load market</button></div></header>
+          <div id="dashboard-sections">
+          <section class="metric-grid" aria-label="Account metrics" data-layout-section="metrics">
+            <article class="card metric" data-widget="balance"><div class="metric-label"><span>Total balance</span><span class="chip" id="account-source">Not loaded</span></div><div class="metric-value" id="account-balance">—</div><div class="metric-sub"><span id="balance-change">Sync your read-only broker account</span></div><div class="progress"><span id="account-progress" style="width:0"></span></div></article>
+            <article class="card metric" data-widget="equity"><div class="metric-label"><span>Equity</span><span id="equity-state">Not loaded</span></div><div class="metric-value" id="account-equity">—</div><div class="metric-sub"><span id="floating-pnl">—</span> floating P&amp;L</div></article>
+            <article class="card metric" data-widget="profit-target"><div class="metric-label"><span>Profit target</span><span>Account rule</span></div><div class="metric-value">—</div><div class="metric-sub">Load verified account constraints</div><div class="progress"><span style="width:0"></span></div></article>
+            <article class="card metric" data-widget="win-rate"><div class="metric-label"><span>Win rate</span><span>Reviewed trades</span></div><div class="metric-value">—</div><div class="metric-sub">No performance sample loaded</div></article>
+            <article class="card metric" data-widget="drawdown"><div class="metric-label"><span>Max drawdown</span><span class="chip">Unknown</span></div><div class="metric-value">—</div><div class="metric-sub">Requires verified account history</div></article>
+          </section>
+
+          <section class="dashboard-grid" data-layout-section="market">
+            <article class="card" id="market" data-widget="market-chart">
+              <header class="card-head"><div><h3>Timestamped market evidence</h3><p id="chart-caption">Connect a provider to load recent candles</p></div><div class="filters"><div class="instrument-combobox" id="instrument-combobox"><input class="select instrument-input" id="market-symbol" role="combobox" aria-label="Search market instruments" aria-autocomplete="list" aria-expanded="false" aria-controls="instrument-menu" value="XAU_USD" autocomplete="off"><button class="instrument-toggle" id="instrument-toggle" type="button" aria-label="Show instruments">⌄</button><div class="instrument-menu" id="instrument-menu" role="listbox" hidden></div></div><select class="select" id="provider" aria-label="Provider"><option value="oanda">OANDA</option><option value="metatrader">MetaTrader</option><option value="kraken">Kraken</option><option value="alpaca">Alpaca</option></select><select class="select" id="timeframe" aria-label="Timeframe"><option value="M15">15M</option><option value="H1">1H</option><option value="H4" selected>4H</option><option value="D">1D</option></select><select class="select" id="chart-type" aria-label="Chart style"><option value="candles">Candles</option><option value="line">Line</option></select><button class="button small primary" id="load-market">Load market</button></div></header>
               <div class="chart-summary"><div><span>Latest quote</span><strong id="market-quote">—</strong></div><div><span>Spread</span><strong id="market-spread">—</strong></div><div><span>Instrument</span><strong id="market-instrument">XAU_USD</strong></div><div><span>Data source</span><strong id="market-source">Not loaded</strong></div></div>
-              <div class="chart-wrap"><svg id="equity-chart" viewBox="0 0 1000 280" preserveAspectRatio="none" role="img" aria-label="Recent market candles"><defs><linearGradient id="area-gradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4da3ff" stop-opacity=".28"/><stop offset="1" stop-color="#4da3ff" stop-opacity="0"/></linearGradient></defs><path id="equity-area" d=""/><path id="equity-line" d=""/></svg><div class="chart-empty" id="chart-empty" style="display:grid">Load market data to view timestamped candles.</div></div>
+              <div class="chart-wrap"><svg id="equity-chart" viewBox="0 0 1000 280" preserveAspectRatio="none" role="img" aria-label="Recent market chart"><g id="candle-guides"></g><g id="candle-series"></g><path id="market-line" class="market-line" d=""/></svg><div class="chart-empty" id="chart-empty" style="display:grid">Load market data to view timestamped candles.</div></div>
             </article>
 
             <div class="stack">
-              <article class="card"><header class="card-head"><div><h3>Risk distribution</h3><p>Verified exposure by market group</p></div><span class="chip">Not loaded</span></header><div class="empty-state">Sync a read-only broker account before relying on exposure or available-margin information.</div></article>
-              <article class="card"><header class="card-head"><div><h3>Broker connections</h3><p>Read-only account sources</p></div><button class="button small ghost" id="sync-broker">Sync</button></header><div class="connections"><div class="connection"><span class="connection-icon">OA</span><div><strong>OANDA</strong><small>FX market &amp; account data</small></div><span class="chip" id="oanda-status">Not checked</span></div><div class="connection"><span class="connection-icon">MT</span><div><strong>MetaTrader 4/5</strong><small>Read-only bridge when configured</small></div><span class="chip">Not checked</span></div><div class="connection"><span class="connection-icon">TV</span><div><strong>TradingView</strong><small>Verified alerts when configured</small></div><span class="chip">Optional</span></div></div></article>
+              <article class="card" data-widget="risk-distribution"><header class="card-head"><div><h3>Risk distribution</h3><p>Verified exposure by market group</p></div><span class="chip">Not loaded</span></header><div class="empty-state">Sync a read-only broker account before relying on exposure or available-margin information.</div></article>
+              <article class="card" data-widget="connections"><header class="card-head"><div><h3>Broker connections</h3><p>Read-only account sources</p></div><button class="button small ghost" id="sync-broker">Sync</button></header><div class="connections"><div class="connection"><span class="connection-icon">OA</span><div><strong>OANDA</strong><small>FX market &amp; account data</small></div><span class="chip" id="oanda-status">Not checked</span></div><div class="connection"><span class="connection-icon">MT</span><div><strong>MetaTrader 4/5</strong><small>Read-only bridge when configured</small></div><span class="chip" id="metatrader-status">Not checked</span></div><div class="connection"><span class="connection-icon">TV</span><div><strong>TradingView</strong><small>Verified alerts when configured</small></div><span class="chip">Optional</span></div></div></article>
             </div>
           </section>
 
-          <section class="bottom-grid">
-            <article class="card" id="journal"><header class="card-head"><div><h3>Recent journal activity</h3><p>Plans and reviewed trades from Trading-Agent</p></div><button class="button small ghost" id="load-journal">Load journal</button></header><div class="table-wrap"><table><thead><tr><th>Market</th><th>Side</th><th>Setup</th><th>Entry</th><th>Planned R</th><th>Status</th></tr></thead><tbody id="trade-rows"><tr><td colspan="6">Choose an exact strategy version, then load its journal.</td></tr></tbody></table></div></article>
+          <section class="bottom-grid" data-layout-section="workflow">
+            <article class="card" id="journal" data-widget="journal"><header class="card-head"><div><h3>Recent journal activity</h3><p>Plans and reviewed trades from Trading-Agent</p></div><button class="button small ghost" id="load-journal">Load journal</button></header><div class="table-wrap"><table><thead><tr><th>Market</th><th>Side</th><th>Setup</th><th>Entry</th><th>Planned R</th><th>Status</th></tr></thead><tbody id="trade-rows"><tr><td colspan="6">Choose an exact strategy version, then load its journal.</td></tr></tbody></table></div></article>
 
-            <article class="card" id="risk"><header class="card-head"><div><h3>Position sizing</h3><p>Deterministic risk sanity check</p></div><span class="chip">Policy checked</span></header><form class="risk-body" id="risk-form"><div class="risk-grid"><label>Account equity<input class="field" name="account_equity" type="number" step="any" placeholder="10000" required></label><label>Risk %<input class="field" name="risk_percent" type="number" step="any" placeholder="0.5" required></label><label>Entry<input class="field" name="entry" type="number" step="any" placeholder="2486.20" required></label><label>Stop<input class="field" name="stop" type="number" step="any" placeholder="2478.60" required></label><label>Target<input class="field" name="target" type="number" step="any" placeholder="2512.00"></label><label>Value / unit<input class="field" name="value_per_price_unit" type="number" step="any" placeholder="Instrument-specific" required></label><button class="button primary wide" type="submit">Calculate position size</button></div><output id="risk-output"></output></form></article>
+            <article class="card" id="risk" data-widget="position-sizing"><header class="card-head"><div><h3>Position sizing</h3><p>Deterministic risk sanity check</p></div><span class="chip">Policy checked</span></header><form class="risk-body" id="risk-form"><div class="risk-grid"><label>Account equity<input class="field" name="account_equity" type="number" step="any" placeholder="10000" required></label><label>Risk %<input class="field" name="risk_percent" type="number" step="any" placeholder="0.5" required></label><label>Entry<input class="field" name="entry" type="number" step="any" placeholder="2486.20" required></label><label>Stop<input class="field" name="stop" type="number" step="any" placeholder="2478.60" required></label><label>Target<input class="field" name="target" type="number" step="any" placeholder="2512.00"></label><label>Value / unit<input class="field" name="value_per_price_unit" type="number" step="any" placeholder="Instrument-specific" required></label><button class="button primary wide" type="submit">Calculate position size</button></div><output id="risk-output"></output></form></article>
           </section>
 
-          <section class="bottom-grid">
-            <article class="card"><header class="card-head"><div><h3>Open positions</h3><p>Read-only broker positions</p></div><span class="chip" id="position-count">Not loaded</span></header><div class="table-wrap"><table><thead><tr><th>Instrument</th><th>Direction</th><th>Quantity</th><th>Average</th><th>Unrealized P&amp;L</th></tr></thead><tbody id="position-rows"><tr><td colspan="5">Sync your broker to load current positions.</td></tr></tbody></table></div></article>
-            <article class="card"><header class="card-head"><div><h3>Market calendar</h3><p>Timestamped event reminders</p></div><span class="chip">Not loaded</span></header><div class="empty-state">No calendar evidence is loaded in this dashboard. Use the conversational agent or <strong>trade news upcoming</strong> for stored events.</div></article>
+          <section class="bottom-grid" data-layout-section="context">
+            <article class="card" data-widget="positions"><header class="card-head"><div><h3>Open positions</h3><p>Read-only broker positions</p></div><span class="chip" id="position-count">Not loaded</span></header><div class="table-wrap"><table><thead><tr><th>Instrument</th><th>Direction</th><th>Quantity</th><th>Average</th><th>Unrealized P&amp;L</th></tr></thead><tbody id="position-rows"><tr><td colspan="5">Sync your broker to load current positions.</td></tr></tbody></table></div></article>
+            <article class="card" data-widget="calendar"><header class="card-head"><div><h3>Market calendar</h3><p>Timestamped event reminders</p></div><span class="chip">Not loaded</span></header><div class="empty-state">No calendar evidence is loaded in this dashboard. Use the conversational agent or <strong>trade news upcoming</strong> for stored events.</div></article>
           </section>
+          </div>
           <div class="footer"><span>Trading-Agent · decision support only · no order execution</span><span id="last-updated">No live data loaded</span></div>
         </div>
       </main>
     </div>
 
-    <dialog id="settings-dialog"><form method="dialog" class="dialog-body" id="settings-form"><header class="card-head" style="margin:-18px -18px 18px"><div><h3>Dashboard connection</h3><p>Connection values remain in memory for this page only.</p></div><button class="icon-btn" value="cancel" aria-label="Close">×</button></header><div class="dialog-grid"><label>Trading-Agent API key<input class="field" id="api-key" type="password" autocomplete="off" placeholder="Required for API calls"></label><label>Workspace ID<input class="field" id="workspace-id" autocomplete="off" placeholder="Required to load scoped journal data"></label><label>Account ID<input class="field" id="account-id" autocomplete="off" placeholder="Required to load scoped journal data"></label><label>Strategy version ID<input class="field" id="strategy-version" autocomplete="off" placeholder="Required to load journal plans"></label><label>Market instrument<input class="field" id="settings-instrument" value="XAU_USD"></label><label>Candle count<input class="field" id="count" type="number" min="10" max="5000" value="150"></label><div class="secure-note">These values are attached only to requests made to this Trading-Agent server and are not persisted by the page. Find the selected workspace, account, and strategy identifiers with the CLI account and strategy commands.</div></div><div class="dialog-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="default" id="save-settings">Use these settings</button></div></form></dialog>
+    <dialog id="customizer-dialog"><form method="dialog" class="dialog-body" id="customizer-form"><header class="card-head" style="margin:-18px -18px 18px"><div><span class="template-badge">Default template</span><h3 style="margin-top:6px">Customize your dashboard</h3><p>Change presentation only. Trading values always come from verified data sources.</p></div><button class="icon-btn" value="cancel" aria-label="Close">×</button></header><div class="dialog-grid"><label>View name<input class="field" id="view-name" maxlength="60" value="My trading dashboard"></label><div><label style="margin-bottom:7px">Accent</label><div class="accent-options"><button type="button" class="accent-choice active" data-accent="teal" style="--choice:#35e4b5">Teal</button><button type="button" class="accent-choice" data-accent="blue" style="--choice:#4da3ff">Blue</button><button type="button" class="accent-choice" data-accent="violet" style="--choice:#9b87ff">Violet</button><button type="button" class="accent-choice" data-accent="gold" style="--choice:#f0b85d">Gold</button></div></div><div class="risk-grid"><label>Density<select class="field" id="layout-density"><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select></label><label>Canvas<select class="field" id="layout-width"><option value="wide">Wide</option><option value="focused">Focused</option></select></label><label class="wide">Card style<select class="field" id="card-style"><option value="rounded">Rounded</option><option value="square">Compact corners</option></select></label></div><div><label style="margin-bottom:7px">Visible widgets</label><div class="widget-options" id="widget-options"></div></div><div><label style="margin-bottom:7px">Section order</label><div class="order-list" id="order-list"></div></div><label>Tell Trading-Agent what to change<textarea class="field prompt-box" id="customizer-prompt" placeholder="Make it compact and blue. Hide the calendar and put the journal first."></textarea></label><div class="risk-grid"><button type="button" class="button primary" id="apply-prompt">Customize with AI</button><button type="button" class="button ghost" id="apply-prompt-local">Preview common request locally</button></div><p class="customizer-note">AI customization uses your configured model provider and returns only a validated DashboardSpec—never executable code or trading values. Do not include credentials or private journal content in the request. The local preview recognizes common layout phrases without calling a model.</p></div><div class="customizer-actions"><button type="button" class="button ghost" id="reset-layout">Reset template</button><button type="button" class="button ghost" id="export-layout">Export JSON</button><button type="button" class="button ghost" id="import-layout">Import JSON</button><input type="file" id="layout-file" accept="application/json,.json" hidden><button class="button primary wide" value="default" id="save-layout">Save dashboard view</button></div></form></dialog>
+
+    <dialog id="settings-dialog"><form method="dialog" class="dialog-body" id="settings-form"><header class="card-head" style="margin:-18px -18px 18px"><div><span class="template-badge">Secure local connection</span><h3 style="margin-top:6px">Connect Trading-Agent</h3><p>Use the same workspace, providers, and policy as the terminal.</p></div><button class="icon-btn" value="cancel" aria-label="Close">×</button></header><div class="dialog-grid"><div class="connect-row"><label>Trading-Agent API key<input class="field" id="api-key" type="password" autocomplete="off" placeholder="Only needed for manual connections"></label><button class="button primary" type="button" id="discover-context">Connect</button></div><div class="context-status" id="context-status">Run <strong>trade dashboard</strong> for automatic connection, or enter a local API key manually. No broker credentials are sent to the browser.</div><label>Workspace ID<input class="field" id="workspace-id" autocomplete="off" placeholder="Discovered automatically or enter manually"></label><label>Account ID<input class="field" id="account-id" autocomplete="off" placeholder="Discovered automatically or enter manually"></label><label>Journal strategy<select class="field" id="strategy-version"><option value="">Connect to load strategies</option></select></label><label>Market instrument<input class="field" id="settings-instrument" value="XAU_USD"></label><label>Candle count<input class="field" id="count" type="number" min="10" max="5000" value="150"></label><div class="secure-note">The launcher exchanges its temporary key for an HttpOnly browser-session cookie, so refreshes reconnect without exposing broker or model credentials. Trading-Agent’s dashboard tools are read-only unless a separate human-confirmed flow explicitly permits a database action.</div></div><div class="dialog-actions"><button class="button ghost" value="cancel">Cancel</button><button class="button primary" value="default" id="save-settings">Use this workspace</button></div></form></dialog>
 
     <script>
-      const state = { apiKey: "", workspaceId: "", accountId: "", strategyVersion: "", instrument: "XAU_USD" };
+      const launchFragment = new URLSearchParams(location.hash.slice(1));
+      const launchedSession = launchFragment.get("session") || "";
+      const validLaunchSession = /^[A-Za-z0-9_-]{43}$/.test(launchedSession);
+      const state = { apiKey: "", authenticated: false, workspaceId: "", accountId: "", strategyVersion: "", instrument: "XAU_USD", agentSessionId: "", agentReady: false, marketCandles: [] };
+      if (launchFragment.has("session")) history.replaceState(null, "", `${location.pathname}${location.search}`);
       const $ = (id) => document.getElementById(id);
       const money = (value, currency = "USD", signed = false) => {
         const number = Number(value || 0);
@@ -276,46 +396,423 @@
       const numeric = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
       const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
       const apiHeaders = () => {
-        const headers = { "X-API-Key": state.apiKey };
+        const headers = {};
+        if (state.apiKey) headers["X-API-Key"] = state.apiKey;
         if (state.workspaceId) headers["X-Workspace-ID"] = state.workspaceId;
         if (state.accountId) headers["X-Account-ID"] = state.accountId;
         return headers;
       };
       const showSettings = () => $("settings-dialog").showModal();
-      const requireKey = () => { if (state.apiKey) return true; showSettings(); return false; };
+      const requireKey = () => { if (state.authenticated || state.apiKey) return true; showSettings(); return false; };
       const requireBrokerScope = () => { if (state.workspaceId && state.accountId) return true; showSettings(); setStatus("Add workspace and account IDs to load broker state", false); return false; };
       const requireJournalScope = () => { if (state.workspaceId && state.accountId && state.strategyVersion) return true; showSettings(); setStatus("Add workspace, account, and strategy IDs to load the journal", false); return false; };
       const setStatus = (label, live = false) => { const dot = document.createElement("span"); dot.className = `dot ${live ? "live" : "warn"}`; $("dashboard-status").replaceChildren(dot, document.createTextNode(String(label))); };
       const markUpdated = () => { $("last-updated").textContent = `Updated ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`; };
+      const setAgentState = (label, live = false) => { $("agent-state").textContent = label; $("agent-dot").className = `dot ${live ? "live" : "warn"}`; $("desk-agent").textContent = live ? "Ready" : "Offline"; };
+      const appendAgentMessage = (text, role = "assistant", references = []) => {
+        const bubble = document.createElement("div"); bubble.className = `agent-message ${role}`; bubble.textContent = String(text);
+        if (references.length) {
+          const list = document.createElement("div"); list.className = "agent-references";
+          references.slice(0, 5).forEach((reference) => { const item = document.createElement("span"); item.className = "agent-reference"; item.textContent = reference.label || reference.kind || "Evidence"; list.append(item); });
+          bubble.append(list);
+        }
+        $("agent-feed").append(bubble); $("agent-feed").scrollTop = $("agent-feed").scrollHeight; return bubble;
+      };
+      const responseJson = async (response, fallback) => { const data = await response.json(); if (!response.ok) throw new Error(data.detail || fallback); return data; };
+
+      async function establishDashboardSession() {
+        if (!validLaunchSession) return false;
+        const response = await fetch("/api/dashboard/session", { method: "POST", headers: { "X-API-Key": launchedSession } });
+        if (!response.ok) throw new Error("The secure dashboard session could not be established. Run trade dashboard again.");
+        state.authenticated = true;
+        return true;
+      }
+
+      async function loadAgentModels() {
+        const response = await fetch("/api/agent/models", { headers: apiHeaders() });
+        const models = await responseJson(response, "Could not load Trading-Agent models");
+        const options = models.map((item) => { const option = new Option(item.label, `${item.provider}:${item.model}`); option.dataset.provider = item.provider; option.dataset.model = item.model; option.dataset.available = String(item.available); option.selected = item.selected; return option; });
+        $("agent-model").replaceChildren(...(options.length ? options : [new Option("No configured model", "")]));
+        if (!options.length) throw new Error("No Trading-Agent model is configured. Finish model setup in the CLI.");
+        return models;
+      }
+
+      async function loadStrategies() {
+        const response = await fetch("/api/strategies", { headers: apiHeaders() });
+        const strategies = await responseJson(response, "Could not load strategy versions");
+        const placeholder = new Option(strategies.length ? "Choose a journal strategy" : "No strategy configured", "");
+        const options = strategies.map((item) => new Option(`${item.name} · v${item.version}`, item.playbook_version_id));
+        $("strategy-version").replaceChildren(placeholder, ...options);
+        if (state.strategyVersion && strategies.some((item) => item.playbook_version_id === state.strategyVersion)) $("strategy-version").value = state.strategyVersion;
+        else if (strategies.length === 1) { state.strategyVersion = strategies[0].playbook_version_id; $("strategy-version").value = state.strategyVersion; }
+        return strategies;
+      }
+
+      async function initializeAgent({ silent = false } = {}) {
+        state.apiKey = $("api-key").value.trim() || state.apiKey;
+        state.workspaceId = $("workspace-id").value.trim() || state.workspaceId;
+        state.accountId = $("account-id").value.trim() || state.accountId;
+        if (!state.apiKey && !state.authenticated && !silent) { showSettings(); return false; }
+        const button = $("discover-context"); button.disabled = true; button.textContent = "Connecting…"; setAgentState("Connecting");
+        try {
+          try {
+            const contextResponse = await fetch("/api/agent/context", { headers: apiHeaders() });
+            if (contextResponse.status !== 401) state.authenticated = true;
+            const context = await responseJson(contextResponse, "Could not discover the configured Trading-Agent account");
+            state.workspaceId = context.workspace_id; state.accountId = context.account_id;
+            $("workspace-id").value = state.workspaceId; $("account-id").value = state.accountId;
+            const providerOption = [...$("provider").options].find((option) => option.value === context.broker_provider);
+            if (providerOption) $("provider").value = providerOption.value;
+            $("desk-broker").textContent = context.broker_provider === "none" ? "Not configured" : context.broker_provider;
+          } catch (contextError) { if (!state.workspaceId || !state.accountId) throw contextError; }
+          const [modelsResult, strategiesResult] = await Promise.allSettled([loadAgentModels(), loadStrategies()]);
+          state.agentReady = modelsResult.status === "fulfilled"; state.agentSessionId = "";
+          const connectionParts = ["Account connected"];
+          connectionParts.push(state.agentReady ? "model ready" : "model setup needed");
+          if (strategiesResult.status === "fulfilled") connectionParts.push(`${strategiesResult.value.length} journal ${strategiesResult.value.length === 1 ? "strategy" : "strategies"}`);
+          else connectionParts.push("journal unavailable");
+          $("context-status").textContent = `${connectionParts.join(" · ")}. Broker and market sync continue independently.`;
+          $("desk-account").textContent = "Connected"; setAgentState(state.agentReady ? "Policy connected" : "Model setup needed", state.agentReady); setStatus("Trading-Agent connected", true); return true;
+        } catch (error) {
+          state.agentReady = false;
+          const offline = error instanceof TypeError;
+          const message = offline ? "Trading-Agent server is offline. Run trade dashboard and keep that terminal open." : error.message;
+          $("context-status").textContent = message; setAgentState(offline ? "Server offline" : "Connection needed"); setStatus(message, false);
+          if (!silent && !offline) showSettings();
+          return false;
+        } finally { button.disabled = false; button.textContent = "Connect"; }
+      }
+
+      async function ensureAgentSession() {
+        if (state.agentSessionId) return state.agentSessionId;
+        const response = await fetch("/api/agent/sessions", { method: "POST", headers: { ...apiHeaders(), "content-type": "application/json" }, body: JSON.stringify({ title: "Dashboard trading desk" }) });
+        const session = await responseJson(response, "Could not start a Trading-Agent session"); state.agentSessionId = session.session_id; return state.agentSessionId;
+      }
+
+      async function sendAgentMessage(rawMessage) {
+        const message = String(rawMessage || "").trim().replaceAll("selected instrument", state.instrument);
+        if (!message) return;
+        if (!state.agentReady && !(await initializeAgent())) return;
+        const selected = $("agent-model").selectedOptions[0];
+        if (!selected || !selected.dataset.provider || !selected.dataset.model) { showSettings(); setAgentState("Choose a model"); return; }
+        appendAgentMessage(message, "user"); $("agent-input").value = "";
+        const pending = appendAgentMessage("Reviewing verified Trading-Agent context…", "pending");
+        const send = $("agent-send"); send.disabled = true; setAgentState("Working", true);
+        try {
+          const sessionId = await ensureAgentSession();
+          const response = await fetch(`/api/agent/sessions/${sessionId}/messages`, { method: "POST", headers: { ...apiHeaders(), "content-type": "application/json" }, body: JSON.stringify({ message, provider: selected.dataset.provider, model: selected.dataset.model, mode: "auto" }) });
+          const data = await responseJson(response, "Trading-Agent could not complete the review");
+          pending.remove(); appendAgentMessage(data.response, "assistant", data.references || []); setAgentState(`${data.provider} · ${data.model}`, true); markUpdated();
+        } catch (error) { pending.textContent = error.message; pending.className = "agent-message down"; setAgentState("Needs attention"); }
+        finally { send.disabled = false; }
+      }
+
+      const layoutStorageKey = "trading-agent.dashboard-layouts.v1";
+      const activeLayoutStorageKey = "trading-agent.active-dashboard-layout.v1";
+      const widgetLabels = {
+        "balance": "Total balance", "equity": "Equity", "profit-target": "Profit target",
+        "win-rate": "Win rate", "drawdown": "Drawdown", "market-chart": "Market chart",
+        "risk-distribution": "Risk distribution", "connections": "Connections",
+        "journal": "Journal", "position-sizing": "Position sizing",
+        "positions": "Open positions", "calendar": "Market calendar"
+      };
+      const sectionLabels = { metrics: "Account metrics", market: "Market workspace", workflow: "Journal & sizing", context: "Positions & calendar" };
+      const accentPalettes = {
+        teal: { accent: "#35e4b5", soft: "rgba(53, 228, 181, 0.12)", chart: "#4da3ff" },
+        blue: { accent: "#4da3ff", soft: "rgba(77, 163, 255, 0.12)", chart: "#35e4b5" },
+        violet: { accent: "#9b87ff", soft: "rgba(155, 135, 255, 0.12)", chart: "#55c8ff" },
+        gold: { accent: "#f0b85d", soft: "rgba(240, 184, 93, 0.12)", chart: "#58d7bc" }
+      };
+      const defaultLayout = {
+        version: 1, name: "Trading Command Center", accent: "teal", density: "comfortable",
+        width: "wide", cardStyle: "rounded", widgets: Object.fromEntries(Object.keys(widgetLabels).map((key) => [key, true])),
+        sectionOrder: ["metrics", "market", "workflow", "context"]
+      };
+      const copyLayout = (layout) => JSON.parse(JSON.stringify(layout));
+      let savedLayouts = [];
+      let activeLayoutId = "default";
+      let layoutState = copyLayout(defaultLayout);
+
+      const validLayout = (candidate) => {
+        const layoutKeys = ["version", "name", "accent", "density", "width", "cardStyle", "widgets", "sectionOrder"];
+        const widgetKeys = Object.keys(widgetLabels), sectionKeys = Object.keys(sectionLabels);
+        return Boolean(candidate && Object.keys(candidate).length === layoutKeys.length && layoutKeys.every((key) => Object.hasOwn(candidate, key)) && candidate.version === 1 && typeof candidate.name === "string" && candidate.name.trim() && candidate.name.length <= 60 && accentPalettes[candidate.accent] && ["comfortable", "compact"].includes(candidate.density) && ["wide", "focused"].includes(candidate.width) && ["rounded", "square"].includes(candidate.cardStyle) && candidate.widgets && Object.keys(candidate.widgets).length === widgetKeys.length && widgetKeys.every((key) => typeof candidate.widgets[key] === "boolean") && Array.isArray(candidate.sectionOrder) && candidate.sectionOrder.length === sectionKeys.length && sectionKeys.every((key) => candidate.sectionOrder.includes(key)));
+      };
+      const loadSavedLayouts = () => {
+        try {
+          const parsed = JSON.parse(localStorage.getItem(layoutStorageKey) || "[]");
+          savedLayouts = Array.isArray(parsed) ? parsed.filter((item) => item && typeof item.id === "string" && validLayout(item.spec)).slice(0, 12) : [];
+          activeLayoutId = localStorage.getItem(activeLayoutStorageKey) || "default";
+        } catch (_) { savedLayouts = []; activeLayoutId = "default"; }
+      };
+      const persistSavedLayouts = () => {
+        localStorage.setItem(layoutStorageKey, JSON.stringify(savedLayouts));
+        localStorage.setItem(activeLayoutStorageKey, activeLayoutId);
+      };
+      const refreshViewSelect = () => {
+        $("saved-view").replaceChildren(new Option("Trading Command Center", "default"), ...savedLayouts.map((item) => new Option(item.spec.name, item.id)));
+        $("saved-view").value = savedLayouts.some((item) => item.id === activeLayoutId) ? activeLayoutId : "default";
+      };
+      const renderWidgetOptions = () => {
+        $("widget-options").replaceChildren(...Object.entries(widgetLabels).map(([key, label]) => {
+          const wrapper = document.createElement("label"); wrapper.className = "widget-toggle";
+          const input = document.createElement("input"); input.type = "checkbox"; input.dataset.widgetToggle = key; input.checked = layoutState.widgets[key];
+          input.addEventListener("change", () => { layoutState.widgets[key] = input.checked; applyLayout(layoutState, false); });
+          wrapper.append(input, document.createTextNode(label)); return wrapper;
+        }));
+      };
+      const renderOrderList = () => {
+        $("order-list").replaceChildren(...layoutState.sectionOrder.map((key, index) => {
+          const item = document.createElement("div"); item.className = "order-item";
+          const label = document.createElement("span"); label.textContent = sectionLabels[key];
+          const up = document.createElement("button"); up.type = "button"; up.className = "order-button"; up.textContent = "↑"; up.disabled = index === 0; up.addEventListener("click", () => moveSection(index, -1));
+          const down = document.createElement("button"); down.type = "button"; down.className = "order-button"; down.textContent = "↓"; down.disabled = index === layoutState.sectionOrder.length - 1; down.addEventListener("click", () => moveSection(index, 1));
+          item.append(label, up, down); return item;
+        }));
+      };
+      const syncCustomizerControls = () => {
+        $("view-name").value = layoutState.name; $("layout-density").value = layoutState.density; $("layout-width").value = layoutState.width; $("card-style").value = layoutState.cardStyle;
+        document.querySelectorAll("[data-accent]").forEach((button) => button.classList.toggle("active", button.dataset.accent === layoutState.accent));
+        renderWidgetOptions(); renderOrderList();
+      };
+      const applyLayout = (candidate, updateControls = true) => {
+        if (!validLayout(candidate)) return false;
+        layoutState = copyLayout(candidate); const palette = accentPalettes[layoutState.accent], root = document.documentElement;
+        root.style.setProperty("--teal", palette.accent); root.style.setProperty("--teal-soft", palette.soft); root.style.setProperty("--cyan", palette.chart);
+        document.body.classList.toggle("density-compact", layoutState.density === "compact"); document.body.classList.toggle("square-cards", layoutState.cardStyle === "square");
+        document.querySelector(".content").classList.toggle("focused", layoutState.width === "focused");
+        document.querySelectorAll("[data-widget]").forEach((element) => element.classList.toggle("widget-hidden", !layoutState.widgets[element.dataset.widget]));
+        const container = $("dashboard-sections"); layoutState.sectionOrder.forEach((key) => { const section = container.querySelector(`[data-layout-section="${key}"]`); if (section) container.append(section); });
+        if (updateControls) syncCustomizerControls(); return true;
+      };
+      const moveSection = (index, amount) => {
+        const target = index + amount; if (target < 0 || target >= layoutState.sectionOrder.length) return;
+        [layoutState.sectionOrder[index], layoutState.sectionOrder[target]] = [layoutState.sectionOrder[target], layoutState.sectionOrder[index]];
+        applyLayout(layoutState); renderOrderList();
+      };
+      const saveCurrentLayout = () => {
+        layoutState.name = $("view-name").value.trim() || "My trading dashboard";
+        const existing = savedLayouts.find((item) => item.id === activeLayoutId);
+        if (existing) { existing.spec = copyLayout(layoutState); existing.updatedAt = new Date().toISOString(); }
+        else { activeLayoutId = `view-${Date.now()}`; savedLayouts.push({ id: activeLayoutId, spec: copyLayout(layoutState), updatedAt: new Date().toISOString() }); }
+        persistSavedLayouts(); refreshViewSelect(); setStatus(`Saved view: ${layoutState.name}`, false);
+      };
+      const parseCustomizationRequest = (request) => {
+        const text = request.toLowerCase();
+        if (text.includes("compact")) layoutState.density = "compact"; if (text.includes("comfortable")) layoutState.density = "comfortable";
+        if (text.includes("focused") || text.includes("narrow")) layoutState.width = "focused"; if (text.includes("wide") || text.includes("full width")) layoutState.width = "wide";
+        if (text.includes("square") || text.includes("sharp corners")) layoutState.cardStyle = "square"; if (text.includes("rounded")) layoutState.cardStyle = "rounded";
+        Object.keys(accentPalettes).forEach((accent) => { if (text.includes(accent)) layoutState.accent = accent; });
+        const aliases = { "balance": ["balance"], "equity": ["equity"], "profit-target": ["profit target", "target"], "win-rate": ["win rate"], "drawdown": ["drawdown"], "market-chart": ["market chart", "chart"], "risk-distribution": ["risk distribution", "exposure"], "connections": ["connections", "broker"], "journal": ["journal", "trades"], "position-sizing": ["position sizing", "risk calculator", "sizing"], "positions": ["open positions", "positions"], "calendar": ["calendar", "news"] };
+        Object.entries(aliases).forEach(([key, phrases]) => phrases.forEach((phrase) => {
+          const names = [phrase, `the ${phrase}`];
+          if (names.some((name) => text.includes(`hide ${name}`) || text.includes(`remove ${name}`))) layoutState.widgets[key] = false;
+          if (names.some((name) => text.includes(`show ${name}`) || text.includes(`add ${name}`))) layoutState.widgets[key] = true;
+        }));
+        const firstSections = { journal: "workflow", market: "market", metrics: "metrics", positions: "context", calendar: "context" };
+        Object.entries(firstSections).forEach(([phrase, key]) => { if (text.includes(`${phrase} first`)) layoutState.sectionOrder = [key, ...layoutState.sectionOrder.filter((item) => item !== key)]; });
+        applyLayout(layoutState); setStatus("Customization preview applied", false);
+      };
+      const customizeWithAgent = async () => {
+        const request = $("customizer-prompt").value.trim();
+        if (request.length < 3) { setStatus("Describe the dashboard change first", false); return; }
+        if (!requireKey() || !requireBrokerScope()) return;
+        const button = $("apply-prompt"); button.disabled = true; button.textContent = "Designing…";
+        try {
+          const response = await fetch("/api/dashboard/customize", { method: "POST", headers: { ...apiHeaders(), "content-type": "application/json" }, body: JSON.stringify({ request, current: layoutState }) });
+          const data = await response.json(); if (!response.ok) throw new Error(data.detail || `Customization failed (${response.status})`);
+          if (!applyLayout(data.spec)) throw new Error("Trading-Agent returned an unsupported dashboard layout.");
+          setStatus(`${data.summary} · ${data.provider}`, false);
+        } catch (error) { setStatus(error.message, false); }
+        finally { button.disabled = false; button.textContent = "Customize with AI"; }
+      };
+
+      loadSavedLayouts();
+      const selectedLayout = savedLayouts.find((item) => item.id === activeLayoutId);
+      applyLayout(selectedLayout ? selectedLayout.spec : defaultLayout);
+      refreshViewSelect();
 
       $("current-date").textContent = new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" }).format(new Date());
+      const instrumentCatalogByProvider = new Map();
+      let activeInstrumentOption = -1;
+      let activeInstrumentQuery = "";
+      let instrumentSearchTimer = null;
+      const instrumentCatalogKey = (provider, query) => `${provider}:${query.trim().toUpperCase()}`;
+      function filteredInstruments(query = "") {
+        const normalized = query.trim().toUpperCase(), provider = $("provider").value;
+        return instrumentCatalogByProvider.get(instrumentCatalogKey(provider, normalized)) || [];
+      }
+      function setActiveInstrumentOption(index) {
+        const options = [...$("instrument-menu").querySelectorAll(".instrument-option")];
+        activeInstrumentOption = options.length ? (index + options.length) % options.length : -1;
+        options.forEach((option, optionIndex) => option.classList.toggle("active", optionIndex === activeInstrumentOption));
+        options[activeInstrumentOption]?.scrollIntoView({ block: "nearest" });
+      }
+      function renderInstrumentMenu(query = "") {
+        const menu = $("instrument-menu"), options = filteredInstruments(query); menu.replaceChildren(); activeInstrumentOption = -1;
+        options.forEach((item) => {
+          const option = document.createElement("button"); option.type = "button"; option.className = "instrument-option"; option.setAttribute("role", "option"); option.dataset.symbol = item.symbol;
+          const symbol = document.createElement("strong"), label = document.createElement("span"); symbol.textContent = item.symbol; label.textContent = `${item.display_name} · ${item.venue}`; option.append(symbol, label);
+          option.addEventListener("click", () => { closeInstrumentMenu(); chooseInstrument(item.symbol); }); menu.append(option);
+        });
+        if (!options.length) { const empty = document.createElement("div"); empty.className = "instrument-empty"; empty.textContent = instrumentCatalogByProvider.has(instrumentCatalogKey($("provider").value, query)) ? "No catalog match. Press Enter to try an exact broker symbol." : "Searching the connected provider…"; menu.append(empty); }
+      }
+      async function loadInstrumentCatalog(query = $("market-symbol").value, force = false) {
+        const provider = $("provider").value, cacheKey = instrumentCatalogKey(provider, query);
+        activeInstrumentQuery = query;
+        if (!force && instrumentCatalogByProvider.has(cacheKey)) { renderInstrumentMenu(query); return instrumentCatalogByProvider.get(cacheKey); }
+        renderInstrumentMenu(query);
+        if (!requireKey()) return [];
+        try {
+          const url = new URL("/api/market-instruments", location.origin); url.searchParams.set("provider", provider); url.searchParams.set("query", query.trim()); url.searchParams.set("limit", "50");
+          const response = await fetch(url, { headers: apiHeaders() }); const data = await response.json(); if (!response.ok) throw new Error(data.detail || `Catalog request failed (${response.status})`);
+          instrumentCatalogByProvider.set(cacheKey, data.instruments || []);
+          if ($("provider").value === provider && activeInstrumentQuery === query && !$("instrument-menu").hidden) renderInstrumentMenu(query);
+          return data.instruments || [];
+        } catch (error) {
+          if ($("provider").value === provider && activeInstrumentQuery === query) { const menu = $("instrument-menu"); menu.replaceChildren(); const empty = document.createElement("div"); empty.className = "instrument-empty"; empty.textContent = `Catalog unavailable: ${error.message}. Type an exact broker symbol.`; menu.append(empty); }
+          return [];
+        }
+      }
+      function openInstrumentMenu() {
+        const query = $("market-symbol").value; renderInstrumentMenu(query); $("instrument-menu").hidden = false; $("market-symbol").setAttribute("aria-expanded", "true"); loadInstrumentCatalog(query);
+      }
+      function closeInstrumentMenu() {
+        $("instrument-menu").hidden = true; $("market-symbol").setAttribute("aria-expanded", "false"); activeInstrumentOption = -1;
+      }
+      function syncInstrument(value) {
+        state.instrument = value;
+        $("symbol-search").value = value;
+        $("market-symbol").value = value;
+        $("settings-instrument").value = value;
+        $("market-instrument").textContent = value;
+      }
+      async function chooseInstrument(rawValue) {
+        const instrument = String(rawValue || "").trim().toUpperCase();
+        if (!/^[A-Z0-9][A-Z0-9._:/-]{1,39}$/.test(instrument)) {
+          setStatus("Enter a valid provider instrument, such as XAU_USD", false);
+          syncInstrument(state.instrument);
+          return;
+        }
+        if (instrument !== state.instrument) {
+          syncInstrument(instrument);
+          state.marketCandles = [];
+          $("market-quote").textContent = "—"; $("market-spread").textContent = "—"; $("market-source").textContent = "Loading…";
+          $("chart-caption").textContent = `${instrument} · loading verified market data…`;
+          renderMarketChart();
+        }
+        await loadMarket();
+      }
       $("open-settings").addEventListener("click", showSettings);
       $("rail-settings").addEventListener("click", showSettings);
+      $("open-customizer").addEventListener("click", () => { syncCustomizerControls(); $("customizer-dialog").showModal(); });
+      $("saved-view").addEventListener("change", (event) => { activeLayoutId = event.target.value; const saved = savedLayouts.find((item) => item.id === activeLayoutId); applyLayout(saved ? saved.spec : defaultLayout); persistSavedLayouts(); });
+      document.querySelectorAll("[data-accent]").forEach((button) => button.addEventListener("click", () => { layoutState.accent = button.dataset.accent; applyLayout(layoutState); }));
+      $("layout-density").addEventListener("change", (event) => { layoutState.density = event.target.value; applyLayout(layoutState, false); });
+      $("layout-width").addEventListener("change", (event) => { layoutState.width = event.target.value; applyLayout(layoutState, false); });
+      $("card-style").addEventListener("change", (event) => { layoutState.cardStyle = event.target.value; applyLayout(layoutState, false); });
+      $("apply-prompt").addEventListener("click", customizeWithAgent);
+      $("apply-prompt-local").addEventListener("click", () => parseCustomizationRequest($("customizer-prompt").value));
+      $("customizer-form").addEventListener("submit", saveCurrentLayout);
+      $("reset-layout").addEventListener("click", () => { layoutState = copyLayout(defaultLayout); activeLayoutId = "default"; applyLayout(layoutState); persistSavedLayouts(); refreshViewSelect(); setStatus("Default template restored", false); });
+      $("export-layout").addEventListener("click", () => { const blob = new Blob([JSON.stringify(layoutState, null, 2)], { type: "application/json" }), url = URL.createObjectURL(blob), link = document.createElement("a"); link.href = url; link.download = `${layoutState.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "trading-dashboard"}.json`; link.click(); URL.revokeObjectURL(url); });
+      $("import-layout").addEventListener("click", () => $("layout-file").click());
+      $("layout-file").addEventListener("change", async (event) => { const file = event.target.files[0]; if (!file) return; try { const candidate = JSON.parse(await file.text()); if (!validLayout(candidate)) throw new Error("That file is not a supported DashboardSpec v1."); activeLayoutId = "default"; applyLayout(candidate); setStatus("Imported layout ready to save", false); } catch (error) { alert(error.message); } event.target.value = ""; });
+      $("discover-context").addEventListener("click", initializeAgent);
       $("settings-form").addEventListener("submit", () => {
         state.apiKey = $("api-key").value.trim(); state.workspaceId = $("workspace-id").value.trim(); state.accountId = $("account-id").value.trim(); state.strategyVersion = $("strategy-version").value.trim(); state.instrument = $("settings-instrument").value.trim() || "XAU_USD";
-        $("symbol-search").value = state.instrument; $("market-instrument").textContent = state.instrument;
+        syncInstrument(state.instrument); window.setTimeout(initializeAgent, 0);
       });
-      $("symbol-search").addEventListener("change", (event) => { state.instrument = event.target.value.trim() || "XAU_USD"; $("settings-instrument").value = state.instrument; $("market-instrument").textContent = state.instrument; });
+      $("strategy-version").addEventListener("change", (event) => { state.strategyVersion = event.target.value; });
+      $("symbol-search").addEventListener("change", (event) => chooseInstrument(event.target.value));
+      $("market-symbol").addEventListener("focus", openInstrumentMenu);
+      $("market-symbol").addEventListener("input", (event) => { const query = event.currentTarget.value; renderInstrumentMenu(query); $("instrument-menu").hidden = false; $("market-symbol").setAttribute("aria-expanded", "true"); window.clearTimeout(instrumentSearchTimer); instrumentSearchTimer = window.setTimeout(() => loadInstrumentCatalog(query), 140); });
+      $("market-symbol").addEventListener("keydown", (event) => {
+        const options = [...$("instrument-menu").querySelectorAll(".instrument-option")];
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); if ($("instrument-menu").hidden) openInstrumentMenu(); setActiveInstrumentOption(activeInstrumentOption + (event.key === "ArrowDown" ? 1 : -1)); }
+        else if (event.key === "Enter") { event.preventDefault(); const selected = options[activeInstrumentOption]; if (selected) selected.click(); else { closeInstrumentMenu(); chooseInstrument(event.currentTarget.value); } }
+        else if (event.key === "Escape") closeInstrumentMenu();
+      });
+      $("instrument-toggle").addEventListener("click", () => { if ($("instrument-menu").hidden) { $("market-symbol").focus(); renderInstrumentMenu(""); $("instrument-menu").hidden = false; $("market-symbol").setAttribute("aria-expanded", "true"); loadInstrumentCatalog(""); } else closeInstrumentMenu(); });
+      $("provider").addEventListener("change", () => { openInstrumentMenu(); });
+      document.addEventListener("click", (event) => { if (!$("instrument-combobox").contains(event.target)) closeInstrumentMenu(); });
+      $("agent-form").addEventListener("submit", (event) => { event.preventDefault(); sendAgentMessage($("agent-input").value); });
+      document.querySelectorAll("[data-agent-prompt]").forEach((button) => button.addEventListener("click", () => sendAgentMessage(button.dataset.agentPrompt)));
 
-      const pathFor = (values) => {
-        if (!values.length) return "";
-        const min = Math.min(...values), max = Math.max(...values), range = max - min || 1;
-        return values.map((value, index) => `${index ? "L" : "M"}${(index / Math.max(values.length - 1, 1) * 1000).toFixed(2)} ${(252 - ((value - min) / range) * 205).toFixed(2)}`).join(" ");
+      const svgElement = (name, attributes = {}) => {
+        const element = document.createElementNS("http://www.w3.org/2000/svg", name);
+        Object.entries(attributes).forEach(([key, value]) => element.setAttribute(key, String(value)));
+        return element;
       };
-      const drawValues = (values) => {
-        const line = pathFor(values); if (!line) { $("chart-empty").style.display = "grid"; return; }
-        $("chart-empty").style.display = "none"; $("equity-line").setAttribute("d", line); $("equity-area").setAttribute("d", `${line} L1000 280 L0 280 Z`);
+      const drawCandles = (items) => {
+        const candles = items.map((item) => ({
+          ...item,
+          openValue: Number(item.open), highValue: Number(item.high),
+          lowValue: Number(item.low), closeValue: Number(item.close)
+        })).filter((item) => [item.openValue, item.highValue, item.lowValue, item.closeValue].every(Number.isFinite) && item.highValue >= item.lowValue).slice(-100);
+        const guides = $("candle-guides"), series = $("candle-series"); guides.replaceChildren(); series.replaceChildren(); $("market-line").setAttribute("d", "");
+        if (!candles.length) { $("chart-empty").style.display = "grid"; return 0; }
+        $("chart-empty").style.display = "none";
+        const plot = { left: 10, right: 900, top: 14, bottom: 258 };
+        const observedLow = Math.min(...candles.map((item) => item.lowValue));
+        const observedHigh = Math.max(...candles.map((item) => item.highValue));
+        const padding = Math.max((observedHigh - observedLow) * .06, Math.abs(observedHigh) * .00005, .00001);
+        const low = observedLow - padding, high = observedHigh + padding, range = high - low;
+        const y = (price) => plot.bottom - ((price - low) / range) * (plot.bottom - plot.top);
+        for (let index = 0; index < 5; index += 1) {
+          const ratio = index / 4, guideY = plot.top + ratio * (plot.bottom - plot.top), price = high - ratio * range;
+          guides.append(svgElement("line", { x1: plot.left, y1: guideY, x2: 990, y2: guideY, class: "price-guide" }));
+          const label = svgElement("text", { x: 985, y: guideY - 4, class: "price-label" }); label.textContent = price.toLocaleString(undefined, { maximumFractionDigits: 5 }); guides.append(label);
+        }
+        const step = (plot.right - plot.left) / candles.length, bodyWidth = Math.max(2.2, Math.min(9, step * .64));
+        candles.forEach((item, index) => {
+          const x = plot.left + step * (index + .5), rising = item.closeValue >= item.openValue;
+          const className = `${rising ? "candle-up" : "candle-down"}${item.complete === false ? " candle-incomplete" : ""}`;
+          const wick = svgElement("line", { x1: x, y1: y(item.highValue), x2: x, y2: y(item.lowValue), class: `candle-wick ${className}` });
+          const bodyTop = Math.min(y(item.openValue), y(item.closeValue)), bodyHeight = Math.max(1.5, Math.abs(y(item.openValue) - y(item.closeValue)));
+          const body = svgElement("rect", { x: x - bodyWidth / 2, y: bodyTop, width: bodyWidth, height: bodyHeight, rx: .5, class: `candle-body ${className}` });
+          const tooltip = svgElement("title"); tooltip.textContent = `${new Date(item.started_at).toLocaleString()} · O ${item.open} · H ${item.high} · L ${item.low} · C ${item.close}${item.volume == null ? "" : ` · V ${item.volume}`}`; body.append(tooltip);
+          series.append(wick, body);
+        });
+        return candles.length;
+      };
+      const drawLine = (items) => {
+        const points = items.map((item) => ({ ...item, closeValue: Number(item.close) })).filter((item) => Number.isFinite(item.closeValue)).slice(-100);
+        const guides = $("candle-guides"), series = $("candle-series"), line = $("market-line"); guides.replaceChildren(); series.replaceChildren(); line.setAttribute("d", "");
+        if (!points.length) { $("chart-empty").style.display = "grid"; return 0; }
+        $("chart-empty").style.display = "none";
+        const plot = { left: 10, right: 900, top: 14, bottom: 258 };
+        const observedLow = Math.min(...points.map((item) => item.closeValue));
+        const observedHigh = Math.max(...points.map((item) => item.closeValue));
+        const padding = Math.max((observedHigh - observedLow) * .06, Math.abs(observedHigh) * .00005, .00001);
+        const low = observedLow - padding, high = observedHigh + padding, range = high - low;
+        const y = (price) => plot.bottom - ((price - low) / range) * (plot.bottom - plot.top);
+        for (let index = 0; index < 5; index += 1) {
+          const ratio = index / 4, guideY = plot.top + ratio * (plot.bottom - plot.top), price = high - ratio * range;
+          guides.append(svgElement("line", { x1: plot.left, y1: guideY, x2: 990, y2: guideY, class: "price-guide" }));
+          const label = svgElement("text", { x: 985, y: guideY - 4, class: "price-label" }); label.textContent = price.toLocaleString(undefined, { maximumFractionDigits: 5 }); guides.append(label);
+        }
+        const step = (plot.right - plot.left) / Math.max(points.length - 1, 1);
+        line.setAttribute("d", points.map((item, index) => `${index ? "L" : "M"}${plot.left + step * index} ${y(item.closeValue)}`).join(" "));
+        const tooltip = svgElement("title"); const latest = points.at(-1); tooltip.textContent = `Close-price line · ${new Date(latest.started_at).toLocaleString()} · ${latest.close}`; line.replaceChildren(tooltip);
+        return points.length;
+      };
+      const renderMarketChart = () => {
+        const lineChart = $("chart-type").value === "line";
+        const pointCount = lineChart ? drawLine(state.marketCandles) : drawCandles(state.marketCandles);
+        if (pointCount) $("chart-caption").textContent = `${state.instrument} · ${$("timeframe").value} · ${pointCount} ${lineChart ? "close points" : "OHLC candles"}`;
+        return pointCount;
       };
 
       async function loadMarket() {
         if (!requireKey()) return;
         const button = $("load-market"); button.disabled = true; button.textContent = "Loading…";
         try {
-          state.instrument = $("symbol-search").value.trim() || state.instrument;
+          state.instrument = $("market-symbol").value.trim() || state.instrument;
           const url = new URL("/api/market-data", location.origin); url.searchParams.set("provider", $("provider").value); url.searchParams.set("instrument", state.instrument); url.searchParams.set("timeframe", $("timeframe").value); url.searchParams.set("count", $("count").value || "150");
           const response = await fetch(url, { headers: apiHeaders() }); const data = await response.json(); if (!response.ok) throw new Error(data.detail || `Request failed (${response.status})`);
-          const closes = data.candles.map((item) => numeric(item.close)).filter(Number.isFinite); drawValues(closes);
-          $("market-quote").textContent = `${numeric(data.quote.bid).toFixed(2)} / ${numeric(data.quote.ask).toFixed(2)}`; $("market-spread").textContent = numeric(data.quote.spread).toFixed(5); $("market-instrument").textContent = data.instrument; $("market-source").textContent = data.provider; $("chart-caption").textContent = `${data.instrument} · ${data.timeframe} · ${closes.length} normalized candles`; setStatus("Live market data", true); markUpdated();
+          state.marketCandles = data.candles; syncInstrument(data.instrument); renderMarketChart();
+          $("market-quote").textContent = `${numeric(data.quote.bid).toFixed(2)} / ${numeric(data.quote.ask).toFixed(2)}`; $("market-spread").textContent = numeric(data.quote.spread).toFixed(5); $("market-instrument").textContent = data.instrument; $("market-source").textContent = data.provider; setStatus("Live market data", true); markUpdated();
         } catch (error) { setStatus(error.message, false); } finally { button.disabled = false; button.textContent = "Load market"; }
       }
 
@@ -324,7 +821,7 @@
         const button = $("sync-broker"); button.disabled = true; button.textContent = "Syncing…";
         try {
           const response = await fetch("/api/broker-state", { headers: apiHeaders() }); const data = await response.json(); if (!response.ok) throw new Error(data.detail || `Broker request failed (${response.status})`);
-          const floating = numeric(data.equity) - numeric(data.balance); $("account-balance").textContent = money(data.balance, data.currency); $("account-equity").textContent = money(data.equity, data.currency); $("floating-pnl").textContent = money(floating, data.currency, true); $("floating-pnl").className = floating >= 0 ? "up" : "down"; $("balance-change").textContent = "Broker-reported balance"; $("equity-state").textContent = "Live"; $("account-source").textContent = data.provider; $("oanda-status").textContent = "Live";
+          const floating = numeric(data.equity) - numeric(data.balance); $("account-balance").textContent = money(data.balance, data.currency); $("account-equity").textContent = money(data.equity, data.currency); $("floating-pnl").textContent = money(floating, data.currency, true); $("floating-pnl").className = floating >= 0 ? "up" : "down"; $("balance-change").textContent = "Broker-reported balance"; $("equity-state").textContent = "Live"; $("account-source").textContent = data.provider; $("oanda-status").textContent = data.provider.toLowerCase().includes("oanda") ? "Live" : "Not selected"; $("metatrader-status").textContent = data.provider.toLowerCase().includes("metatrader") ? "Live" : "Not selected"; $("desk-broker").textContent = data.provider;
           const rows = data.positions.map((position) => { const qty = numeric(position.net_quantity), pnl = numeric(position.unrealized_pnl); return `<tr><td><strong>${escapeHtml(position.instrument)}</strong></td><td><span class="side ${qty < 0 ? "short" : ""}">${qty < 0 ? "Short" : "Long"}</span></td><td>${qty.toLocaleString()}</td><td>${position.average_price == null ? "—" : numeric(position.average_price).toLocaleString()}</td><td class="${pnl >= 0 ? "up" : "down"}">${money(pnl, data.currency, true)}</td></tr>`; }).join("");
           $("position-rows").innerHTML = rows || '<tr><td colspan="5">No open positions.</td></tr>'; $("position-count").textContent = `${data.positions.length} open`; setStatus("Broker connected", true); markUpdated();
         } catch (error) { setStatus(error.message, false); } finally { button.disabled = false; button.textContent = "Sync"; }
@@ -339,9 +836,32 @@
         } catch (error) { setStatus(error.message, false); } finally { button.disabled = false; }
       }
 
-      $("load-market").addEventListener("click", loadMarket); $("sync-broker").addEventListener("click", loadBroker); $("load-journal").addEventListener("click", loadJournal);
+      $("load-market").addEventListener("click", loadMarket); $("chart-type").addEventListener("change", renderMarketChart); $("sync-broker").addEventListener("click", loadBroker); $("load-journal").addEventListener("click", loadJournal);
       $("sync-all").addEventListener("click", async () => { if (!requireKey()) return; await Promise.allSettled([loadBroker(), loadMarket()]); });
       $("risk-form").addEventListener("submit", async (event) => { event.preventDefault(); if (!requireKey()) return; const output = $("risk-output"), payload = Object.fromEntries(new FormData(event.currentTarget)); if (!payload.target) delete payload.target; output.textContent = "Calculating…"; try { const response = await fetch("/api/risk/position-size", { method: "POST", headers: { ...apiHeaders(), "content-type": "application/json" }, body: JSON.stringify(payload) }); const data = await response.json(); if (!response.ok) throw new Error(data.detail ? JSON.stringify(data.detail) : `Request failed (${response.status})`); output.innerHTML = `<span class="up">Risk ${money(data.risk_amount)}</span> · Quantity ${Number(data.quantity).toLocaleString()} · Planned R ${data.planned_r ?? "—"}`; } catch (error) { output.textContent = error.message; output.className = "down"; } });
+      async function bootstrapDashboard() {
+        if (validLaunchSession) {
+          $("context-status").textContent = "Secure local dashboard session detected. Discovering your Trading-Agent workspace and existing connections…";
+          try { await establishDashboardSession(); }
+          catch (error) { $("context-status").textContent = error.message; setStatus(error.message, false); return; }
+        }
+        if (await initializeAgent({ silent: true })) {
+          await loadBroker();
+          await loadMarket();
+          if (state.strategyVersion) await loadJournal();
+        }
+      }
+      async function checkDashboardServer() {
+        try {
+          const response = await fetch("/health", { cache: "no-store" });
+          if (!response.ok) throw new Error("unavailable");
+        } catch (_error) {
+          setAgentState("Server offline");
+          setStatus("Trading-Agent server offline — run trade dashboard", false);
+        }
+      }
+      window.setTimeout(bootstrapDashboard, 0);
+      window.setInterval(checkDashboardServer, 15000);
     </script>
   </body>
 </html>

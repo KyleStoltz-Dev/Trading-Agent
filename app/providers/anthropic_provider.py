@@ -12,7 +12,9 @@ from app.providers.base import (
     record_analysis_usage,
     safe_tool_error,
     track_completion_usage,
+    valid_model_id,
 )
+from app.providers.catalog import supported_agent_model
 
 
 def _anthropic_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -64,10 +66,17 @@ def _reasoning_options(reasoning_effort: str) -> dict[str, Any]:
 
 class AnthropicProvider:
     name = "anthropic"
+    access_mode = "api"
 
-    def __init__(self, settings: Settings, client: Any = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        client: Any = None,
+        api_key: str | None = None,
+    ) -> None:
         self.model = settings.anthropic_model
         self.last_usage = TokenUsage()
+        self._discovery_timeout_seconds = settings.model_discovery_timeout_seconds
         self._capacity_limiter = provider_capacity_limiter(
             self.name,
             settings.model_max_concurrent_requests,
@@ -82,8 +91,29 @@ class AnthropicProvider:
                 raise ProviderConfigurationError(
                     'Install the Anthropic adapter with `pip install -e ".[anthropic]"`'
                 ) from exc
-            client = anthropic.Anthropic(api_key=secret_value(settings.anthropic_api_key))
+            client = anthropic.Anthropic(
+                api_key=api_key or secret_value(settings.anthropic_api_key)
+            )
         self.client = client
+
+    def available_models(self) -> tuple[str, ...]:
+        """Return models visible to this API key."""
+        try:
+            response = self.client.models.list(
+                limit=1000,
+                timeout=self._discovery_timeout_seconds,
+            )
+        except Exception as exc:
+            raise ProviderConfigurationError("Anthropic model discovery failed") from exc
+        models = {
+            item.id
+            for item in getattr(response, "data", ())
+            if valid_model_id(getattr(item, "id", None))
+            and supported_agent_model(self.name, item.id)
+        }
+        if not valid_model_id(self.model):
+            raise ProviderConfigurationError("Configured Anthropic model name is invalid")
+        return tuple(sorted(models))
 
     @track_completion_usage
     @limit_provider_capacity

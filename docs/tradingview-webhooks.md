@@ -61,14 +61,26 @@ TRADINGVIEW_WEBHOOK_FUTURE_SKEW_SECONDS=60
 TRADINGVIEW_TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128
 ```
 
-The guided setup can write the enable/disable flag, but it cannot configure your public
-proxy:
+The optional alert connection prepares the account-scoped URL and alert message together.
+Start it inside the agent with `/connect alerts`, or run:
 
 ```bash
-trade setup --tradingview enabled
+trade tradingview connect
 ```
 
-The public webhook URL is:
+The flow asks for the public HTTPS address of the verified receiver, enables the local
+receiver, rotates the account-specific secret, and prints the exact URL and JSON message to
+paste into TradingView. It stops without changing anything when that public address is not
+available. It never asks for a TradingView username or password. The public proxy itself is
+still an external deployment boundary and cannot be created by the local app.
+
+Check setup separately from real delivery evidence with:
+
+```bash
+trade tradingview status
+```
+
+The underlying public webhook URL format is:
 
 ```text
 https://your-host.example/api/webhooks/tradingview/{account_id}
@@ -80,7 +92,8 @@ It is the `trading_accounts.id` value, not the broker login/account number. The 
 resolves that UUID only inside `TRADING_WORKSPACE`; an unknown account or an account
 from another workspace fails authentication.
 
-Create the account-specific webhook secret before making the alert:
+The connection flow creates the account-specific webhook secret before making the alert.
+Advanced users can rotate only that secret with:
 
 ```bash
 trade account tradingview-secret
@@ -88,6 +101,25 @@ trade account tradingview-secret
 
 The command displays the plaintext once. PostgreSQL stores only its SHA-256 digest.
 Running it again rotates the secret and immediately invalidates the previous value.
+
+TradingView Paper Trading is a separate product surface. Chart alerts can be retained as
+evidence, but this webhook cannot read the Paper Trading account's balance, positions,
+orders, or execution history. Trading Agent therefore implements a bounded, read-only CSV
+import for Paper Trading History and Account History.
+
+Inside the agent, say `import my TradingView trades` and drag the downloaded CSV into the
+prompt. The host validates and previews the source before the normal mutation confirmation;
+the model does not parse the file or choose its account scope. The import stores normalized
+`trades`, `execution_events`, and `fills`, so the normal recent-trade review works for
+TradingView records too. Re-importing the same data is idempotent. Canceled and rejected
+orders remain queryable execution-history events but never become fills or alter a trade
+lifecycle. Raw CSV rows are not retained, and missing realized P&L remains unknown.
+
+Account History is the preferred export for completed-trade review because TradingView says
+that tab contains closed positions, entry and close prices, and realized P&L. History remains
+useful for fill-level records but can reconstruct only the position lifecycle represented by
+the fills present in that file. Select the intended journal account before import so unrelated
+paper, demo, prop, and live histories are not blended.
 
 Use a different URL for every account. Do not reuse one account's webhook URL for another
 account or try to choose an account from alert JSON: the route fixes scope before the body is

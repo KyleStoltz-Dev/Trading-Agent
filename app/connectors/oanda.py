@@ -21,6 +21,7 @@ from app.market_data.contracts import (
     BrokerEvent,
     BrokerTradeEffect,
     Candle,
+    MarketInstrument,
     PositionState,
     Quote,
     SyncPage,
@@ -300,6 +301,31 @@ class OandaReadOnlyConnector:
                 f"OANDA returned {len(prices)} prices for {instrument}"
             )
         return normalize_quote(prices[0], retrieved_at=retrieved_at)
+
+    async def instruments(self) -> Sequence[MarketInstrument]:
+        payload = await self._get_json(
+            f"/v3/accounts/{self.account_id}/instruments"
+        )
+        items = payload.get("instruments")
+        if not isinstance(items, list):
+            raise OandaConnectorError("OANDA instrument catalog is malformed")
+        instruments: list[MarketInstrument] = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise OandaConnectorError("OANDA instrument catalog is malformed")
+            symbol = str(item.get("name") or "").strip()
+            if not symbol:
+                continue
+            instruments.append(
+                MarketInstrument(
+                    symbol=symbol,
+                    display_name=str(item.get("displayName") or symbol),
+                    asset_class=str(item.get("type") or "unknown").casefold(),
+                    source=self.name,
+                    venue=self.venue,
+                )
+            )
+        return tuple(instruments)
 
     async def candles(
         self,

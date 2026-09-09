@@ -2341,6 +2341,68 @@ class ConversationTurn(Base):
     session: Mapped[ConversationSession] = relationship(back_populates="turns")
 
 
+class RealtimeUsageEvent(Base):
+    """Durable per-response token and cost telemetry for Pippy voice sessions."""
+
+    __tablename__ = "realtime_usage_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "account_id",
+            "session_id",
+            "response_id",
+            name="uq_realtime_usage_response",
+        ),
+        ForeignKeyConstraint(
+            ("workspace_id", "account_id"),
+            ("trading_accounts.workspace_id", "trading_accounts.id"),
+            name="fk_realtime_usage_workspace_account",
+        ),
+        ForeignKeyConstraint(
+            ("workspace_id", "account_id", "session_id"),
+            (
+                "conversation_sessions.workspace_id",
+                "conversation_sessions.account_id",
+                "conversation_sessions.id",
+            ),
+            name="fk_realtime_usage_scope_session",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "input_text_tokens >= 0 AND input_audio_tokens >= 0 "
+            "AND cached_text_tokens >= 0 AND cached_audio_tokens >= 0 "
+            "AND output_text_tokens >= 0 AND output_audio_tokens >= 0 "
+            "AND estimated_cost_usd >= 0",
+            name="ck_realtime_usage_nonnegative",
+        ),
+        Index(
+            "ix_realtime_usage_scope_time",
+            "workspace_id",
+            "account_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    session_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    response_id: Mapped[str] = mapped_column(String(200))
+    model: Mapped[str] = mapped_column(String(200))
+    input_text_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    input_audio_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cached_text_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cached_audio_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_text_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_audio_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    estimated_cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+
 class ToolExecutionAudit(Base):
     """Durable mutation-tool lifecycle and request-scoped idempotency record."""
 

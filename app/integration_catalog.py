@@ -28,8 +28,8 @@ INTEGRATIONS = (
         name="MetaTrader 4 / 5 bridge",
         status="ready",
         capability=(
-            "read-only live data and execution ingestion; included Windows MT5 service "
-            "and a shared MT4 bridge contract"
+            "read-only live data and execution ingestion; Windows terminal-side bridge "
+            "with client support on macOS, Linux, and Windows"
         ),
         setup=(
             "METATRADER_BRIDGE_URL, METATRADER_BRIDGE_TOKEN, "

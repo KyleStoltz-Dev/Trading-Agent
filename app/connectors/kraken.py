@@ -10,7 +10,7 @@ from typing import Any, Final
 
 import httpx
 
-from app.market_data.contracts import Candle, Quote
+from app.market_data.contracts import Candle, MarketInstrument, Quote
 
 KRAKEN_PUBLIC_REST_URL: Final = "https://api.kraken.com"
 MAX_RESPONSE_BYTES: Final = 1_000_000
@@ -209,6 +209,32 @@ class KrakenReadOnlyConnector:
             source=self.name,
             venue=self.venue,
         )
+
+    async def instruments(self) -> Sequence[MarketInstrument]:
+        payload = await self._get_json("/0/public/AssetPairs", assetVersion=1)
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            raise KrakenConnectorError("Kraken instrument catalog is malformed")
+        instruments: list[MarketInstrument] = []
+        for pair_key, raw in result.items():
+            if not isinstance(raw, dict):
+                raise KrakenConnectorError("Kraken instrument catalog is malformed")
+            display_name = str(raw.get("wsname") or pair_key).strip()
+            symbol = display_name.replace("/", "_")
+            if not symbol:
+                continue
+            instruments.append(
+                MarketInstrument(
+                    symbol=symbol,
+                    display_name=display_name,
+                    asset_class=str(raw.get("aclass_base") or "currency"),
+                    source=self.name,
+                    venue=self.venue,
+                    tradable=str(raw.get("status") or "online").casefold()
+                    == "online",
+                )
+            )
+        return tuple(instruments)
 
     async def candles(
         self,

@@ -45,7 +45,9 @@ placement, modification, cancellation, closing, or hedging methods.
   reduces accidental exposure but is not a read or container boundary; host-accessible files
   and staged Codex authentication may still be readable by Codex or child tools.
 - Guided setup rewrites only an allowlist of non-secret configuration keys, uses an atomic
-  replacement, and enforces mode `0600`. It refuses API-key fields.
+  replacement, and enforces mode `0600`. Hosted-model API keys are collected with hidden input
+  and written directly to the configured credential vault; API-key fields remain prohibited in
+  the managed settings file.
 - Harness files are application-owned, size-bounded context. They do not define executable
   tools and cannot override runtime policy or deterministic risk controls.
 - Full-page web reads are GET-only, size/time bounded, content-type limited, restricted to
@@ -64,11 +66,15 @@ placement, modification, cancellation, closing, or hedging methods.
 - The local HTTP API requires a key of at least 32 characters on every `/api/*` route.
   Normal API routes additionally require `X-Workspace-ID` and `X-Account-ID`; both IDs must
   identify one real account relationship.
-  A mutating client must first request a short-lived confirmation token bound to the exact
-  HTTP method, path, SHA-256 of the request body, workspace, and account. The token is sent
+  A client changing credentials, journal data, strategy state, or another domain record must
+  first request a short-lived confirmation token bound to the exact HTTP method, path,
+  SHA-256 of the request body, workspace, and account. The token is sent
   once in `X-Trader-Confirmation`; replay, body/path substitution, or reuse under another
   account fails. Strategy journal routes additionally require `X-Strategy-Version` for one
-  immutable version owned by the selected workspace.
+  immutable version owned by the selected workspace. User-initiated conversation/session
+  persistence and deterministic usage telemetry are operational records: they remain
+  policy-checked and audited, but cannot authorize journal mutations or broker actions. Any
+  domain write proposed inside an agent turn still requires its own exact human confirmation.
 
 Hosted mode accepts high-entropy bearer principals whose SHA-256 token digests are mapped to
 one exact workspace/account grant. The middleware binds that scope to transaction-local

@@ -117,7 +117,12 @@ trade models use qwen3.5:35b-a3b --tier quality
 ```
 
 `quality` changes balanced and deep only, leaving default/economy on the faster model.
-Persistent changes require a restart; `/model use NAME` is an immediate session-only override.
+Persistent changes require a restart; `/model` opens the reviewed local/cloud model picker and
+`/model use NAME` is an immediate session-only override. Use
+`/model use PROVIDER/NAME` to change providers. A different hosted recipient requires explicit
+confirmation before bounded recent conversation history is sent. Cloud discovery is
+time-bounded and cached for the session; models must be available to the configured key and in
+the adapter's reviewed compatibility catalog.
 `/model unload` releases the current session's model immediately. By default, Ollama model
 weights also expire after two idle minutes and are released when chat exits; configure
 `OLLAMA_KEEP_ALIVE` and `OLLAMA_UNLOAD_ON_EXIT` when a different residency policy is needed.
@@ -163,7 +168,7 @@ At the final review, answering No opens an edit menu rather than exiting. One fi
 at a time and the complete review is shown again. Exiting without writing requires choosing
 `Discard onboarding` and confirming that separate action.
 
-Beginner setup recommends the computer's detected timezone, a guided curriculum, one practice
+Beginner setup recommends the computer's detected timezone, a guided curriculum, one starter
 instrument and session, a simple predefined-risk style, process goals, and 0.5% planned risk.
 Personal/demo accounts collect only name, starting size, and currency; the advanced loss,
 drawdown, news, and holding questionnaire is skipped. Beginner prop setup can defer unverified
@@ -408,13 +413,13 @@ METATRADER_PLATFORM=mt5
 METATRADER_BRIDGE_URL=https://YOUR-PRIVATE-BRIDGE
 METATRADER_BRIDGE_TOKEN=generate-at-least-32-random-characters
 METATRADER_ACCOUNT_ID=12345678
-METATRADER_MODE=practice
+METATRADER_MODE=demo
 ```
 
 Then verify and register the exact account before importing:
 
 ```bash
-trade broker configure-metatrader --label mt5-practice
+trade broker configure-metatrader --label mt5-demo
 trade broker quote XAUUSD
 trade broker sync
 ```

@@ -124,6 +124,20 @@ def record_chart_analysis(
         )
         if plan is None:
             raise LookupError("trade plan was not found in the requested account")
+    observed_metadata = analysis.observed_metadata
+    detected_evidence: dict[str, str] = {}
+    if instrument is None and observed_metadata.instrument is not None:
+        instrument = observed_metadata.instrument
+        detected_evidence["instrument"] = observed_metadata.instrument_evidence or ""
+    if venue is None and observed_metadata.venue is not None:
+        venue = observed_metadata.venue
+        detected_evidence["venue"] = observed_metadata.venue_evidence or ""
+    if timeframe is None and observed_metadata.timeframe is not None:
+        timeframe = observed_metadata.timeframe
+        detected_evidence["timeframe"] = observed_metadata.timeframe_evidence or ""
+    if market_time is None and observed_metadata.market_time is not None:
+        market_time = observed_metadata.market_time
+        detected_evidence["market_time"] = observed_metadata.market_time_evidence or ""
     scoped_directory = _scoped_evidence_directory(evidence_directory, scope)
     path, digest = store_evidence_file(
         image_bytes,
@@ -141,6 +155,14 @@ def record_chart_analysis(
         )
     )
     if evidence is None:
+        metadata = {
+            "instrument": instrument,
+            "venue": venue,
+            "timeframe": timeframe,
+            "stage": evidence_stage,
+        }
+        if detected_evidence:
+            metadata["auto_detected_evidence"] = detected_evidence
         evidence = EvidenceItem(
             workspace_id=scope.workspace_id,
             account_id=scope.account_id,
@@ -152,12 +174,7 @@ def record_chart_analysis(
             source=source,
             market_time=market_time,
             retrieved_at=retrieved_at,
-            metadata_json={
-                "instrument": instrument,
-                "venue": venue,
-                "timeframe": timeframe,
-                "stage": evidence_stage,
-            },
+            metadata_json=metadata,
         )
         db.add(evidence)
         db.flush()
@@ -170,6 +187,8 @@ def record_chart_analysis(
             raise ValueError("this chart is already attached to a different trade plan")
         if trade_plan_id is not None and evidence.trade_plan_id is None:
             evidence.trade_plan_id = trade_plan_id
+        if evidence.market_time is None and market_time is not None:
+            evidence.market_time = market_time
         metadata = dict(evidence.metadata_json or {})
         updates = {
             "instrument": instrument,
@@ -180,6 +199,10 @@ def record_chart_analysis(
         for key, value in updates.items():
             if value is not None:
                 metadata[key] = value
+        if detected_evidence:
+            existing_evidence = dict(metadata.get("auto_detected_evidence") or {})
+            existing_evidence.update(detected_evidence)
+            metadata["auto_detected_evidence"] = existing_evidence
         evidence.metadata_json = metadata
 
     output = analysis.model_dump(mode="json")

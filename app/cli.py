@@ -4,6 +4,7 @@ import json
 import mimetypes
 import os
 import re
+import shlex
 import shutil
 import sys
 import time
@@ -15,7 +16,8 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated
+from platform import system as _platform_system
+from typing import Annotated, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 import typer
@@ -26,6 +28,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.markup import escape as escape_markup
 from rich.panel import Panel
+from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 from sqlalchemy import func, select
@@ -34,6 +37,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.clipboard import (
     ClipboardImage,
     ClipboardImageError,
+    ClipboardTextError,
+    copy_text_to_clipboard,
     read_clipboard_image,
 )
 from app.config import (
@@ -57,12 +62,9 @@ from app.connectors import (
 from app.costs import (
     TokenUsage,
     calculate_cost,
-    estimated_multi_round_usage,
-    estimated_request_tokens,
     format_pricing,
     format_usd,
     model_pricing,
-    output_budget_for_mode,
 )
 from app.db import (
     Base,
@@ -75,17 +77,35 @@ from app.db import (
     upgrade_database,
 )
 from app.integration_catalog import integration_options
-from app.interactive_input import IMAGE_MARKER, ClipboardChatPrompt
+from app.interactive_input import (
+    IMAGE_MARKER,
+    ClipboardChatPrompt,
+    TerminalMenuOption,
+    choose_inline_terminal_option,
+    choose_terminal_option,
+)
 from app.models import (
     ApiPrincipal,
     BrokerConnection,
     ConnectorCursor,
     ConversationSession,
+    ConversationTurn,
     EconomicEvent,
+    ExecutionEvent,
+    Fill,
 )
 from app.policy import ExecutionHooks, PolicyEngine, PolicyViolation, ToolContext
-from app.providers import ProviderConfigurationError, create_model_provider
+from app.providers import (
+    ModelProvider,
+    ProviderConfigurationError,
+    create_model_provider,
+)
+from app.providers.catalog import SUPPORTED_CLOUD_AGENT_MODELS
 from app.providers.ollama_provider import OllamaProvider
+from app.providers.subscription_provider import (
+    claude_subscription_status,
+    codex_subscription_status,
+)
 from app.routing import AgentMode
 from app.schemas import (
     AccountConstraintRead,
@@ -113,7 +133,6 @@ from app.services.account_constraints import (
     upsert_active_account_constraint,
 )
 from app.services.agent import (
-    TOOLS,
     PreparedAgentRequest,
     TradingAgent,
     UsedReference,
@@ -143,6 +162,11 @@ from app.services.conversations import (
     list_conversations,
     resolve_conversation,
     update_turn_outcome,
+)
+from app.services.dashboard_launcher import (
+    DashboardLaunchError,
+    build_dashboard_launch_plan,
+    run_dashboard,
 )
 from app.services.development import (
     DevelopmentService,
@@ -182,10 +206,20 @@ from app.services.market_features import (
     strategy_experiment_report,
 )
 from app.services.mindset import create_mindset_check_in, list_mindset_check_ins
+from app.services.model_credentials import (
+    model_api_key_configured,
+    store_model_api_key,
+)
+from app.services.model_selection import SessionModelController
 from app.services.news import (
     economic_event_history,
     store_calendar_events,
     store_news_items,
+)
+from app.services.pippy_launcher import (
+    PippyLaunchError,
+    build_pippy_launch_plan,
+    run_pippy_stack,
 )
 from app.services.pretrade import (
     PreflightAssessment,
@@ -242,7 +276,23 @@ from app.services.trading_workflow import (
     is_dangling_count_clarification,
     should_refresh_trade_context,
 )
-from app.services.tradingview import set_tradingview_webhook_secret
+from app.services.tradingview import (
+    recent_tradingview_alerts,
+    set_tradingview_webhook_secret,
+)
+from app.services.tradingview_import import (
+    TRADINGVIEW_PAPER_PROVIDER,
+    TradingViewExport,
+    TradingViewImportError,
+    import_tradingview_export,
+    is_tradingview_history_import_request,
+    parse_tradingview_export,
+)
+from app.services.tradingview_setup import (
+    is_tradingview_connection_request,
+    tradingview_alert_message,
+    tradingview_webhook_url,
+)
 from app.services.workspaces import (
     RequestScope,
     bootstrap_initial_scope,
@@ -273,6 +323,7 @@ from app.system_resources import (
     assess_model_fit,
     resource_snapshot,
 )
+from app.terminal_status import ThinkingStatus
 
 app = typer.Typer(
     name="trading-agent",
@@ -313,6 +364,14 @@ mindset_app = typer.Typer(help="Record process readiness and predefined-risk acc
 app.add_typer(mindset_app, name="mindset", rich_help_panel="Daily records and data")
 account_app = typer.Typer(help="List and select the account that scopes every decision.")
 app.add_typer(account_app, name="account", rich_help_panel="Daily records and data")
+tradingview_app = typer.Typer(
+    help="Import Paper Trading history; chart alerts are optional."
+)
+app.add_typer(
+    tradingview_app,
+    name="tradingview",
+    rich_help_panel="Setup and administration",
+)
 principal_app = typer.Typer(help="Provision hosted API principals and exact account grants.")
 app.add_typer(principal_app, name="principal", rich_help_panel="Setup and administration")
 learn_app = typer.Typer(
@@ -431,14 +490,14 @@ MODEL_PROVIDER_CHOICES = (
     ),
     GuidedChoice(
         "openai",
-        "OpenAI API",
-        "Uses a separately billed OpenAI API key.",
+        "OpenAI / ChatGPT",
+        "Uses your ChatGPT sign-in when available; API keys remain optional.",
         ("open ai", "gpt"),
     ),
     GuidedChoice(
         "anthropic",
-        "Anthropic API",
-        "Uses a separately billed Anthropic API key.",
+        "Claude",
+        "Uses your Claude sign-in when available; API keys remain optional.",
         ("claude",),
     ),
 )
@@ -510,7 +569,8 @@ METATRADER_PLATFORM_CHOICES = (
     GuidedChoice(
         "mt5",
         "MetaTrader 5",
-        "Uses the included Windows companion service beside an official MT5 terminal.",
+        "Use the included Windows companion service beside an official MT5 terminal; "
+        "this app can run on another host.",
         ("5", "meta trader 5", "metatrader5"),
     ),
     GuidedChoice(
@@ -832,6 +892,7 @@ def _authorize_direct(
     mutating: bool = False,
     deterministic: bool = False,
     assume_yes: bool = False,
+    scope: RequestScope | None = None,
 ) -> None:
     policy = _runtime_policy()
     context = ToolContext(
@@ -852,17 +913,17 @@ def _authorize_direct(
         upgrade_database()
         with SessionLocal() as db:
             try:
-                scope = _current_scope(db)
+                audit_scope = scope or _current_scope(db)
             except LookupError:
                 # Fresh bootstrap/onboarding has no account to own an audit row yet.
                 return
             audit = record_direct_cli_confirmation(
                 db,
-                scope=scope,
+                scope=audit_scope,
                 action=name,
                 arguments=arguments,
             )
-            _direct_command_audits.append((audit.id, scope))
+            _direct_command_audits.append((audit.id, audit_scope))
 
 
 def _print_model(value: object) -> None:
@@ -887,8 +948,9 @@ def _render_broker_setup_error(
     if provider == "metatrader":
         console.print(
             "MetaTrader requires a separate read-only bridge running beside the MT5 "
-            "terminal on Windows or a VPS."
+            "terminal on Windows or a trusted bridge host."
         )
+        console.print(f"[yellow]{_metatrader_runtime_hint()}[/yellow]")
         console.print(
             "Set [cyan]BROKER_PROVIDER=metatrader[/cyan], "
             "[cyan]METATRADER_BRIDGE_URL[/cyan], "
@@ -1174,22 +1236,6 @@ def _render_startup_memory(memory: StartupMemory, *, detailed: bool = False) -> 
         if detailed:
             label += f" · sha256 {strategy.content_hash[:12]}"
         console.print(Text(_literal_terminal_text(label)))
-
-    if memory.prior_session:
-        prior = memory.prior_session
-        console.print(Text("  Previous session", style="cyan"))
-        console.print(
-            Text(
-                _literal_terminal_text(
-                    f"    {prior.name} · {prior.turn_count} turns · "
-                    f"{prior.last_activity_at}"
-                )
-            )
-        )
-        if detailed and prior.title:
-            console.print(
-                Text(_literal_terminal_text(f"    {prior.title}"), style="dim")
-            )
 
     plans = memory.open_plans if detailed else memory.open_plans[:2]
     if plans:
@@ -1555,6 +1601,38 @@ def _prompt_bounded_text(
             console.print(f"[yellow]{exc}. Please try again.[/yellow]")
             continue
         return value
+
+
+def _metatrader_runtime_hint() -> str:
+    system_name = (_platform_system() or "unknown").casefold()
+    if system_name == "windows":
+        return (
+            "On Windows, run the MetaTrader bridge beside your official MT5 terminal"
+            " and point METATRADER_BRIDGE_URL at localhost."
+        )
+    if system_name == "darwin":
+        return (
+            "On macOS, run MetaTrader in a separate Windows machine or VPS, keep"
+            " this Trade Agent app here, and set METATRADER_BRIDGE_URL to that"
+            " secure bridge endpoint."
+        )
+    if system_name == "linux":
+        return (
+            "On Linux, this app can be the client. If MetaTrader is not on this host,"
+            " run the bridge from a Windows terminal host (or a trusted bridge service)"
+            " and point METATRADER_BRIDGE_URL to it."
+        )
+    return (
+        "Run the MetaTrader bridge on a Windows MT host (or a trusted Windows"
+        " bridge service) and set METATRADER_BRIDGE_URL to its endpoint."
+    )
+
+
+def _display_account_mode(broker: str, mode: str) -> str:
+    """Use MetaTrader's familiar demo label while retaining internal compatibility."""
+    if mode == "practice" and broker.strip().upper() in {"MT4", "MT5", "METATRADER"}:
+        return "demo"
+    return mode
 
 
 def _normalize_market(value: str) -> str:
@@ -2012,7 +2090,7 @@ def _render_beginner_recommendations(defaults: OnboardingDefaults) -> None:
     )
     console.print(
         f"  Market        {escape_markup(defaults.markets[0])} "
-        "[dim]— start with one instrument in practice[/dim]"
+        "[dim]— start with one instrument first[/dim]"
     )
     console.print(
         f"  Session       {escape_markup(defaults.sessions[0])} "
@@ -2755,7 +2833,9 @@ def _run_onboarding(db, settings: Settings) -> bool:
     if broker == "metatrader":
         console.print(
             "[yellow]MetaTrader still needs the read-only bridge URL, dedicated token, "
-            "and account ID before live reads. Ask “help me finish MT5 setup” in chat.[/yellow]"
+            "and account ID before live reads. Ask “help me finish MT5 setup” in chat."
+            " If you are on macOS or Linux, configure the bridge from a Windows host "
+            "or a trusted bridge server.[/yellow]"
         )
     if broker in {"ibkr", "alpaca", "twelve-data", "ctrader"}:
         console.print(
@@ -2779,7 +2859,15 @@ def _run_onboarding(db, settings: Settings) -> bool:
     return True
 
 
-def _render_cost_table(settings: Settings, provider_name: str, fallback_model: str) -> None:
+def _render_cost_table(
+    settings: Settings,
+    provider: ModelProvider | str,
+    fallback_model: str,
+) -> None:
+    provider_name = provider if isinstance(provider, str) else provider.name
+    access_mode = (
+        "api" if isinstance(provider, str) else getattr(provider, "access_mode", "api")
+    )
     table = Table(title="Configured model costs", show_header=True)
     table.add_column("Mode")
     table.add_column("Model")
@@ -2789,11 +2877,25 @@ def _render_cost_table(settings: Settings, provider_name: str, fallback_model: s
         configured = getattr(settings, f"{provider_name}_{mode}_model", None)
         model = configured or fallback_model
         pricing = model_pricing(provider_name, model)
+        price_label = (
+            "Included"
+            if access_mode == "subscription"
+            else format_pricing(pricing)
+            if pricing
+            else "unknown"
+        )
+        note = (
+            "Uses signed-in subscription limits."
+            if access_mode == "subscription"
+            else pricing.note
+            if pricing
+            else "Add pricing before relying on an estimate."
+        )
         table.add_row(
             mode,
             model,
-            format_pricing(pricing) if pricing else "unknown",
-            pricing.note if pricing else "Add pricing before relying on an estimate.",
+            price_label,
+            note,
         )
     console.print(table)
     console.print("[dim]Token estimates are approximate; provider billing is authoritative.[/dim]")
@@ -2926,45 +3028,482 @@ def _render_ollama_models(
         console.print(f"[dim]Other installed models: {', '.join(extras)}[/dim]")
 
 
+def _model_menu_options(
+    controller: SessionModelController,
+    *,
+    current_provider: str,
+    current_model: str,
+    include_cost: bool = False,
+) -> tuple[TerminalMenuOption, ...]:
+    options: list[TerminalMenuOption] = []
+    for option in controller.options():
+        selected = option.provider == current_provider and option.model == current_model
+        access_mode = getattr(option, "access_mode", None) or (
+            "local" if option.local else "api"
+        )
+        label = {
+            ("ollama", "local"): "Local",
+            ("openai", "subscription"): "ChatGPT subscription",
+            ("openai", "api"): "OpenAI API",
+            ("anthropic", "subscription"): "Claude subscription",
+            ("anthropic", "api"): "Claude API",
+        }.get((option.provider, access_mode), option.provider.title())
+        location = {
+            "local": "runs on this computer",
+            "subscription": "uses your signed-in subscription",
+            "api": "uses your API key",
+        }.get(access_mode, "hosted model")
+        settings = getattr(controller, "settings", None)
+        profiles: list[str] = []
+        if settings is not None:
+            profile_fields = (
+                ("default", f"{option.provider}_model"),
+                ("economy", f"{option.provider}_economy_model"),
+                ("balanced", f"{option.provider}_balanced_model"),
+                ("deep", f"{option.provider}_deep_model"),
+            )
+            profiles = [
+                profile
+                for profile, field in profile_fields
+                if getattr(settings, field, None) == option.model
+            ]
+        details = ["current"] if selected else []
+        details.append(location)
+        if profiles:
+            details.append("profiles: " + ", ".join(profiles))
+        option_label = f"{label} · {option.model}"
+        if include_cost:
+            option_label += f" · {_model_cost_label(option.provider, option.model, access_mode)}"
+        options.append(
+            TerminalMenuOption(
+                value=f"{option.provider}\0{option.model}",
+                label=option_label,
+                description=" · ".join(details),
+            )
+        )
+    return tuple(options)
+
+
+def _model_cost_label(provider: str, model: str, access_mode: str) -> str:
+    if access_mode == "subscription":
+        return "Included with plan"
+    if provider == "ollama" or access_mode == "local":
+        return "No API charge"
+    pricing = model_pricing(provider, model)
+    if pricing is None:
+        return "Price unavailable"
+
+    def compact(value: Decimal) -> str:
+        return format(value.normalize(), "f")
+
+    return (
+        f"${compact(pricing.input_per_million)} in / "
+        f"${compact(pricing.output_per_million)} out per 1M"
+    )
+
+
+MODE_MENU_CHOICES: tuple[tuple[AgentMode, str, str], ...] = (
+    (
+        "auto",
+        "Auto (recommended)",
+        "adapts effort to each request",
+    ),
+    (
+        "economy",
+        "Economy",
+        "quick, concise answers · low effort",
+    ),
+    (
+        "balanced",
+        "Balanced",
+        "normal trade analysis · medium effort",
+    ),
+    (
+        "deep",
+        "Deep",
+        "complex research and backtests · high effort",
+    ),
+)
+
+
+def _mode_menu_options(current_mode: AgentMode) -> tuple[TerminalMenuOption, ...]:
+    return tuple(
+        TerminalMenuOption(
+            value=mode,
+            label=label,
+            description=("current · " if mode == current_mode else "") + description,
+        )
+        for mode, label, description in MODE_MENU_CHOICES
+    )
+
+
+def _mode_browser_summary(
+    settings: Settings,
+    *,
+    current_mode: AgentMode,
+    provider_name: str,
+    access_mode: str,
+    model_override: str | None,
+    model_controller: SessionModelController | None = None,
+) -> str:
+    provider_label = {
+        ("ollama", "local"): "Local (Ollama)",
+        ("openai", "subscription"): "ChatGPT subscription",
+        ("openai", "api"): "OpenAI API",
+        ("anthropic", "subscription"): "Claude subscription",
+        ("anthropic", "api"): "Claude API",
+    }.get((provider_name, access_mode), provider_name.title())
+    lines = [
+        f"Current: {current_mode.title()} · Provider: {provider_label}",
+        "Modes work with local, subscription, and API models.",
+        "They change response depth—not provider or trading permissions.",
+    ]
+    if model_controller is not None:
+        counts: dict[str, int] = {}
+        access_modes: dict[str, str] = {}
+        try:
+            available = model_controller.options()
+        except (ProviderConfigurationError, RuntimeError):
+            available = ()
+        for option in available:
+            counts[option.provider] = counts.get(option.provider, 0) + 1
+            access_modes[option.provider] = getattr(option, "access_mode", None) or (
+                "local" if option.local else "api"
+            )
+        provider_parts: list[str] = []
+        for candidate, product in (
+            ("ollama", "Local"),
+            ("openai", "ChatGPT"),
+            ("anthropic", "Claude"),
+        ):
+            count = counts.get(candidate, 0)
+            if count:
+                candidate_access = access_modes.get(candidate, "api")
+                access_label = (
+                    "subscription"
+                    if candidate_access == "subscription"
+                    else "local"
+                    if candidate_access == "local"
+                    else "API"
+                )
+                active = ", active" if candidate == provider_name else ""
+                display_name = (
+                    "Local" if candidate_access == "local" else f"{product} {access_label}"
+                )
+                provider_parts.append(f"{display_name} ×{count}{active}")
+            else:
+                provider_parts.append(f"{product} unavailable")
+        lines.extend(
+            (
+                "Available: " + " · ".join(provider_parts),
+                "Switch provider/model with /model browse.",
+            )
+        )
+    lines.extend(
+        (
+        "",
+        "Auto: routine/journal → Economy · normal analysis → Balanced",
+        "      research/comparisons/backtests → Deep",
+        "",
+        )
+    )
+    if model_override:
+        lines.extend(
+            (
+                f"Session model override: {model_override}",
+                "  All modes keep this model; only reasoning effort changes.",
+            )
+        )
+    elif provider_name in {"ollama", "openai", "anthropic"}:
+        fallback_model = getattr(settings, f"{provider_name}_model")
+        lines.append("Configured model profiles:")
+        for mode, effort in (
+            ("economy", "low"),
+            ("balanced", "medium"),
+            ("deep", "high"),
+        ):
+            model = getattr(settings, f"{provider_name}_{mode}_model") or fallback_model
+            lines.append(f"  {mode.title()} ({effort} effort) → {model}")
+    else:
+        lines.append("Model profiles are unavailable for this provider.")
+    return "\n".join(lines)
+
+
+def _choose_session_mode(
+    current_mode: AgentMode,
+    *,
+    browse: bool = False,
+    settings: Settings | None = None,
+    provider_name: str = "ollama",
+    access_mode: str = "local",
+    model_override: str | None = None,
+    model_controller: SessionModelController | None = None,
+) -> AgentMode | None:
+    options = _mode_menu_options(current_mode)
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        console.print(
+            "Modes: auto, economy, balanced, deep. "
+            "Use /mode NAME in a non-interactive terminal."
+        )
+        return None
+    if browse:
+        selected = choose_terminal_option(
+            "Mode browser",
+            _mode_browser_summary(
+                settings or Settings(),
+                current_mode=current_mode,
+                provider_name=provider_name,
+                access_mode=access_mode,
+                model_override=model_override,
+                model_controller=model_controller,
+            ),
+            options,
+            show_descriptions=False,
+            default=current_mode,
+        )
+    else:
+        selected = choose_inline_terminal_option("Mode ❯ ", options)
+    return next(
+        (mode for mode, _label, _description in MODE_MENU_CHOICES if mode == selected),
+        None,
+    )
+
+
+def _mode_confirmation(mode: AgentMode, *, unchanged: bool = False) -> str:
+    label = next(label for value, label, _description in MODE_MENU_CHOICES if value == mode)
+    label = label.removesuffix(" (recommended)")
+    if unchanged:
+        return f"Mode is already {label}."
+    if mode == "auto":
+        return "Mode set to Auto. Effort will adapt to each request."
+    effort = {"economy": "low", "balanced": "medium", "deep": "high"}[mode]
+    return f"Mode set to {label} ({effort} effort)."
+
+
+def _model_browser_summary(
+    controller: SessionModelController,
+    options: tuple[TerminalMenuOption, ...],
+    *,
+    current_provider: str,
+    current_model: str,
+) -> str:
+    counts = {name: 0 for name in ("ollama", "openai", "anthropic")}
+    access_modes: dict[str, str] = {}
+    for option in controller.options():
+        counts[option.provider] = counts.get(option.provider, 0) + 1
+        access_modes[option.provider] = getattr(option, "access_mode", None) or (
+            "local" if option.local else "api"
+        )
+
+    settings = controller.settings
+    lines = [f"Current: {current_provider}/{current_model}", ""]
+    if counts["ollama"]:
+        lines.append(f"Local: {counts['ollama']} installed model(s)")
+    else:
+        lines.append(
+            f"Local: unavailable · configured {settings.ollama_model} · "
+            "start Ollama or install the model"
+        )
+
+    for provider_name, product, status_reader in (
+        ("openai", "ChatGPT", codex_subscription_status),
+        ("anthropic", "Claude", claude_subscription_status),
+    ):
+        count = counts[provider_name]
+        if count:
+            access = access_modes.get(provider_name, "api")
+            source = "subscription" if access == "subscription" else "API key"
+            lines.append(f"{product}: {count} model(s) · {source}")
+            continue
+        status = status_reader()
+        try:
+            api_ready = model_api_key_configured(
+                settings,
+                provider=provider_name,  # type: ignore[arg-type]
+            )
+        except SecretBackendError:
+            api_ready = False
+        if status.ready or api_ready:
+            lines.append(f"{product}: connected, but no reviewed model was returned")
+        else:
+            lines.append(f"{product}: not connected · {status.detail}")
+        reviewed = ", ".join(sorted(SUPPORTED_CLOUD_AGENT_MODELS[provider_name]))
+        lines.append(f"  Reviewed after connection: {reviewed}")
+
+    lines.extend(
+        (
+            "",
+            f"{len(options)} selectable model(s)",
+            "Costs: API rates are input/output per 1M tokens; subscriptions are included ",
+            "with plan limits; local excludes hardware and electricity.",
+            "Provider billing is authoritative.",
+            "Only reviewed Trading Agent-compatible models are selectable.",
+        )
+    )
+    return "\n".join(lines)
+
+
+def _choose_session_model(
+    controller: SessionModelController,
+    *,
+    current_provider: str,
+    current_model: str,
+    browse: bool = False,
+) -> tuple[str, str] | None:
+    options = _model_menu_options(
+        controller,
+        current_provider=current_provider,
+        current_model=current_model,
+        include_cost=browse,
+    )
+    if not options:
+        if browse:
+            console.print(
+                Panel(
+                    _model_browser_summary(
+                        controller,
+                        options,
+                        current_provider=current_provider,
+                        current_model=current_model,
+                    ),
+                    title="Model browser",
+                )
+            )
+        else:
+            console.print("[yellow]No selectable models are currently configured.[/yellow]")
+        return None
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        table = Table(title="Selectable models")
+        table.add_column("Provider")
+        table.add_column("Model")
+        for option in options:
+            provider_name, model = option.value.split("\0", 1)
+            table.add_row(provider_name, model)
+        console.print(table)
+        console.print("[dim]Use /model use PROVIDER/MODEL in a non-interactive terminal.[/dim]")
+        return None
+    if browse:
+        selected = choose_terminal_option(
+            "Model browser",
+            _model_browser_summary(
+                controller,
+                options,
+                current_provider=current_provider,
+                current_model=current_model,
+            ),
+            options,
+            show_descriptions=False,
+            default=f"{current_provider}\0{current_model}",
+        )
+    else:
+        selected = choose_inline_terminal_option(
+            "Model ❯ ",
+            options,
+        )
+    if selected is None:
+        return None
+    provider_name, model = selected.split("\0", 1)
+    return provider_name, model
+
+
 def _request_status_label(
     prepared: PreparedAgentRequest,
-    provider_name: str,
+    provider: ModelProvider | str,
     context_count: int,
 ) -> str:
+    del context_count
     route = prepared.route
-    pricing = model_pricing(provider_name, route.model)
-    if pricing is None:
-        cost_label = "pricing unavailable"
-    elif provider_name == "ollama":
-        cost_label = "local · $0 API"
-    else:
-        input_tokens = estimated_request_tokens(
-            instructions=prepared.instructions,
-            message=prepared.message,
-            history=prepared.history,
-            tools=TOOLS,
+    provider_label = (
+        _provider_display_name(provider)
+        if not isinstance(provider, str)
+        else {"ollama": "Local", "openai": "OpenAI", "anthropic": "Claude"}.get(
+            provider,
+            provider,
         )
-        output_tokens = output_budget_for_mode(route.mode)
-        first_round = calculate_cost(
-            pricing,
-            TokenUsage(input_tokens=input_tokens, output_tokens=output_tokens),
-        )
-        total_rounds = 1 + _runtime_policy().policy.tool_policy.max_tool_rounds
-        tool_round_budget = calculate_cost(
-            pricing,
-            estimated_multi_round_usage(
-                initial_input_tokens=input_tokens,
-                output_tokens_per_round=output_tokens,
-                rounds=total_rounds,
-            ),
-        )
-        cost_label = (
-            f"~{format_usd(first_round)}–{format_usd(tool_round_budget)} estimated"
-        )
-    context_label = f"{context_count} source" if context_count == 1 else f"{context_count} sources"
-    return (
-        f"[green]Thinking[/green] · {route.mode} · {route.model} · {context_label} · {cost_label}"
     )
+    return f"[green]Thinking[/green] · {provider_label} · {route.model}"
+
+
+def _provider_display_name(provider: ModelProvider) -> str:
+    access_mode = getattr(provider, "access_mode", "api")
+    if provider.name == "ollama":
+        return "Local"
+    if provider.name == "openai":
+        return "ChatGPT subscription" if access_mode == "subscription" else "OpenAI API"
+    if provider.name == "anthropic":
+        return "Claude subscription" if access_mode == "subscription" else "Claude API"
+    return provider.name
+
+
+class ChatResponseCancelled(Exception):
+    """Internal signal used when a trader interrupts one model response."""
+
+
+def _respond_with_status(
+    agent: TradingAgent,
+    message: str,
+    history: list[dict[str, str]],
+    *,
+    mode: AgentMode,
+    prepared: PreparedAgentRequest,
+    request_status: str,
+    request_id: uuid.UUID,
+    conversation_session_id: uuid.UUID,
+    user_turn_id: uuid.UUID,
+) -> str:
+    try:
+        with ThinkingStatus(console, request_status):
+            return agent.respond(
+                message,
+                history,
+                mode=mode,
+                prepared=prepared,
+                request_id=request_id,
+                conversation_session_id=conversation_session_id,
+                user_turn_id=user_turn_id,
+            )
+    except KeyboardInterrupt as exc:
+        raise ChatResponseCancelled from exc
+
+
+def _record_cancelled_chat_request(
+    db: Any,
+    *,
+    agent: TradingAgent,
+    user_turn: ConversationTurn,
+    conversation: ConversationSession,
+    scope: RequestScope,
+    playbook_version_id: uuid.UUID | None,
+    request_id: uuid.UUID,
+) -> bool:
+    partial = bool(
+        agent.last_tool_audit is not None and agent.last_tool_audit.succeeded
+    )
+    outcome = "partial" if partial else "failed"
+    update_turn_outcome(
+        db,
+        user_turn,
+        scope=scope,
+        status=outcome,
+        error_type="UserCancelled",
+    )
+    add_turn(
+        db,
+        conversation,
+        "assistant",
+        (
+            "The response was cancelled after at least one confirmed database "
+            "change. The completed tool audit was retained."
+            if partial
+            else "The response was cancelled by the user."
+        ),
+        scope=scope,
+        playbook_version_id=playbook_version_id,
+        request_id=request_id,
+        status=outcome,
+        error_type="UserCancelled",
+    )
+    return partial
 
 
 @dataclass(frozen=True)
@@ -2976,9 +3515,12 @@ class ResponseDetails:
     usage: TokenUsage
     references: tuple[UsedReference, ...]
     performance: dict[str, float]
+    access_mode: str = "api"
 
 
 def _usage_cost_label(details: ResponseDetails) -> str:
+    if details.access_mode == "subscription":
+        return "Included with signed-in subscription"
     pricing = model_pricing(details.provider_name, details.model)
     if details.provider_name == "ollama":
         return "$0 API"
@@ -3034,6 +3576,80 @@ def _release_local_model(
     if announce:
         console.print(f"[green]Released {model} from memory.[/green]")
     return True
+
+
+def _switch_session_model(
+    settings: Settings,
+    controller: SessionModelController,
+    *,
+    provider_name: str,
+    model: str,
+    last_runtime_model: str | None,
+    conversation_turns: int,
+) -> tuple[ModelProvider, str | None] | None:
+    """Validate, disclose, and commit one session-only model switch."""
+    try:
+        selected_provider = controller.validate_selection(provider_name, model)
+    except ProviderConfigurationError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return None
+
+    if isinstance(selected_provider, OllamaProvider):
+        try:
+            assessment = _assess_ollama_model(
+                settings,
+                model,
+                selected_provider.installed_model_sizes(
+                    timeout=settings.model_discovery_timeout_seconds
+                ),
+                selected_provider.loaded_models(
+                    timeout=settings.model_discovery_timeout_seconds
+                ),
+            )
+        except ProviderConfigurationError as exc:
+            console.print(f"[red]{exc}[/red]")
+            return None
+        if assessment is not None:
+            _render_model_assessment(assessment)
+            if assessment.status == "block":
+                console.print(
+                    "[red]The session override was not changed. Close memory-heavy "
+                    "applications or choose a smaller installed model.[/red]"
+                )
+                return None
+
+    current_provider = controller.provider
+    if selected_provider.name != "ollama" and selected_provider.name != current_provider.name:
+        disclosure = {
+            "provider": (
+                "ChatGPT"
+                if selected_provider.name == "openai"
+                and getattr(selected_provider, "access_mode", "api") == "subscription"
+                else "Claude"
+                if selected_provider.name == "anthropic"
+                and getattr(selected_provider, "access_mode", "api") == "subscription"
+                else selected_provider.name
+            ),
+            "destination": f"hosted-provider:{selected_provider.name}",
+            "access_mode": getattr(selected_provider, "access_mode", "api"),
+            "conversation_turns": conversation_turns,
+            "content": "bounded recent conversation history and future session requests",
+        }
+        if not _confirm_agent_external_action(
+            "External disclosure: hosted conversation",
+            disclosure,
+        ):
+            console.print("[yellow]Hosted model switch declined.[/yellow]")
+            return None
+
+    if isinstance(current_provider, OllamaProvider) and last_runtime_model:
+        try:
+            _release_local_model(current_provider, last_runtime_model)
+        except ProviderConfigurationError as exc:
+            console.print(f"[yellow]{exc}[/yellow]")
+        last_runtime_model = None
+
+    return controller.activate(selected_provider, model), last_runtime_model
 
 
 _DOCUMENT_FENCE = re.compile(
@@ -3261,6 +3877,7 @@ def _render_agent_reply(
     usage: TokenUsage,
     references: list[UsedReference],
     performance: dict[str, float] | None = None,
+    access_mode: str = "api",
 ) -> ResponseDetails:
     details = ResponseDetails(
         route_label=route_label,
@@ -3270,6 +3887,7 @@ def _render_agent_reply(
         usage=usage,
         references=tuple(references),
         performance=dict(performance or {}),
+        access_mode=access_mode,
     )
     console.print()
     console.print("[bold green]Trading Agent[/bold green] [bold]❯[/bold]")
@@ -3283,8 +3901,6 @@ def _render_agent_reply(
                 (f"{details.performance.get('output_tokens_per_second', 0):g} tok/s"),
             ]
         )
-    if provider_name != "ollama":
-        detail_parts.append(_usage_cost_label(details))
     source_label = (
         f"{len(references)} source" if len(references) == 1 else f"{len(references)} sources"
     )
@@ -4566,6 +5182,7 @@ def _handle_chat_clipboard_chart_intent(
     conversation: ConversationSession,
     message: str,
     *,
+    provider: ModelProvider | None = None,
     model: str | None,
     reasoning_effort: str,
     clipboard_image: ClipboardImage | None = None,
@@ -4587,13 +5204,10 @@ def _handle_chat_clipboard_chart_intent(
         scope=scope,
         playbook_version_id=playbook_version_id,
     )
-    console.print(
-        "[dim]Reading the copied image, checking what is visible, and preparing "
-        "a chart review…[/dim]"
-    )
+    console.print("[dim]Analyzing copied chart…[/dim]")
     chart_context = message.replace(IMAGE_MARKER, "").strip() or "Analyze this copied chart."
     try:
-        if clipboard_image is None:
+        if provider is None and clipboard_image is None:
             chart(
                 image=None,
                 clipboard=True,
@@ -4617,9 +5231,28 @@ def _handle_chat_clipboard_chart_intent(
                 timeframe=None,
                 market_time=None,
                 trade_plan=None,
+                provider=provider,
                 model=model,
                 reasoning_effort=reasoning_effort,
+                interactive_chat=True,
             )
+    except KeyboardInterrupt:
+        add_turn(
+            db,
+            conversation,
+            "assistant",
+            "The copied chart review was cancelled by the user. Nothing was saved, "
+            "and the conversation remained open.",
+            scope=scope,
+            playbook_version_id=playbook_version_id,
+            status="failed",
+            error_type="CancelledByTrader",
+        )
+        console.print()
+        console.print(
+            "[yellow]Chart review cancelled. You are still in this chat.[/yellow]"
+        )
+        return True
     except typer.Exit as exc:
         add_turn(
             db,
@@ -4799,14 +5432,84 @@ def _automatic_chat_trade_context(
     )
 
 
+def _mutation_confirmation_prompt(action: str, arguments: dict) -> str:
+    """Describe a durable action without exposing internal payloads or secrets."""
+    name = action.removeprefix("Policy-approved mutation: ")
+    if name == "create_trade_plan":
+        instrument = arguments.get("instrument") or "this instrument"
+        direction = arguments.get("direction")
+        qualifier = f" {direction}" if direction else ""
+        return f"Save this {instrument}{qualifier} trade plan?"
+    if name == "add_trade_reflection":
+        return "Save this trade reflection?"
+    if name in {"add_mindset_checkin", "record_mindset_check_in"}:
+        return "Save this mindset check-in?"
+    if name == "analyze_chart":
+        return "Analyze and save this chart?"
+    if name == "record_chart_feedback":
+        return "Save this correction with the chart?"
+    if name in {"create_strategy_version", "create_playbook_version"}:
+        strategy = arguments.get("name") or arguments.get("strategy")
+        return f"Save strategy {strategy}?" if strategy else "Save this strategy?"
+    if name == "set_session_strategy":
+        strategy = arguments.get("strategy") or "this strategy"
+        return f"Use {strategy} for this conversation?"
+    if name == "clear_session_strategy":
+        return "Clear the strategy from this conversation?"
+    if name == "select_trading_account":
+        account = arguments.get("account") or "this account"
+        return f"Use {account} for new conversations?"
+    if name in {"synchronize_broker", "sync_broker_history"}:
+        return "Import the latest read-only broker history?"
+    if name == "import_tradingview_history":
+        return "Import these TradingView Paper Trading records into the journal?"
+    if name == "synchronize_news":
+        return "Refresh the stored economic calendar?"
+    labels = {
+        "add_learning_module": "Save this learning module?",
+        "update_learning_progress": "Save this learning progress?",
+        "set_learning_preferences": "Save these learning preferences?",
+        "create_strategy_experiment": "Create this strategy experiment?",
+        "complete_strategy_experiment": "Complete this strategy experiment?",
+        "add_strategy_test_sample": "Save this strategy test sample?",
+        "complete_pretrade_workflow": "Save this pre-trade decision?",
+        "record_management_event": "Save this trade-management event?",
+        "import_strategy_knowledge": "Import this strategy knowledge?",
+        "exclude_strategy_knowledge": "Exclude this strategy knowledge item?",
+        "restore_strategy_knowledge": "Restore this strategy knowledge item?",
+        "configure_broker_connection": "Save this read-only broker connection?",
+        "configure_agent_provider": "Save this model-provider configuration?",
+    }
+    return labels.get(name, f"Confirm {name.replace('_', ' ')}?")
+
+
 def _confirm_agent_mutation(action: str, arguments: dict) -> bool:
-    console.print(Panel(Text(json.dumps(arguments, indent=2)), title=action))
-    return typer.confirm("Apply this exact database change?")
+    return typer.confirm(_mutation_confirmation_prompt(action, arguments))
 
 
 def _confirm_agent_external_action(action: str, arguments: dict) -> bool:
-    console.print(Panel(Text(json.dumps(arguments, indent=2)), title=action))
-    return typer.confirm("Send this exact query to the external search provider?")
+    provider = str(arguments.get("provider") or "hosted provider")
+    provider_label = {
+        "openai": "OpenAI",
+        "anthropic": "Anthropic",
+        "brave": "Brave Search",
+    }.get(provider.casefold(), provider)
+    if action == "External disclosure: hosted conversation":
+        prompt = (
+            f"Use {provider_label} for this conversation? Recent chat context and "
+            "future requests will be sent to that provider."
+        )
+    elif action == "External disclosure: hosted chart analysis":
+        prompt = f"Send this chart and its context to {provider_label} for analysis?"
+    elif action == "External disclosure: tier-3 web search":
+        query = " ".join(str(arguments.get("query") or "this request").split())[:160]
+        prompt = f'Search the web for “{query}” with {provider_label}?'
+    elif action == "External disclosure: documented web page":
+        url = str(arguments.get("url") or arguments.get("destination") or "the page")
+        prompt = f"Open {url[:200]} to answer this request?"
+    else:
+        prompt = f"Allow this request to {provider_label}?"
+    return typer.confirm(prompt)
 
 
 def _render_development_session(session: object) -> None:
@@ -4939,6 +5642,155 @@ def _offer_starter_profile(db, settings: Settings, *, scope: RequestScope) -> bo
     return False
 
 
+def _matches_chat_command(message: str, command: str) -> bool:
+    """Match a slash command as a complete token, not as a string prefix."""
+    return bool(message) and message.split(maxsplit=1)[0] == command
+
+
+CHAT_COMMAND_OPTIONS = (
+    TerminalMenuOption("/account", "/account", "choose the account for new sessions"),
+    TerminalMenuOption("/clear", "/clear", "start a fresh conversation"),
+    TerminalMenuOption(
+        "/connect",
+        "/connect",
+        "import TradingView paper trades",
+    ),
+    TerminalMenuOption("/context", "/context", "show context used for the last response"),
+    TerminalMenuOption("/cost", "/cost", "show configured model prices"),
+    TerminalMenuOption("/details", "/details", "show the full response audit"),
+    TerminalMenuOption("/develop", "/develop", "request an isolated software change"),
+    TerminalMenuOption("/examples", "/examples", "show starter prompts"),
+    TerminalMenuOption("/exit", "/exit", "leave Trading Agent"),
+    TerminalMenuOption("/health", "/health", "run diagnostics"),
+    TerminalMenuOption("/import", "/import", "import TradingView paper trades"),
+    TerminalMenuOption("/help", "/help", "show all commands"),
+    TerminalMenuOption("/learn", "/learn", "open the learning curriculum"),
+    TerminalMenuOption("/memory", "/memory", "show source-backed recall"),
+    TerminalMenuOption("/mode", "/mode", "choose model effort"),
+    TerminalMenuOption("/mode browse", "/mode browse", "open the detailed mode browser"),
+    TerminalMenuOption("/model", "/model", "choose a local or cloud model"),
+    TerminalMenuOption("/model browse", "/model browse", "open the full model browser"),
+    TerminalMenuOption("/new", "/new", "start a fresh conversation"),
+    TerminalMenuOption("/onboard", "/onboard", "update guided setup"),
+    TerminalMenuOption("/resume", "/resume", "switch to a saved conversation"),
+    TerminalMenuOption("/sources", "/sources", "show response references"),
+    TerminalMenuOption("/strategy", "/strategy", "choose an isolated strategy"),
+)
+
+
+def _chat_completion_options(
+    entered: str,
+    *,
+    db,
+    scope: RequestScope,
+    model_controller: SessionModelController,
+    current_provider: str,
+    current_model: str,
+) -> tuple[TerminalMenuOption, ...]:
+    """Return slash commands plus relevant strategy/model values on demand."""
+    options = list(CHAT_COMMAND_OPTIONS)
+    normalized = entered.casefold()
+    if normalized.startswith("/strategy"):
+        options.append(
+            TerminalMenuOption(
+                "/strategy clear",
+                "/strategy clear",
+                "disable strategy-specific retrieval",
+            )
+        )
+        options.extend(
+            TerminalMenuOption(
+                f"/strategy use {item.name}",
+                f"/strategy use {item.name}",
+                "activate this saved strategy for the session",
+            )
+            for item in list_strategy_summaries(db, scope=scope)
+        )
+        options.extend(
+            TerminalMenuOption(
+                f"/strategy draft {item['name']}",
+                f"/strategy draft {item['name']}",
+                "review this local draft before saving it",
+            )
+            for item in list_local_strategy_templates()
+        )
+    if normalized.startswith("/model"):
+        options.extend(
+            (
+                TerminalMenuOption(
+                    "/model browse",
+                    "/model browse",
+                    "open the full provider and model browser",
+                ),
+                TerminalMenuOption(
+                    "/model auto",
+                    "/model auto",
+                    "return to automatic profile routing",
+                ),
+                TerminalMenuOption(
+                    "/model unload",
+                    "/model unload",
+                    "release this session's local model",
+                ),
+            )
+        )
+        try:
+            model_options = _model_menu_options(
+                model_controller,
+                current_provider=current_provider,
+                current_model=current_model,
+            )
+        except (ProviderConfigurationError, RuntimeError):
+            model_options = ()
+        options.extend(
+            TerminalMenuOption(
+                f"/model use {item.value.replace(chr(0), '/')}",
+                f"/model use {item.value.replace(chr(0), '/')}",
+                item.description,
+            )
+            for item in model_options
+        )
+    if normalized.startswith("/mode"):
+        options.append(
+            TerminalMenuOption(
+                "/mode browse",
+                "/mode browse",
+                "compare routing, effort, and configured models",
+            )
+        )
+        options.extend(
+            TerminalMenuOption(f"/mode {mode}", f"/mode {mode}", description)
+            for mode, _label, description in MODE_MENU_CHOICES
+        )
+    if normalized.startswith("/memory"):
+        options.extend(
+            (
+                TerminalMenuOption("/memory use", "/memory use", "include recall once"),
+                TerminalMenuOption("/memory off", "/memory off", "clear pending recall"),
+            )
+        )
+    if normalized.startswith("/resume"):
+        options.extend(
+            TerminalMenuOption(
+                f"/resume {item.name}",
+                f"/resume {item.name}",
+                item.title,
+            )
+            for item in list_conversations(db, limit=12, scope=scope)
+        )
+    return tuple(options)
+
+
+def _chat_command_suggestion(message: str) -> str | None:
+    """Suggest a known root command for a mistyped slash command."""
+    token = message.split(maxsplit=1)[0].casefold()
+    roots = [option.value for option in CHAT_COMMAND_OPTIONS]
+    if token in roots:
+        return None
+    matches = difflib.get_close_matches(token, roots, n=1, cutoff=0.55)
+    return matches[0] if matches else None
+
+
 def _run_chat(
     session_reference: str | None,
     new_session: bool,
@@ -4991,6 +5843,7 @@ def _run_chat(
     except ProviderConfigurationError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
+    model_controller = SessionModelController(settings, provider)
     if session_reference and (new_session or session_name):
         console.print("[red]Use either --session or --new/--name, not both.[/red]")
         raise typer.Exit(2)
@@ -5108,11 +5961,22 @@ def _run_chat(
         console.print(
             "[dim]Type naturally · Ctrl-V attaches a screenshot · /help for commands · "
             "/examples for ideas · "
-            "/exit to leave[/dim]\n"
+            "Ctrl-C cancels a response · /exit to leave[/dim]\n"
         )
-        queued_message = _prompt_startup_action()
+        # Quick starts help a brand-new conversation, but become repetitive when
+        # reopening an existing session with usable history.
+        queued_message = _prompt_startup_action() if not transcript else None
         clipboard_prompt = (
-            ClipboardChatPrompt()
+            ClipboardChatPrompt(
+                command_options=lambda entered: _chat_completion_options(
+                    entered,
+                    db=db,
+                    scope=scope,
+                    model_controller=model_controller,
+                    current_provider=provider.name,
+                    current_model=current_model_override or provider.model,
+                )
+            )
             if sys.stdin.isatty() and sys.stdout.isatty()
             else None
         )
@@ -5135,9 +5999,15 @@ def _run_chat(
                         prompt_result = clipboard_prompt.read()
                         message = prompt_result.text
                         clipboard_image = prompt_result.clipboard_image
-                except (EOFError, KeyboardInterrupt):
+                except EOFError:
                     console.print()
                     break
+                except KeyboardInterrupt:
+                    console.print(
+                        "\n[yellow]Input cancelled.[/yellow] "
+                        "What would you like to do instead?"
+                    )
+                    continue
             if not message:
                 continue
             if message in {"/exit", "/quit"}:
@@ -5146,6 +6016,8 @@ def _run_chat(
                 console.print(
                     "/exit · leave\n"
                     "/health · run diagnostics\n"
+                    "/import · import TradingView Paper Trading history\n"
+                    "/connect · import TradingView Paper Trading history\n"
                     "/onboard · update guided setup and return here\n"
                     "/examples · show starter prompts\n"
                     "/cost · show configured model prices\n"
@@ -5155,20 +6027,116 @@ def _run_chat(
                     "/memory · show source-backed goals and recent records in scope\n"
                     "/memory use · include bounded recall in the next model request\n"
                     "/memory off · cancel pending recall\n"
+                    "/new or /clear · start a fresh conversation\n"
+                    "/resume · switch to a saved conversation\n"
+                    "/account · choose the default account for new sessions\n"
                     "/strategy · show active isolated strategy\n"
                     "/strategy use NAME · switch to exactly one strategy version\n"
                     "/strategy clear · disable strategy-specific retrieval\n"
                     "/learn · show curriculum and next lesson\n"
                     "/learn LESSON · begin a sourced teaching conversation\n"
-                    "/mode auto|economy|balanced|deep · choose model effort\n"
-                    "/model · show local model profiles\n"
-                    "/model use NAME · override the local model for this session\n"
+                    "/mode · choose response effort\n"
+                    "/mode browse · compare routing, effort, and configured models\n"
+                    "/mode auto|economy|balanced|deep · set it directly\n"
+                    "/model · choose a configured local or cloud model\n"
+                    "/model browse · open the full provider and model browser\n"
+                    "/model use NAME or PROVIDER/NAME · override this session\n"
                     "/model auto · return to automatic profile routing\n"
                     "/model unload · release this session's local model from memory\n"
                     "/develop <change> · hand a software change to the coding agent\n"
                     "Clear software-change requests also offer a development handoff.\n"
+                    "Press Ctrl-C while the agent is working to cancel only that response.\n"
                     "Everything else is natural language. Press Ctrl-V to attach a copied "
                     "screenshot, or say 'analyze my copied chart'—no file path needed."
+                )
+                continue
+            if message == "/clear" or _matches_chat_command(message, "/new"):
+                requested_name = (
+                    message.removeprefix("/new").strip()
+                    if message.startswith("/new")
+                    else ""
+                )
+                try:
+                    conversation = create_conversation(
+                        db,
+                        name=requested_name or None,
+                        scope=scope,
+                    )
+                except ValueError as exc:
+                    console.print(f"[red]{exc}[/red]")
+                    continue
+                active_strategy = None
+                agent.active_playbook_version_id = None
+                agent.last_references = []
+                agent.last_tool_audit = None
+                startup_memory = build_startup_memory(db, conversation, scope=scope)
+                startup_memory_pending = False
+                last_response_details = None
+                console.print(
+                    f"[green]New conversation ready.[/green] "
+                    f"[dim]{conversation.name}[/dim]"
+                )
+                continue
+            if _matches_chat_command(message, "/resume"):
+                requested_session = message.removeprefix("/resume").strip()
+                if not requested_session:
+                    conversations = list_conversations(db, limit=20, scope=scope)
+                    if not conversations:
+                        console.print("[dim]No saved conversations yet.[/dim]")
+                        continue
+                    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+                        names = ", ".join(item.name for item in conversations)
+                        console.print(
+                            f"Saved conversations: {escape_markup(names)}. "
+                            "Use /resume NAME."
+                        )
+                        continue
+                    selected_session = choose_terminal_option(
+                        "Resume conversation",
+                        "Choose a conversation in this account.",
+                        tuple(
+                            TerminalMenuOption(
+                                value=str(item.id),
+                                label=item.name,
+                                description=(
+                                    "current" if item.id == conversation.id else item.title
+                                ),
+                            )
+                            for item in conversations
+                        ),
+                    )
+                    if selected_session is None:
+                        continue
+                    resumed = next(
+                        item
+                        for item in conversations
+                        if str(item.id) == selected_session
+                    )
+                else:
+                    resumed = resolve_conversation(db, requested_session, scope=scope)
+                    if resumed is None:
+                        console.print(
+                            f"[red]Conversation not found: "
+                            f"{escape_markup(requested_session)}[/red]"
+                        )
+                        continue
+                conversation = resumed
+                active_strategy = active_session_strategy(
+                    db,
+                    conversation,
+                    scope=scope,
+                )
+                agent.active_playbook_version_id = (
+                    active_strategy[1].id if active_strategy is not None else None
+                )
+                agent.last_references = []
+                agent.last_tool_audit = None
+                startup_memory = build_startup_memory(db, conversation, scope=scope)
+                startup_memory_pending = False
+                last_response_details = None
+                console.print(
+                    f"[green]Resumed {escape_markup(conversation.name)}.[/green] "
+                    "What would you like to do next?"
                 )
                 continue
             if message == "/onboard":
@@ -5176,6 +6144,7 @@ def _run_chat(
                     get_settings.cache_clear()
                     settings = get_settings()
                     agent.settings = settings
+                    model_controller.settings = settings
                     current_mode = settings.agent_mode
                     startup_memory = build_startup_memory(
                         db,
@@ -5189,7 +6158,7 @@ def _run_chat(
                 _render_starter_prompts()
                 continue
             if message == "/cost":
-                _render_cost_table(settings, provider.name, provider.model)
+                _render_cost_table(settings, provider, provider.model)
                 continue
             if message == "/details":
                 if last_response_details is None:
@@ -5246,6 +6215,129 @@ def _run_chat(
                 startup_memory_pending = False
                 console.print("[dim]Pending recall was cleared.[/dim]")
                 continue
+            if message == "/account":
+                workspace = _configured_workspace(db)
+                accounts = list_accounts(db, workspace.id, active_only=True)
+                options = tuple(
+                    TerminalMenuOption(
+                        value=str(account.id),
+                        label=account.label,
+                        description=(
+                            f"{account.broker} · "
+                            f"{_display_account_mode(account.broker, account.mode)} · "
+                            + (
+                                "current session"
+                                if account.id == scope.account_id
+                                else "new sessions"
+                            )
+                        ),
+                    )
+                    for account in accounts
+                )
+                if not (sys.stdin.isatty() and sys.stdout.isatty()):
+                    console.print(
+                        "[dim]Use `trade account list` and `trade account use NAME` "
+                        "outside an interactive terminal.[/dim]"
+                    )
+                    continue
+                selected_account_id = choose_terminal_option(
+                    "Choose account",
+                    "The current conversation remains attached to its original account.",
+                    options,
+                )
+                if selected_account_id is None:
+                    continue
+                account = next(
+                    item for item in accounts if str(item.id) == selected_account_id
+                )
+                if account.id == scope.account_id:
+                    console.print(f"[dim]{account.label} already owns this session.[/dim]")
+                    continue
+                try:
+                    _authorize_direct(
+                        "select_trading_account",
+                        {
+                            "workspace": workspace.slug,
+                            "account": account.label,
+                            "broker": account.broker,
+                            "mode": _display_account_mode(account.broker, account.mode),
+                        },
+                        mutating=True,
+                    )
+                except PolicyViolation as exc:
+                    console.print(f"[red]{exc}[/red]")
+                    continue
+                config_path = default_config_path()
+                env_snapshot = snapshot_env_file(config_path)
+                try:
+                    update_env_file(
+                        config_path,
+                        {
+                            "TRADING_WORKSPACE": workspace.slug,
+                            "TRADING_ACCOUNT": str(account.id),
+                        },
+                    )
+                    for candidate in accounts:
+                        candidate.is_default = candidate.id == account.id
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    restore_env_file(config_path, env_snapshot)
+                    raise
+                get_settings.cache_clear()
+                console.print(
+                    f"[green]{account.label} will be used for new sessions.[/green] "
+                    "[dim]This conversation remains isolated to its original account.[/dim]"
+                )
+                continue
+            if _matches_chat_command(message, "/connect"):
+                requested_connection = message.removeprefix("/connect").strip()
+                normalized_connection = requested_connection.casefold()
+                if requested_connection and normalized_connection not in {
+                    "tradingview",
+                    "trading view",
+                    "tradingview alerts",
+                    "trading view alerts",
+                    "alerts",
+                }:
+                    console.print(
+                        "[yellow]The guided connection available here is TradingView "
+                        "Paper Trading history.[/yellow] Use [cyan]/connect[/cyan] without "
+                        "extra text."
+                    )
+                    continue
+                if "alert" not in normalized_connection:
+                    try:
+                        _run_tradingview_import_flow(db, scope=scope, path=None)
+                    except (LookupError, TradingViewImportError, PolicyViolation) as exc:
+                        console.print(f"[red]{escape_markup(str(exc))}[/red]")
+                        console.print("[dim]Nothing was changed.[/dim]")
+                    continue
+                try:
+                    changed = _configure_tradingview_alerts(db, public_url=None)
+                except (LookupError, ValueError, PolicyViolation) as exc:
+                    console.print(f"[red]{escape_markup(str(exc))}[/red]")
+                    continue
+                if changed:
+                    get_settings.cache_clear()
+                    settings = get_settings()
+                    agent.settings = settings
+                continue
+            if _matches_chat_command(message, "/import"):
+                requested_path = message.removeprefix("/import").strip()
+                path = _tradingview_csv_path(requested_path) if requested_path else None
+                if requested_path and path is None:
+                    console.print(
+                        "[red]Drag one TradingView CSV after /import, or use /import "
+                        "by itself for guidance.[/red]"
+                    )
+                    continue
+                try:
+                    _run_tradingview_import_flow(db, scope=scope, path=path)
+                except (LookupError, TradingViewImportError, PolicyViolation) as exc:
+                    console.print(f"[red]{escape_markup(str(exc))}[/red]")
+                    console.print("[dim]Nothing was changed.[/dim]")
+                continue
             if message == "/learn":
                 try:
                     _, curriculum, learning_scope = _learning_context(db)
@@ -5272,9 +6364,48 @@ def _run_chat(
                     conversation,
                     scope=scope,
                 )
-                if active_strategy is None:
-                    summaries = list_strategy_summaries(db, scope=scope)
-                    drafts = list_local_strategy_templates()
+                summaries = list_strategy_summaries(db, scope=scope)
+                drafts = list_local_strategy_templates()
+                if sys.stdin.isatty() and sys.stdout.isatty() and (summaries or drafts):
+                    strategy_options = tuple(
+                        TerminalMenuOption(
+                            value=f"use\0{item.name}",
+                            label=item.name,
+                            description=(
+                                "current"
+                                if active_strategy is not None
+                                and active_strategy[0].name == item.name
+                                else "switch this session"
+                            ),
+                        )
+                        for item in summaries
+                    ) + tuple(
+                        TerminalMenuOption(
+                            value=f"draft\0{item['name']}",
+                            label=f"{item['name']} (draft)",
+                            description="review before saving or activating",
+                        )
+                        for item in drafts
+                    ) + (
+                        TerminalMenuOption(
+                            value="clear",
+                            label="No active strategy",
+                            description="disable strategy-specific retrieval",
+                        ),
+                    )
+                    selected_strategy = choose_terminal_option(
+                        "Choose strategy",
+                        "Only the selected strategy version will be retrieved.",
+                        strategy_options,
+                    )
+                    if selected_strategy is None:
+                        continue
+                    if selected_strategy == "clear":
+                        message = "/strategy clear"
+                    else:
+                        action, strategy_name = selected_strategy.split("\0", 1)
+                        message = f"/strategy {action} {strategy_name}"
+                elif active_strategy is None:
                     if summaries:
                         names = ", ".join(item.name for item in summaries)
                         console.print(
@@ -5292,11 +6423,46 @@ def _run_chat(
                             "No strategy is active or saved. Ask me to build one "
                             "conversationally."
                         )
+                    continue
                 else:
                     console.print(
                         f"{active_strategy[0].name} v{active_strategy[1].version} · "
                         f"sha256={active_strategy[1].content_hash[:12]}"
                     )
+                    if summaries:
+                        console.print(
+                            "Saved strategies: "
+                            + ", ".join(item.name for item in summaries)
+                        )
+                    if drafts:
+                        console.print(
+                            "Draft templates: "
+                            + ", ".join(item["name"] for item in drafts)
+                        )
+                    continue
+            if message.startswith("/strategy draft "):
+                draft_name = message.removeprefix("/strategy draft ").strip()
+                draft = next(
+                    (
+                        item
+                        for item in list_local_strategy_templates()
+                        if item["name"].casefold() == draft_name.casefold()
+                    ),
+                    None,
+                )
+                if draft is None:
+                    console.print(f"[red]Strategy draft not found: {draft_name}[/red]")
+                    continue
+                console.print(
+                    Panel(
+                        f"Methodology: {escape_markup(draft['methodology'])}\n"
+                        f"Objective: {escape_markup(draft['objective'])}\n"
+                        f"Source: {escape_markup(draft['path'])}\n\n"
+                        "This is a draft, not an active strategy. Ask me to review and "
+                        "save it when you are ready.",
+                        title=f"{escape_markup(draft['name'])} · draft",
+                    )
+                )
                 continue
             if message.startswith("/strategy use "):
                 strategy_name = message.removeprefix("/strategy use ").strip()
@@ -5368,34 +6534,71 @@ def _run_chat(
                 )
                 _render_startup_memory(startup_memory)
                 continue
-            if message.startswith("/mode"):
+            if _matches_chat_command(message, "/mode"):
                 requested_mode = message.removeprefix("/mode").strip()
+                browse_modes = requested_mode == "browse"
+                if not requested_mode or browse_modes:
+                    selected_mode = _choose_session_mode(
+                        current_mode,
+                        browse=browse_modes,
+                        settings=settings,
+                        provider_name=provider.name,
+                        access_mode=str(getattr(provider, "access_mode", "api")),
+                        model_override=current_model_override,
+                        model_controller=model_controller,
+                    )
+                    if selected_mode is None:
+                        continue
+                    requested_mode = selected_mode
                 if requested_mode not in {"auto", "economy", "balanced", "deep"}:
                     console.print("[red]Use /mode auto|economy|balanced|deep[/red]")
                     continue
+                unchanged = requested_mode == current_mode
                 current_mode = requested_mode  # type: ignore[assignment]
-                console.print(f"[green]Model mode is now {current_mode}.[/green]")
+                console.print(
+                    f"[green]{_mode_confirmation(current_mode, unchanged=unchanged)}[/green]"
+                )
                 continue
-            if message == "/model":
-                if not isinstance(provider, OllamaProvider):
-                    console.print(
-                        f"Current provider is {provider.name}. Use /mode for configured "
-                        "API model tiers."
-                    )
-                    continue
+            if message in {"/model", "/model browse"}:
                 try:
-                    _render_ollama_models(
-                        settings,
-                        provider.installed_model_sizes(),
-                        provider.loaded_models(),
+                    selection = _choose_session_model(
+                        model_controller,
+                        current_provider=provider.name,
+                        current_model=current_model_override or provider.model,
+                        browse=message == "/model browse",
                     )
                 except ProviderConfigurationError as exc:
                     console.print(f"[red]{exc}[/red]")
                     continue
-                if current_model_override:
-                    console.print(f"[green]Session override: {current_model_override}[/green]")
-                else:
-                    console.print("[dim]Session override: automatic routing[/dim]")
+                if selection is None:
+                    continue
+                selected_provider_name, selected_model = selection
+                switched = _switch_session_model(
+                    settings,
+                    model_controller,
+                    provider_name=selected_provider_name,
+                    model=selected_model,
+                    last_runtime_model=last_runtime_model,
+                    conversation_turns=len(
+                        conversation_history(
+                            db,
+                            conversation,
+                            scope=scope,
+                            playbook_version_id=conversation.active_playbook_version_id,
+                            limit=settings.model_history_turn_limit,
+                        )
+                    ),
+                )
+                if switched is None:
+                    continue
+                provider, last_runtime_model = switched
+                agent.provider = provider
+                current_model_override = selected_model
+                provider_label = _provider_display_name(provider)
+                console.print(
+                    f"[green]Using {provider_label} · {selected_model} for this "
+                    "conversation.[/green]"
+                )
                 continue
             if message == "/model auto":
                 if isinstance(provider, OllamaProvider) and last_runtime_model:
@@ -5405,6 +6608,7 @@ def _run_chat(
                         console.print(f"[yellow]{exc}[/yellow]")
                     last_runtime_model = None
                 current_model_override = None
+                model_controller.automatic_profile()
                 console.print("[green]Returned to automatic model-profile routing.[/green]")
                 continue
             if message == "/model unload":
@@ -5426,53 +6630,88 @@ def _run_chat(
                 last_runtime_model = None
                 continue
             if message.startswith("/model use "):
-                if not isinstance(provider, OllamaProvider):
-                    console.print(
-                        "[red]Direct /model switching is available for local Ollama; "
-                        "API providers use configured /mode tiers.[/red]"
-                    )
-                    continue
-                selected_model = message.removeprefix("/model use ").strip()
-                try:
-                    installed = provider.installed_models()
-                except ProviderConfigurationError as exc:
-                    console.print(f"[red]{exc}[/red]")
-                    continue
-                if selected_model not in installed:
-                    console.print(
-                        f"[red]{selected_model} is not installed. In another terminal run "
-                        f"`trade models pull {selected_model}`.[/red]"
-                    )
-                    continue
-                if last_runtime_model and last_runtime_model != selected_model:
-                    try:
-                        _release_local_model(provider, last_runtime_model)
-                    except ProviderConfigurationError as exc:
-                        console.print(f"[yellow]{exc}[/yellow]")
-                    last_runtime_model = None
-                try:
-                    assessment = _assess_ollama_model(
-                        settings,
-                        selected_model,
-                        provider.installed_model_sizes(),
-                        provider.loaded_models(),
-                    )
-                except ProviderConfigurationError as exc:
-                    console.print(f"[red]{exc}[/red]")
-                    continue
-                if assessment is not None:
-                    _render_model_assessment(assessment)
-                    if assessment.status == "block":
-                        console.print(
-                            "[red]The session override was not changed. Close memory-heavy "
-                            "applications or choose a smaller installed model.[/red]"
+                requested = message.removeprefix("/model use ").strip()
+                if "/" in requested:
+                    selected_provider_name, selected_model = requested.split("/", 1)
+                    selected_provider_name = selected_provider_name.casefold().strip()
+                    selected_model = selected_model.strip()
+                else:
+                    selected_provider_name = provider.name
+                    selected_model = requested
+                switched = _switch_session_model(
+                    settings,
+                    model_controller,
+                    provider_name=selected_provider_name,
+                    model=selected_model,
+                    last_runtime_model=last_runtime_model,
+                    conversation_turns=len(
+                        conversation_history(
+                            db,
+                            conversation,
+                            scope=scope,
+                            playbook_version_id=conversation.active_playbook_version_id,
+                            limit=settings.model_history_turn_limit,
                         )
-                        continue
-                current_model_override = selected_model
-                console.print(
-                    f"[green]This session now uses {selected_model}; /mode still controls "
-                    "reasoning effort.[/green]"
+                    ),
                 )
+                if switched is None:
+                    continue
+                provider, last_runtime_model = switched
+                agent.provider = provider
+                current_model_override = selected_model
+                provider_label = _provider_display_name(provider)
+                console.print(
+                    f"[green]Using {provider_label} · {selected_model} for this "
+                    "conversation.[/green]"
+                )
+                continue
+            if is_tradingview_history_import_request(message):
+                path = _tradingview_csv_path(message)
+                try:
+                    _run_tradingview_import_flow(db, scope=scope, path=path)
+                except (LookupError, TradingViewImportError, PolicyViolation) as exc:
+                    console.print(f"[red]{escape_markup(str(exc))}[/red]")
+                    console.print("[dim]Nothing was changed.[/dim]")
+                continue
+            if is_tradingview_connection_request(message):
+                normalized_connection = message.casefold()
+                if not any(
+                    term in normalized_connection for term in ("alert", "webhook")
+                ):
+                    try:
+                        _run_tradingview_import_flow(db, scope=scope, path=None)
+                    except (LookupError, TradingViewImportError, PolicyViolation) as exc:
+                        console.print(f"[red]{escape_markup(str(exc))}[/red]")
+                        console.print("[dim]Nothing was changed.[/dim]")
+                    continue
+                try:
+                    changed = _configure_tradingview_alerts(
+                        db,
+                        public_url=None,
+                    )
+                except (LookupError, ValueError, PolicyViolation) as exc:
+                    console.print(f"[red]{escape_markup(str(exc))}[/red]")
+                    continue
+                if changed:
+                    get_settings.cache_clear()
+                    settings = get_settings()
+                    agent.settings = settings
+                continue
+            if message.startswith("/") and not _matches_chat_command(
+                message,
+                "/develop",
+            ):
+                suggestion = _chat_command_suggestion(message)
+                if suggestion is not None:
+                    console.print(
+                        f"[yellow]Unknown command.[/yellow] Did you mean "
+                        f"[cyan]{suggestion}[/cyan]?"
+                    )
+                else:
+                    console.print(
+                        "[yellow]Unknown command.[/yellow] Type [cyan]/help[/cyan] "
+                        "to see available commands."
+                    )
                 continue
             chart_effort = {
                 "economy": "low",
@@ -5484,6 +6723,7 @@ def _run_chat(
                 db,
                 conversation,
                 message,
+                provider=provider,
                 model=current_model_override,
                 reasoning_effort=chart_effort,
                 clipboard_image=clipboard_image,
@@ -5717,21 +6957,43 @@ def _run_chat(
                         _render_model_assessment(assessment, compact=True)
                 request_status = _request_status_label(
                     prepared,
-                    provider.name,
+                    provider,
                     len(agent.last_harness_context.paths),
                 )
-                with console.status(request_status, spinner="dots"):
-                    reply = agent.respond(
-                        message,
-                        history,
-                        mode=current_mode,
-                        prepared=prepared,
-                        request_id=request_id,
-                        conversation_session_id=conversation.id,
-                        user_turn_id=user_turn.id,
-                    )
+                reply = _respond_with_status(
+                    agent,
+                    message,
+                    history,
+                    mode=current_mode,
+                    prepared=prepared,
+                    request_status=request_status,
+                    request_id=request_id,
+                    conversation_session_id=conversation.id,
+                    user_turn_id=user_turn.id,
+                )
                 if isinstance(provider, OllamaProvider):
                     last_runtime_model = prepared.route.model
+            except (KeyboardInterrupt, ChatResponseCancelled):
+                partial = _record_cancelled_chat_request(
+                    db,
+                    agent=agent,
+                    user_turn=user_turn,
+                    conversation=conversation,
+                    scope=scope,
+                    playbook_version_id=request_playbook_version_id,
+                    request_id=request_id,
+                )
+                console.print()
+                if partial:
+                    console.print(
+                        "[yellow]Response cancelled. A confirmed change completed "
+                        "before cancellation and remains recorded.[/yellow]"
+                    )
+                else:
+                    console.print(
+                        "[yellow]Response cancelled. You are still in this chat.[/yellow]"
+                    )
+                continue
             except Exception as exc:
                 partial = bool(
                     agent.last_tool_audit is not None
@@ -5791,16 +7053,24 @@ def _run_chat(
             )
             context_paths = agent.last_harness_context.paths
             usage = getattr(provider, "last_usage", TokenUsage())
-            last_response_details = _render_agent_reply(
-                reply,
-                route_label,
-                len(context_paths),
-                route.provider if route else provider.name,
-                route.model if route else provider.model,
-                usage,
-                agent.last_references,
-                getattr(provider, "last_performance", None),
-            )
+            try:
+                last_response_details = _render_agent_reply(
+                    reply,
+                    route_label,
+                    len(context_paths),
+                    route.provider if route else provider.name,
+                    route.model if route else provider.model,
+                    usage,
+                    agent.last_references,
+                    getattr(provider, "last_performance", None),
+                    getattr(provider, "access_mode", "api"),
+                )
+            except KeyboardInterrupt:
+                console.print()
+                console.print(
+                    "[yellow]Output stopped. The completed response remains in this "
+                    "chat's history.[/yellow]"
+                )
         if (
             settings.ollama_unload_on_exit
             and isinstance(provider, OllamaProvider)
@@ -5811,6 +7081,7 @@ def _run_chat(
                 _release_local_model(provider, last_runtime_model)
             except ProviderConfigurationError as exc:
                 console.print(f"[yellow]Local model cleanup failed: {exc}[/yellow]")
+        model_controller.close()
 
 
 @app.callback()
@@ -6403,15 +7674,63 @@ def setup_agent(
     review.add_row("Settings", "Managed automatically on this computer")
     console.print(review)
     console.print(
-        "[dim]Setup writes provider selections only. It never asks for or overwrites "
-        "API keys and passwords.[/dim]"
+        "[dim]Hosted models prefer your existing ChatGPT or Claude sign-in. An optional "
+        "API key is stored only in your credential vault, never in this settings file.[/dim]"
     )
     if not yes and not typer.confirm("Apply this setup?", default=True):
         console.print("[yellow]Nothing was changed.[/yellow]")
         return
 
+    pending_model_api_key: str | None = None
+    selected_auth_mode = "auto"
+    subscription_connected = False
+    if selected in {"openai", "anthropic"} and not yes:
+        subscription = (
+            codex_subscription_status()
+            if selected == "openai"
+            else claude_subscription_status()
+        )
+        if subscription.ready:
+            selected_auth_mode = "subscription"
+            subscription_connected = True
+            console.print(f"[green]{subscription.detail}.[/green]")
+        else:
+            console.print(f"[yellow]{subscription.detail}[/yellow]")
+            use_api_key = typer.confirm(
+                "Use a separately billed API key instead?",
+                default=False,
+            )
+            if use_api_key:
+                selected_auth_mode = "api"
+                credential_settings = get_settings()
+                try:
+                    has_existing_key = model_api_key_configured(
+                        credential_settings,
+                        provider=selected,  # type: ignore[arg-type]
+                    )
+                except SecretBackendError as exc:
+                    console.print(f"[red]{exc}[/red]")
+                    raise typer.Exit(1) from exc
+                replace_key = not has_existing_key or typer.confirm(
+                    f"Replace the saved {selected.title()} API key?",
+                    default=False,
+                )
+                if replace_key:
+                    pending_model_api_key = typer.prompt(
+                        f"{selected.title()} API key",
+                        hide_input=True,
+                        confirmation_prompt=False,
+                    ).strip()
+            else:
+                selected_auth_mode = "subscription"
+
+    config_snapshot = snapshot_env_file(resolved_config)
     try:
         values = provider_settings(selected, model)  # type: ignore[arg-type]
+        if selected == "openai":
+            values["OPENAI_AUTH_MODE"] = selected_auth_mode
+        elif selected == "anthropic":
+            values["ANTHROPIC_AUTH_MODE"] = selected_auth_mode
         values.update(
             {
                 "DATABASE_MODE": selected_database,
@@ -6425,9 +7744,16 @@ def setup_agent(
         if selected_metatrader_platform is not None:
             values["METATRADER_PLATFORM"] = selected_metatrader_platform
         update_env_file(resolved_config, values)
-    except ValueError as exc:
+        if pending_model_api_key is not None:
+            store_model_api_key(
+                credential_settings,
+                provider=selected,  # type: ignore[arg-type]
+                api_key=pending_model_api_key,
+            )
+    except (SecretBackendError, ValueError) as exc:
+        restore_env_file(resolved_config, config_snapshot)
         console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(2) from exc
+        raise typer.Exit(1) from exc
     console.print(f"[green]Configured {selected}.[/green]")
 
     launcher_target = launcher_target_for_interpreter(Path(sys.executable))
@@ -6461,10 +7787,20 @@ def setup_agent(
 
     if selected in {"openai", "anthropic"}:
         key_name = "OPENAI_API_KEY" if selected == "openai" else "ANTHROPIC_API_KEY"
-        console.print(
-            f"[yellow]Cloud sign-in still needs {key_name} through the advanced "
-            "configuration path. Model keys are never written by this wizard.[/yellow]"
-        )
+        if pending_model_api_key is not None:
+            console.print(
+                f"[green]{selected.title()} credential saved in the configured "
+                "credential vault.[/green]"
+            )
+        elif yes:
+            console.print(
+                "[yellow]Sign in with `codex login` for ChatGPT or `claude auth login` "
+                f"for Claude. To use API billing instead, provide {key_name} and set "
+                "the matching AUTH_MODE to api.[/yellow]"
+            )
+        elif selected_auth_mode == "subscription" and not subscription_connected:
+            login_command = "codex login" if selected == "openai" else "claude auth login"
+            console.print(f"[cyan]Finish connecting with `{login_command}`.[/cyan]")
     if selected_database != "local":
         console.print(
             f"[yellow]Add the private {selected_database} SQLAlchemy DATABASE_URL to "
@@ -6477,10 +7813,11 @@ def setup_agent(
         )
     if selected_broker == "metatrader":
         console.print(
-            f"[yellow]Add METATRADER_BRIDGE_URL, METATRADER_BRIDGE_TOKEN, "
-            f"METATRADER_ACCOUNT_ID, and METATRADER_PLATFORM to {resolved_config}; "
-            "start with METATRADER_MODE=practice.[/yellow]"
-        )
+                f"[yellow]Add METATRADER_BRIDGE_URL, METATRADER_BRIDGE_TOKEN, "
+                f"METATRADER_ACCOUNT_ID, and METATRADER_PLATFORM to {resolved_config}; "
+                "start with METATRADER_MODE=demo.[/yellow]"
+            )
+        console.print(f"[yellow]{_metatrader_runtime_hint()}[/yellow]")
     if selected_news == "trading-economics":
         console.print(f"[yellow]Add TRADING_ECONOMICS_API_KEY to {resolved_config}.[/yellow]")
     if selected_tradingview == "enabled":
@@ -7018,6 +8355,535 @@ def mindset_list(
         raise typer.Exit(2) from exc
 
 
+def _configure_tradingview_alerts(
+    db,
+    *,
+    public_url: str | None,
+    account_reference: str | None = None,
+    assume_yes: bool = False,
+    copy_message: bool = False,
+) -> bool:
+    """Configure one account and render the two values TradingView needs."""
+    workspace = _configured_workspace(db)
+    current = _current_scope(db)
+    account = resolve_account(
+        db,
+        workspace.id,
+        account_reference or current.account_id,
+        active_only=True,
+    )
+    if account is None:
+        raise LookupError("Account was not found in the configured workspace.")
+
+    console.print()
+    console.print("[bold green]Connect TradingView chart alerts[/bold green]")
+    console.print(
+        "This sends chart conditions and OHLCV evidence into Trading Agent. "
+        "It does not expose your TradingView login, place orders, or sync the "
+        "Paper Trading balance, positions, or trade history."
+    )
+    candidate = public_url
+    if candidate is None:
+        console.print()
+        console.print(
+            "[bold]Public Trading Agent address[/bold]\n"
+            "[dim]TradingView cannot reach localhost. Enter the HTTPS address of "
+            "your verified TradingView receiver. Leave blank to stop without "
+            "changing anything.[/dim]"
+        )
+        candidate = console.input("[bold]HTTPS address ❯[/bold] ").strip()
+    if not candidate:
+        console.print(
+            "[yellow]Setup paused. No settings or secrets were changed.[/yellow]\n"
+            "A public HTTPS receiver is the one remaining requirement for alerts "
+            "to reach this computer."
+        )
+        return False
+    endpoint = tradingview_webhook_url(candidate, account.id)
+
+    _authorize_direct(
+        "configure_tradingview_webhook",
+        {
+            "workspace": workspace.slug,
+            "account": account.label,
+            "operation": "enable receiver and rotate account webhook secret",
+            "public_endpoint": endpoint,
+        },
+        mutating=True,
+        assume_yes=assume_yes,
+    )
+    config_path = default_config_path()
+    env_snapshot = snapshot_env_file(config_path)
+    try:
+        update_env_file(config_path, {"TRADINGVIEW_WEBHOOK_ENABLED": "true"})
+        secret = set_tradingview_webhook_secret(db, account=account)
+    except Exception:
+        db.rollback()
+        restore_env_file(config_path, env_snapshot)
+        raise
+    get_settings.cache_clear()
+    message = tradingview_alert_message(secret)
+
+    console.print()
+    console.print("[bold]1. Webhook URL[/bold]")
+    console.print(Text(endpoint))
+    console.print()
+    console.print("[bold]2. Alert message[/bold]")
+    console.print(Syntax(message, "json", word_wrap=False))
+    console.print(
+        "[dim]In TradingView, create an alert, open Notifications, enable "
+        "Webhook URL, paste item 1, then paste item 2 into Message. TradingView "
+        "requires two-factor authentication for webhooks.[/dim]"
+    )
+    if copy_message:
+        try:
+            copy_text_to_clipboard(message)
+        except ClipboardTextError as exc:
+            console.print(f"[yellow]{escape_markup(str(exc))}[/yellow]")
+        else:
+            console.print(
+                "[green]✓ Alert message copied to the clipboard.[/green] "
+                "[dim]It contains the one-time webhook secret; paste it only into "
+                "this TradingView alert.[/dim]"
+            )
+    console.print()
+    console.print(
+        "[bold yellow]Waiting for the first real alert[/bold yellow]\n"
+        "The receiver is configured, but Trading Agent will call it connected only "
+        "after TradingView delivers an alert successfully. Ask “show my latest "
+        "TradingView alert” after it fires."
+    )
+    return True
+
+
+def _tradingview_csv_path(value: str) -> Path | None:
+    """Extract a dragged or pasted CSV path without accepting extra shell syntax."""
+    try:
+        parts = shlex.split(value.strip())
+    except ValueError:
+        return None
+    matches = [part for part in parts if part.casefold().endswith(".csv")]
+    return Path(matches[-1]) if len(matches) == 1 else None
+
+
+def _render_tradingview_import_preview(
+    export: TradingViewExport,
+    *,
+    account_label: str,
+    display_timezone: ZoneInfo,
+) -> None:
+    record_count = export.rows_received - export.rows_ignored
+    kind = "Account History" if export.export_kind == "account_history" else "History"
+    console.print()
+    console.print("[bold green]Trading Agent: Import TradingView trades[/bold green]")
+    console.print(
+        f"[bold]Source[/bold]  Paper Trading {kind} · "
+        f"{record_count} record{'s' if record_count != 1 else ''}"
+    )
+    if export.export_kind == "order_history":
+        filled = sum(item.event.event_type == "order_fill" for item in export.events)
+        canceled = sum(item.event.event_type == "order_canceled" for item in export.events)
+        rejected = sum(item.event.event_type == "order_rejected" for item in export.events)
+        console.print(
+            f"[bold]Order status[/bold]  {filled} filled · {canceled} canceled · "
+            f"{rejected} rejected"
+        )
+    console.print(f"[bold]Journal account[/bold]  {escape_markup(account_label)}")
+    console.print(
+        f"[bold]Markets[/bold]  {escape_markup(', '.join(export.instruments))}"
+    )
+    if export.started_at is not None and export.ended_at is not None:
+        console.print(
+            "[bold]Period[/bold]  "
+            f"{_format_profile_datetime(export.started_at, display_timezone)} → "
+            f"{_format_profile_datetime(export.ended_at, display_timezone)}"
+        )
+    pnl_label = (
+        "Included by TradingView"
+        if export.realized_pnl_available
+        else "Not included; outcomes remain unknown"
+    )
+    console.print(f"[bold]Realized P&L[/bold]  {pnl_label}")
+    if export.rows_ignored:
+        console.print(
+            f"[dim]{export.rows_ignored} empty "
+            f"record{'s were' if export.rows_ignored != 1 else ' was'} ignored.[/dim]"
+        )
+    if export.export_kind == "order_history":
+        if export.history_coverage == "complete":
+            console.print(
+                "[yellow]This Order History export was explicitly marked complete, so "
+                "fill lifecycles can be reconstructed. Realized P&L remains unknown "
+                "unless TradingView supplied it.[/yellow]"
+            )
+        else:
+            console.print(
+                "[yellow]Order History is saved as execution evidence only. It will not "
+                "invent positions from a possibly partial file. Use Account History for "
+                "authoritative closed-trade lifecycles.[/yellow]"
+            )
+
+
+def _run_tradingview_import_flow(
+    db,
+    *,
+    scope: RequestScope,
+    path: Path | None,
+    timezone_name: str | None = None,
+    assume_yes: bool = False,
+) -> bool:
+    """Preview and import one TradingView Paper Trading export."""
+    if path is None:
+        console.print()
+        console.print("[bold green]Import TradingView Paper Trading[/bold green]")
+        console.print(
+            "In TradingView, open Paper Trading → Account Manager, choose "
+            "[bold]Account History[/bold] (best for completed trades) or "
+            "[bold]History[/bold] (fills), then Download data."
+        )
+        raw_path = console.input(
+            "[bold]Drag the downloaded CSV here, then press Enter ❯[/bold] "
+        ).strip()
+        if raw_path.casefold() in {"", "cancel", "/cancel", "exit", "/exit"}:
+            console.print("[dim]Import cancelled. Nothing was saved.[/dim]")
+            return False
+        path = _tradingview_csv_path(raw_path)
+        if path is None:
+            raise TradingViewImportError(
+                "I could not find one CSV path. Drag one TradingView export into "
+                "the prompt and press Enter."
+            )
+
+    if timezone_name is None:
+        display_timezone = _profile_timezone(db, scope)
+    else:
+        normalized = _normalize_timezone(timezone_name)
+        if normalized is None:
+            raise TradingViewImportError(
+                "That timezone is not recognized. Use a city timezone such as "
+                "America/New_York."
+            )
+        display_timezone = ZoneInfo(normalized)
+    export = parse_tradingview_export(path, default_timezone=display_timezone)
+    workspace = _configured_workspace(db)
+    account = resolve_account(db, workspace.id, scope.account_id, active_only=True)
+    if account is None:
+        raise LookupError("The selected journal account was not found.")
+    _render_tradingview_import_preview(
+        export,
+        account_label=account.label,
+        display_timezone=display_timezone,
+    )
+    _authorize_direct(
+        "import_tradingview_history",
+        {
+            "account": account.label,
+            "export_kind": export.export_kind,
+            "source_file": export.path.name,
+            "source_sha256": export.source_sha256,
+            "records": export.rows_received - export.rows_ignored,
+        },
+        mutating=True,
+        assume_yes=assume_yes,
+        scope=scope,
+    )
+    result = import_tradingview_export(db, export, scope=scope)
+    console.print()
+    if result.imported_executions:
+        console.print(
+            f"[bold green]✓ Imported {result.imported_executions} TradingView "
+            f"record{'s' if result.imported_executions != 1 else ''}[/bold green]"
+        )
+        console.print(
+            f"{result.imported_fills} fill{'s' if result.imported_fills != 1 else ''} · "
+            f"{result.imported_trades} trade lifecycle"
+            f"{'s' if result.imported_trades != 1 else ''} updated in "
+            f"[bold]{escape_markup(account.label)}[/bold]."
+        )
+    else:
+        console.print(
+            "[bold green]✓ TradingView history is already current[/bold green]\n"
+            f"{result.duplicate_executions} previously imported records matched; "
+            "nothing was duplicated."
+        )
+    if not result.realized_pnl_available:
+        console.print(
+            "[dim]The export did not supply realized P&L, so reviews will label "
+            "those outcomes unknown.[/dim]"
+        )
+    return True
+
+
+@tradingview_app.command("import")
+def tradingview_import_history(
+    history: Annotated[
+        Path | None,
+        typer.Argument(
+            help="TradingView Paper Trading History or Account History CSV.",
+        ),
+    ] = None,
+    timezone: Annotated[
+        str | None,
+        typer.Option(
+            "--timezone",
+            help="Timezone used by naive timestamps; trader profile by default.",
+        ),
+    ] = None,
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+) -> None:
+    """Import Paper Trading records into the same journal ledger as broker history."""
+    try:
+        upgrade_database()
+        with SessionLocal() as db:
+            scope = _current_scope(db)
+            _run_tradingview_import_flow(
+                db,
+                scope=scope,
+                path=history,
+                timezone_name=timezone,
+                assume_yes=yes,
+            )
+    except PolicyViolation:
+        _render_cancelled_mutation()
+        raise typer.Exit(0) from None
+    except (LookupError, TradingViewImportError) as exc:
+        console.print(f"[red]{escape_markup(str(exc))}[/red]")
+        console.print("[dim]Nothing was changed.[/dim]")
+        raise typer.Exit(2) from exc
+
+
+@tradingview_app.command("connect")
+def tradingview_connect(
+    public_url: Annotated[
+        str | None,
+        typer.Option(
+            "--public-url",
+            help="Public HTTPS origin or complete account webhook URL.",
+        ),
+    ] = None,
+    account_reference: Annotated[
+        str | None,
+        typer.Option(
+            "--account",
+            help="Account label, broker ID, or internal UUID; current by default.",
+        ),
+    ] = None,
+    copy_message: Annotated[
+        bool,
+        typer.Option(
+            "--copy-message",
+            help="Copy the generated alert JSON, including its secret, to the clipboard.",
+        ),
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+) -> None:
+    """Guide a TradingView alert connection without requesting TradingView login data."""
+    try:
+        upgrade_database()
+        with SessionLocal() as db:
+            _configure_tradingview_alerts(
+                db,
+                public_url=public_url,
+                account_reference=account_reference,
+                assume_yes=yes,
+                copy_message=copy_message,
+            )
+    except (LookupError, ValueError, PolicyViolation) as exc:
+        console.print(f"[red]{escape_markup(str(exc))}[/red]")
+        raise typer.Exit(2) from exc
+
+
+@tradingview_app.command("status")
+def tradingview_status(
+    account_reference: Annotated[
+        str | None,
+        typer.Option(
+            "--account",
+            help="Account label, broker ID, or internal UUID; current by default.",
+        ),
+    ] = None,
+) -> None:
+    """Show imported Paper history and optional chart-alert status."""
+    upgrade_database()
+    settings = get_settings()
+    with SessionLocal() as db:
+        workspace = _configured_workspace(db)
+        current = _current_scope(db)
+        account = resolve_account(
+            db,
+            workspace.id,
+            account_reference or current.account_id,
+            active_only=True,
+        )
+        if account is None:
+            console.print("[red]Account was not found in the configured workspace.[/red]")
+            raise typer.Exit(1)
+        scope = RequestScope(workspace_id=workspace.id, account_id=account.id)
+        display_timezone = _profile_timezone(db, scope)
+        recent = recent_tradingview_alerts(db, scope=scope, limit=1)
+        paper_connection = db.scalar(
+            select(BrokerConnection).where(
+                BrokerConnection.workspace_id == workspace.id,
+                BrokerConnection.account_id == account.id,
+                BrokerConnection.provider == TRADINGVIEW_PAPER_PROVIDER,
+            )
+        )
+        imported_fills = 0
+        imported_trades = 0
+        imported_records = 0
+        canceled_orders = 0
+        rejected_orders = 0
+        recent_nonfills: list[ExecutionEvent] = []
+        last_import = None
+        if paper_connection is not None:
+            import_filters = (
+                ExecutionEvent.workspace_id == workspace.id,
+                ExecutionEvent.account_id == account.id,
+                ExecutionEvent.connection_id == paper_connection.id,
+            )
+            imported_records = int(
+                db.scalar(
+                    select(func.count())
+                    .select_from(ExecutionEvent)
+                    .where(*import_filters)
+                )
+                or 0
+            )
+            imported_fills = int(
+                db.scalar(
+                    select(func.count())
+                    .select_from(Fill)
+                    .where(
+                        Fill.workspace_id == workspace.id,
+                        Fill.account_id == account.id,
+                        Fill.connection_id == paper_connection.id,
+                    )
+                )
+                or 0
+            )
+            imported_trades = int(
+                db.scalar(
+                    select(func.count(func.distinct(ExecutionEvent.trade_id))).where(
+                        ExecutionEvent.workspace_id == workspace.id,
+                        ExecutionEvent.account_id == account.id,
+                        ExecutionEvent.connection_id == paper_connection.id,
+                        ExecutionEvent.trade_id.is_not(None),
+                    )
+                )
+                or 0
+            )
+            canceled_orders = int(
+                db.scalar(
+                    select(func.count())
+                    .select_from(ExecutionEvent)
+                    .where(
+                        *import_filters,
+                        ExecutionEvent.event_type == "order_canceled",
+                    )
+                )
+                or 0
+            )
+            rejected_orders = int(
+                db.scalar(
+                    select(func.count())
+                    .select_from(ExecutionEvent)
+                    .where(
+                        *import_filters,
+                        ExecutionEvent.event_type == "order_rejected",
+                    )
+                )
+                or 0
+            )
+            recent_nonfills = list(
+                db.scalars(
+                    select(ExecutionEvent)
+                    .where(
+                        *import_filters,
+                        ExecutionEvent.event_type.in_(
+                            ("order_canceled", "order_rejected")
+                        ),
+                    )
+                    .order_by(ExecutionEvent.occurred_at.desc())
+                    .limit(5)
+                )
+            )
+            last_import = db.scalar(
+                select(func.max(ExecutionEvent.ingested_at)).where(
+                    ExecutionEvent.workspace_id == workspace.id,
+                    ExecutionEvent.account_id == account.id,
+                    ExecutionEvent.connection_id == paper_connection.id,
+                )
+            )
+
+    receiver_enabled = settings.tradingview_webhook_enabled
+    secret_ready = bool(account.tradingview_webhook_secret_sha256)
+    real_alert = recent[0] if recent else None
+    table = Table(title="TradingView", show_header=False)
+    table.add_column("Check", style="bold")
+    table.add_column("Status")
+    table.add_row("Account", Text(account.label))
+    table.add_row(
+        "Paper history",
+        (
+            f"{imported_records} records · {imported_fills} fills · "
+            f"{imported_trades} trade lifecycles"
+            if paper_connection is not None
+            else "Not imported yet"
+        ),
+    )
+    table.add_row(
+        "Canceled / rejected",
+        f"{canceled_orders} canceled · {rejected_orders} rejected",
+    )
+    table.add_row(
+        "Latest import",
+        last_import.isoformat() if last_import is not None else "Never",
+    )
+    table.add_row("Live paper sync", "Not available from TradingView")
+    table.add_row("Receiver", "Enabled" if receiver_enabled else "Disabled")
+    table.add_row("Account secret", "Ready" if secret_ready else "Not configured")
+    table.add_row(
+        "Real delivery",
+        (
+            f"Verified · {real_alert.received_at.isoformat()}"
+            if real_alert is not None
+            else "Not observed yet"
+        ),
+    )
+    console.print(table)
+    if recent_nonfills:
+        order_table = Table(title="Recent canceled and rejected paper orders")
+        order_table.add_column("Time")
+        order_table.add_column("Status")
+        order_table.add_column("Instrument")
+        order_table.add_column("Side")
+        order_table.add_column("Quantity", justify="right")
+        order_table.add_column("Intended price", justify="right")
+        for event in recent_nonfills:
+            metadata = event.provider_metadata or {}
+            order_table.add_row(
+                _format_profile_datetime(event.occurred_at, display_timezone),
+                Text(str(metadata.get("order_status") or "unknown")),
+                Text(str(metadata.get("source_symbol") or "unknown")),
+                Text(str(metadata.get("order_side") or "unknown")),
+                Text(str(metadata.get("order_quantity") or "unknown")),
+                Text(str(metadata.get("intended_price") or "unknown")),
+            )
+        console.print(order_table)
+    if receiver_enabled and secret_ready and real_alert is None:
+        console.print(
+            "[yellow]Configured, not yet verified.[/yellow] Fire one TradingView "
+            "alert, then run this status again."
+        )
+    elif real_alert is not None:
+        console.print("[green]✓ TradingView delivered a verified chart alert.[/green]")
+    else:
+        console.print(
+            "Say [cyan]“import my TradingView trades”[/cyan] inside the agent and "
+            "drag in a Paper Trading export. Chart alerts are optional."
+        )
+
+
 @account_app.command("list")
 def account_list() -> None:
     """List accounts in the configured workspace and show the active default."""
@@ -7042,7 +8908,7 @@ def account_list() -> None:
                 "yes" if current is not None and account.id == current.account_id else "",
                 account.label,
                 account.broker,
-                account.mode,
+                _display_account_mode(account.broker, account.mode),
                 account.currency,
                 "active" if account.active else "inactive",
                 account.external_account_id,
@@ -7093,7 +8959,7 @@ def account_use(
                 "workspace": workspace.slug,
                 "account": account.label,
                 "broker": account.broker,
-                "mode": account.mode,
+                "mode": _display_account_mode(account.broker, account.mode),
             },
             mutating=True,
             assume_yes=yes,
@@ -7797,11 +9663,15 @@ def broker_configure_metatrader(
             operation="verification",
         )
         raise typer.Exit(1) from exc
+    display_mode = _display_account_mode(
+        settings.metatrader_platform,
+        settings.metatrader_mode,
+    )
     arguments = {
         "provider": connector.name,
         "label": label,
         "currency": account_state.currency,
-        "environment": settings.metatrader_mode,
+        "environment": display_mode,
         "platform": settings.metatrader_platform,
         "read_only": health["read_only"],
     }
@@ -7827,7 +9697,7 @@ def broker_configure_metatrader(
             currency=account_state.currency,
             mode=settings.metatrader_mode,
             provider=connector.name,
-            environment=settings.metatrader_mode,
+            environment=display_mode,
             config_reference="env:METATRADER_BRIDGE_TOKEN" if legacy else None,
             make_default=True,
             commit=False,
@@ -9351,6 +11221,8 @@ def _analyze_chart_command(
     model: str | None,
     reasoning_effort: str,
     captured_clipboard_image: ClipboardImage | None = None,
+    provider: ModelProvider | None = None,
+    interactive_chat: bool = False,
 ) -> None:
     if clipboard == (image is not None):
         console.print(
@@ -9360,6 +11232,16 @@ def _analyze_chart_command(
         raise typer.Exit(2)
     source_label = "clipboard" if clipboard else str(image)
     authorization_source = {"clipboard": True} if clipboard else {"image_path": str(image)}
+    # Submitting an attached image after the toolbar states "analyze and save"
+    # is the trader's explicit confirmation. A natural clipboard request without
+    # an attachment still receives one concise confirmation. In both cases the
+    # policy hook and durable mutation audit remain active.
+    if interactive_chat and captured_clipboard_image is None and not typer.confirm(
+        "Analyze and save this copied chart?"
+    ):
+        console.print("[yellow]Chart review cancelled. Nothing was saved.[/yellow]")
+        raise typer.Exit(1)
+    authorization_options = {"assume_yes": True} if interactive_chat else {}
     _authorize_direct(
         "analyze_chart",
         {
@@ -9374,6 +11256,7 @@ def _analyze_chart_command(
             "reasoning_effort": reasoning_effort,
         },
         mutating=True,
+        **authorization_options,
     )
     settings = get_settings()
     resolved_image: Path | None = None
@@ -9415,10 +11298,18 @@ def _analyze_chart_command(
         if observed_at.tzinfo is None or observed_at.utcoffset() is None:
             console.print("[red]--market-time must include a timezone[/red]")
             raise typer.Exit(2)
-    provider = create_model_provider(settings)
-    destination = _chart_destination(settings, provider)
+    selected_provider = provider or create_model_provider(settings)
+    destination = _chart_destination(settings, selected_provider)
     disclosure = {
-        "provider": provider.name,
+        "provider": (
+            "ChatGPT"
+            if selected_provider.name == "openai"
+            and getattr(selected_provider, "access_mode", "api") == "subscription"
+            else "Claude"
+            if selected_provider.name == "anthropic"
+            and getattr(selected_provider, "access_mode", "api") == "subscription"
+            else selected_provider.name
+        ),
         "destination": destination,
         "content_type": content_type,
         "image_bytes": len(image_bytes),
@@ -9437,12 +11328,12 @@ def _analyze_chart_command(
     if reasoning_effort not in {"low", "medium", "high"}:
         console.print("[red]--reasoning-effort must be low, medium, or high.[/red]")
         raise typer.Exit(2)
-    if isinstance(provider, OllamaProvider):
-        selected_model = model or provider.model
+    if isinstance(selected_provider, OllamaProvider):
+        selected_model = model or selected_provider.model
         try:
-            model_sizes = provider.installed_model_sizes()
+            model_sizes = selected_provider.installed_model_sizes()
             installed = frozenset(model_sizes)
-            loaded = provider.loaded_models()
+            loaded = selected_provider.loaded_models()
         except ProviderConfigurationError as exc:
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(1) from exc
@@ -9459,7 +11350,7 @@ def _analyze_chart_command(
             loaded,
         )
         if assessment is not None:
-            _render_model_assessment(assessment)
+            _render_model_assessment(assessment, compact=interactive_chat)
             if assessment.status == "block":
                 console.print(
                     "[red]Chart analysis was not started. Close memory-heavy applications, "
@@ -9472,7 +11363,7 @@ def _analyze_chart_command(
             content_type,
             context,
             settings,
-            provider=provider,
+            provider=selected_provider,
             model=model,
             reasoning_effort=reasoning_effort,
         )
@@ -9500,7 +11391,7 @@ def _analyze_chart_command(
             content_type=content_type,
             evidence_directory=settings.evidence_directory,
             analysis=result,
-            provider=provider,
+            provider=selected_provider,
             model=model,
             policy_hash=_runtime_policy().content_hash,
             prompt=SYSTEM_PROMPT,
@@ -9514,9 +11405,9 @@ def _analyze_chart_command(
     _print_model(
         {
             "analysis": result,
-            "provider": provider.name,
-            "model": model or provider.model,
-            "performance": getattr(provider, "last_performance", None),
+            "provider": selected_provider.name,
+            "model": model or selected_provider.model,
+            "performance": getattr(selected_provider, "last_performance", None),
             "evidence_id": evidence.id,
             "analysis_run_id": run.id,
         }
@@ -9582,6 +11473,96 @@ def chart(
         model=model,
         reasoning_effort=reasoning_effort,
     )
+
+
+@app.command("dashboard", rich_help_panel="Core advisor workflow")
+def dashboard_interface(
+    port: Annotated[
+        int,
+        typer.Option(min=1, max=65535, help="Local dashboard port."),
+    ] = 8000,
+    open_browser: Annotated[
+        bool,
+        typer.Option("--open-browser/--no-open-browser"),
+    ] = True,
+) -> None:
+    """Open the Trading-Agent dashboard using existing configured connections."""
+    try:
+        plan = build_dashboard_launch_plan(
+            trading_directory=Path(__file__).resolve().parent.parent,
+            port=port,
+        )
+    except DashboardLaunchError as exc:
+        console.print(f"[red]{escape_markup(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
+    console.print("[bold green]Starting Trading-Agent dashboard[/bold green]")
+    console.print(
+        "[dim]Reusing your configured workspace, read-only broker, news, and "
+        "model connections. Credentials stay server-side.[/dim]"
+    )
+    console.print(f"[dim]Dashboard: {plan.service_url} · press Ctrl+C to stop[/dim]")
+    try:
+        run_dashboard(plan, open_browser=open_browser)
+    except DashboardLaunchError as exc:
+        console.print(f"[red]{escape_markup(str(exc))}[/red]")
+        console.print(
+            "[dim]If the port is already in use, stop the older server or choose "
+            "--port.[/dim]"
+        )
+        raise typer.Exit(1) from exc
+
+
+@app.command("pippy", rich_help_panel="Core advisor workflow")
+def pippy_interface(
+    pippy_directory: Annotated[
+        Path | None,
+        typer.Option(
+            "--pippy-directory",
+            file_okay=False,
+            help="Pippy project directory; defaults to ~/Projects/pippy.",
+        ),
+    ] = None,
+    trading_port: Annotated[
+        int,
+        typer.Option(min=1, max=65535, help="Local Trading Agent API port."),
+    ] = 8000,
+    pippy_port: Annotated[
+        int,
+        typer.Option(min=1, max=65535, help="Local Pippy web port."),
+    ] = 8001,
+    open_browser: Annotated[
+        bool,
+        typer.Option("--open-browser/--no-open-browser"),
+    ] = True,
+) -> None:
+    """Start the complete Pippy voice experience with one local command."""
+    try:
+        plan = build_pippy_launch_plan(
+            trading_directory=Path(__file__).resolve().parent.parent,
+            pippy_directory=pippy_directory,
+            trading_port=trading_port,
+            pippy_port=pippy_port,
+        )
+    except PippyLaunchError as exc:
+        console.print(f"[red]{escape_markup(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
+    console.print("[bold green]Starting Pippy[/bold green]")
+    console.print(
+        "[dim]Creating a temporary local connection key in memory; "
+        "nothing needs to be copied or saved.[/dim]"
+    )
+    console.print(f"[dim]Pippy: {plan.pippy_url} · press Ctrl+C to stop[/dim]")
+    try:
+        run_pippy_stack(plan, open_browser=open_browser)
+    except PippyLaunchError as exc:
+        console.print(f"[red]{escape_markup(str(exc))}[/red]")
+        console.print(
+            "[dim]If a port is already in use, stop the older server or choose "
+            "--trading-port and --pippy-port.[/dim]"
+        )
+        raise typer.Exit(1) from exc
 
 
 @app.command("api", rich_help_panel="Setup and administration")
