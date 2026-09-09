@@ -325,16 +325,46 @@ python -c 'import secrets; print(secrets.token_urlsafe(32))'
 Save it as `TRADING_AGENT_API_KEY` in `.env`. The optional API will not start with a key
 shorter than 32 characters.
 
+For the normal browser experience, skip manual API setup and run:
+
+```bash
+trade dashboard
+```
+
+That command reuses the workspace, account, read-only broker, news, strategy, and model
+configuration already selected in Trading Agent. It creates one single-use browser bootstrap
+token, opens the dashboard, immediately removes that token from the URL, and exchanges it for
+an HttpOnly session cookie. The normal API key never enters the URL, and refreshes reconnect
+automatically while the launcher is running. Broker and provider credentials remain in the
+server-side credential store and are never sent to the browser. Keep the terminal open; press
+Ctrl+C when you want to stop the local dashboard.
+
+For Pippy, skip that manual setup and start the complete local voice stack with one command:
+
+```bash
+trade pippy
+```
+
+That command creates an ephemeral key in memory, starts Trading Agent on port 8000 and Pippy
+on port 8001, opens the browser, and stops both services when you press Ctrl+C. The key is
+never displayed or written to either repository.
+
 Normal API routes require `X-Workspace-ID` and `X-Account-ID`; those UUIDs must identify one
 real relationship. Journal reads and writes also require `X-Strategy-Version` with one
-immutable strategy-version UUID owned by the selected workspace. Before a mutating request,
-an authenticated client requests a short-lived token from
+immutable strategy-version UUID owned by the selected workspace. Before a credential,
+journal, strategy, or other domain mutation, an authenticated client requests a short-lived
+token from
 `POST /api/confirmations/challenge`, binding it to the exact method, path, request-body
 SHA-256, workspace, and account. Send that token once as `X-Trader-Confirmation`; replay,
 request substitution, and reuse under another account are rejected. These selectors are not
 user authentication and PostgreSQL row-level security is not enabled, so keep the API on
 loopback unless separate identity, TLS, network controls, and database authorization have
 been deliberately deployed.
+
+Conversation-session rows and usage telemetry are operational records created only after a
+user starts or sends an agent request. They are policy-checked and durably audited, but do not
+authorize a journal change or broker action. Any domain mutation proposed during that turn
+still requires its own exact human confirmation.
 
 Open:
 
@@ -359,6 +389,12 @@ The agent can calculate risk, inspect the journal, create a confirmed plan or re
 analyze a local chart path, and report system health. Journal mutations always require a
 terminal confirmation. There are no broker execution tools.
 
+The interactive prompt follows familiar AI-terminal conventions: type `/` for a searchable
+command palette, use Up/Down for in-session prompt history, use Alt/Option-Enter for a newline,
+Ctrl-C to stop the current input or response without leaving the chat, and Ctrl-D or `/exit` to
+leave. `/new` (or `/clear`) starts a fresh conversation, while `/resume` selects an existing one.
+`/strategy` and `/model` expand to the saved strategies, drafts, and currently available models.
+
 For a chart already copied as an image, press Ctrl-V inside `trade`. The prompt inserts an
 `[Image #1]` attachment, lets you add context, then runs the existing confirmed chart-evidence
 workflow when you press Enter. You can delete the attachment marker before submitting, or say
@@ -367,6 +403,11 @@ direct-command fallback. Clipboard capture accepts only PNG, JPEG, or WebP bytes
 never treats clipboard text as a path. Hosted-provider analysis still requires an exact outbound
 disclosure confirmation, and accepted clipboard images use the same content-addressed evidence
 storage as path-based charts.
+
+When labels are legible, the chart result automatically records the visible instrument, venue,
+timeframe, and timezone-aware market timestamp. Each detected value carries a short visual
+evidence note; missing or ambiguous labels stay blank, and explicit trader or trade-plan values
+take precedence.
 
 Replies render through a terminal-safe presentation layer: accidental document code fences are
 unwrapped, wide Markdown tables become stacked fields that wrap on narrow terminals, terminal
@@ -801,6 +842,18 @@ connection has been tested, and whether authenticated provider evidence has ever
 accepted. `trade integrations --verify-live` performs bounded read-only account, news, and
 search checks after warning about API quota. It does not persist the returned data. An
 inbound TradingView webhook can be verified only by a real authenticated test delivery.
+TradingView Paper Trading history can use the same normalized execution, fill, lifecycle,
+and agent-review path as other brokers. Inside the agent, say `import my TradingView trades`
+and drag in the downloaded History or Account History CSV. The agent previews the exact
+account and date range before saving and deduplicates repeated exports. Canceled and rejected
+orders are retained as non-fill execution-history events; only filled orders change trade
+lifecycles. Account History is preferred because it contains TradingView's realized P&L; when
+an export omits P&L, the journal records the outcome as unknown rather than guessing contract
+values. This is a deliberate file import because TradingView does not offer a normal retail
+Paper Trading account API.
+
+Chart alerts remain an optional, separate evidence path. Run `trade tradingview connect` only
+when a public alert receiver is actually wanted.
 
 ### Database schema upgrades
 
@@ -867,8 +920,8 @@ Implemented now:
 - PostgreSQL journaling, strategy-scoped conversations and knowledge, mindset check-ins,
   an auditable guided pre-trade assessment, deterministic risk sizing, screenshot analysis,
   OANDA or bridged MT4/MT5 read-only market/account data, Trading Economics calendar
-  metadata, account-scoped verified replay-safe TradingView alert evidence, and tiered cited
-  research.
+  metadata, TradingView Paper Trading CSV history in the normalized broker ledger,
+  account-scoped verified replay-safe TradingView alert evidence, and tiered cited research.
 - Application-, foreign-key-, and PostgreSQL-RLS workspace/account isolation. Hosted API
   access uses exact principal grants and starts only with a dedicated least-privilege runtime
   database role plus an external secret backend. Principal bootstrap metadata is outside RLS

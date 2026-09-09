@@ -4,13 +4,14 @@ For deterministic provider simulations, fault injection, bounded soak testing, a
 difference between simulated and real verification evidence, see
 [`integration-reliability.md`](integration-reliability.md).
 
-Trading Agent uses four ingestion lanes because the data has different trust, retention, and
+Trading Agent uses five ingestion lanes because the data has different trust, retention, and
 strategy-isolation requirements.
 
 ## Select the destination account first
 
-Broker history, TradingView alerts, conversations, decisions, mindset, evidence, tests, and
-review memory are account-owned. Before importing or syncing, verify the active destination:
+Broker history, TradingView Paper history, TradingView alerts, conversations, decisions,
+mindset, evidence, tests, and review memory are account-owned. Before importing or syncing,
+verify the active destination:
 
 ```bash
 trade account list
@@ -115,7 +116,34 @@ near-term entry intent and the instrument maps to a relevant currency. The remin
 interrupt the conversation or decide whether to trade. News is evidence for conditional
 scenarios, not proof of manipulation or a direction.
 
-## 3. TradingView chart alerts
+## 3. TradingView Paper Trading history
+
+TradingView's Account Manager exports each selected tab as a CSV. Inside the agent, say
+`import my TradingView trades`; it explains where to download the file and accepts a dragged
+History or Account History CSV path. The equivalent direct command is:
+
+```bash
+trade tradingview import ~/Downloads/paper-trading-account-history.csv
+```
+
+The host—not the model—validates the regular UTF-8 CSV, applies row and file-size limits,
+uses the trader-profile timezone for timestamps without an offset, and shows the destination
+account, instruments, period, and P&L availability before one confirmation. Only filled or
+closed activity becomes a fill or changes a trade lifecycle. Canceled and rejected orders are
+retained in `execution_events` for execution-process review without being mislabeled as fills.
+The original rows are not retained; provenance includes the export hash, source row, original
+symbol, status, and TradingView event identifiers. Repeated exports do not create duplicates.
+
+Account History is preferred for completed-trade review because it supplies entry, close, and
+realized P&L. History supplies order fills and may omit P&L; in that case Trading Agent does
+not apply a stock, FX, crypto, or futures contract assumption and records the outcome as
+unknown. History can reconstruct only the lifecycle represented in that export, so it must
+not be described as proof of complete account history.
+
+This is not live synchronization. TradingView Paper Trading does not expose a normal retail
+account API, and the alert webhook below carries chart conditions rather than account history.
+
+## 4. TradingView chart alerts
 
 TradingView can POST alert events into an account-specific public HTTPS receiver. The app
 stores the selected workspace/account with the normalized symbol, timeframe, trigger time,
@@ -130,7 +158,7 @@ TradingView is inbound-only, so the app does not fake a successful verification 
 itself. Enable the secured receiver and send a real TradingView test alert; the qualification
 report then shows the last accepted delivery time.
 
-## 4. Trader knowledge
+## 5. Trader knowledge
 
 Historical notes and social exports are retrieval material, not broker facts and not model
 weight training. Create the strategy first, then import each source only into the exact

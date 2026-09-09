@@ -4,6 +4,7 @@ import json
 import mimetypes
 import os
 import re
+import shlex
 import shutil
 import sys
 import time
@@ -15,6 +16,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
+from platform import system as _platform_system
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
@@ -26,6 +28,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.markup import escape as escape_markup
 from rich.panel import Panel
+from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 from sqlalchemy import func, select
@@ -34,6 +37,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.clipboard import (
     ClipboardImage,
     ClipboardImageError,
+    ClipboardTextError,
+    copy_text_to_clipboard,
     read_clipboard_image,
 )
 from app.config import (
@@ -86,6 +91,8 @@ from app.models import (
     ConversationSession,
     ConversationTurn,
     EconomicEvent,
+    ExecutionEvent,
+    Fill,
 )
 from app.policy import ExecutionHooks, PolicyEngine, PolicyViolation, ToolContext
 from app.providers import (
@@ -156,6 +163,11 @@ from app.services.conversations import (
     resolve_conversation,
     update_turn_outcome,
 )
+from app.services.dashboard_launcher import (
+    DashboardLaunchError,
+    build_dashboard_launch_plan,
+    run_dashboard,
+)
 from app.services.development import (
     DevelopmentService,
     DevelopmentSession,
@@ -203,6 +215,11 @@ from app.services.news import (
     economic_event_history,
     store_calendar_events,
     store_news_items,
+)
+from app.services.pippy_launcher import (
+    PippyLaunchError,
+    build_pippy_launch_plan,
+    run_pippy_stack,
 )
 from app.services.pretrade import (
     PreflightAssessment,
@@ -259,7 +276,23 @@ from app.services.trading_workflow import (
     is_dangling_count_clarification,
     should_refresh_trade_context,
 )
-from app.services.tradingview import set_tradingview_webhook_secret
+from app.services.tradingview import (
+    recent_tradingview_alerts,
+    set_tradingview_webhook_secret,
+)
+from app.services.tradingview_import import (
+    TRADINGVIEW_PAPER_PROVIDER,
+    TradingViewExport,
+    TradingViewImportError,
+    import_tradingview_export,
+    is_tradingview_history_import_request,
+    parse_tradingview_export,
+)
+from app.services.tradingview_setup import (
+    is_tradingview_connection_request,
+    tradingview_alert_message,
+    tradingview_webhook_url,
+)
 from app.services.workspaces import (
     RequestScope,
     bootstrap_initial_scope,
@@ -331,6 +364,14 @@ mindset_app = typer.Typer(help="Record process readiness and predefined-risk acc
 app.add_typer(mindset_app, name="mindset", rich_help_panel="Daily records and data")
 account_app = typer.Typer(help="List and select the account that scopes every decision.")
 app.add_typer(account_app, name="account", rich_help_panel="Daily records and data")
+tradingview_app = typer.Typer(
+    help="Import Paper Trading history; chart alerts are optional."
+)
+app.add_typer(
+    tradingview_app,
+    name="tradingview",
+    rich_help_panel="Setup and administration",
+)
 principal_app = typer.Typer(help="Provision hosted API principals and exact account grants.")
 app.add_typer(principal_app, name="principal", rich_help_panel="Setup and administration")
 learn_app = typer.Typer(
@@ -528,7 +569,8 @@ METATRADER_PLATFORM_CHOICES = (
     GuidedChoice(
         "mt5",
         "MetaTrader 5",
-        "Uses the included Windows companion service beside an official MT5 terminal.",
+        "Use the included Windows companion service beside an official MT5 terminal; "
+        "this app can run on another host.",
         ("5", "meta trader 5", "metatrader5"),
     ),
     GuidedChoice(
@@ -850,6 +892,7 @@ def _authorize_direct(
     mutating: bool = False,
     deterministic: bool = False,
     assume_yes: bool = False,
+    scope: RequestScope | None = None,
 ) -> None:
     policy = _runtime_policy()
     context = ToolContext(
@@ -870,17 +913,17 @@ def _authorize_direct(
         upgrade_database()
         with SessionLocal() as db:
             try:
-                scope = _current_scope(db)
+                audit_scope = scope or _current_scope(db)
             except LookupError:
                 # Fresh bootstrap/onboarding has no account to own an audit row yet.
                 return
             audit = record_direct_cli_confirmation(
                 db,
-                scope=scope,
+                scope=audit_scope,
                 action=name,
                 arguments=arguments,
             )
-            _direct_command_audits.append((audit.id, scope))
+            _direct_command_audits.append((audit.id, audit_scope))
 
 
 def _print_model(value: object) -> None:
@@ -905,8 +948,9 @@ def _render_broker_setup_error(
     if provider == "metatrader":
         console.print(
             "MetaTrader requires a separate read-only bridge running beside the MT5 "
-            "terminal on Windows or a VPS."
+            "terminal on Windows or a trusted bridge host."
         )
+        console.print(f"[yellow]{_metatrader_runtime_hint()}[/yellow]")
         console.print(
             "Set [cyan]BROKER_PROVIDER=metatrader[/cyan], "
             "[cyan]METATRADER_BRIDGE_URL[/cyan], "
@@ -1192,22 +1236,6 @@ def _render_startup_memory(memory: StartupMemory, *, detailed: bool = False) -> 
         if detailed:
             label += f" · sha256 {strategy.content_hash[:12]}"
         console.print(Text(_literal_terminal_text(label)))
-
-    if memory.prior_session:
-        prior = memory.prior_session
-        console.print(Text("  Previous session", style="cyan"))
-        console.print(
-            Text(
-                _literal_terminal_text(
-                    f"    {prior.name} · {prior.turn_count} turns · "
-                    f"{prior.last_activity_at}"
-                )
-            )
-        )
-        if detailed and prior.title:
-            console.print(
-                Text(_literal_terminal_text(f"    {prior.title}"), style="dim")
-            )
 
     plans = memory.open_plans if detailed else memory.open_plans[:2]
     if plans:
@@ -1573,6 +1601,38 @@ def _prompt_bounded_text(
             console.print(f"[yellow]{exc}. Please try again.[/yellow]")
             continue
         return value
+
+
+def _metatrader_runtime_hint() -> str:
+    system_name = (_platform_system() or "unknown").casefold()
+    if system_name == "windows":
+        return (
+            "On Windows, run the MetaTrader bridge beside your official MT5 terminal"
+            " and point METATRADER_BRIDGE_URL at localhost."
+        )
+    if system_name == "darwin":
+        return (
+            "On macOS, run MetaTrader in a separate Windows machine or VPS, keep"
+            " this Trade Agent app here, and set METATRADER_BRIDGE_URL to that"
+            " secure bridge endpoint."
+        )
+    if system_name == "linux":
+        return (
+            "On Linux, this app can be the client. If MetaTrader is not on this host,"
+            " run the bridge from a Windows terminal host (or a trusted bridge service)"
+            " and point METATRADER_BRIDGE_URL to it."
+        )
+    return (
+        "Run the MetaTrader bridge on a Windows MT host (or a trusted Windows"
+        " bridge service) and set METATRADER_BRIDGE_URL to its endpoint."
+    )
+
+
+def _display_account_mode(broker: str, mode: str) -> str:
+    """Use MetaTrader's familiar demo label while retaining internal compatibility."""
+    if mode == "practice" and broker.strip().upper() in {"MT4", "MT5", "METATRADER"}:
+        return "demo"
+    return mode
 
 
 def _normalize_market(value: str) -> str:
@@ -2030,7 +2090,7 @@ def _render_beginner_recommendations(defaults: OnboardingDefaults) -> None:
     )
     console.print(
         f"  Market        {escape_markup(defaults.markets[0])} "
-        "[dim]— start with one instrument in practice[/dim]"
+        "[dim]— start with one instrument first[/dim]"
     )
     console.print(
         f"  Session       {escape_markup(defaults.sessions[0])} "
@@ -2773,7 +2833,9 @@ def _run_onboarding(db, settings: Settings) -> bool:
     if broker == "metatrader":
         console.print(
             "[yellow]MetaTrader still needs the read-only bridge URL, dedicated token, "
-            "and account ID before live reads. Ask “help me finish MT5 setup” in chat.[/yellow]"
+            "and account ID before live reads. Ask “help me finish MT5 setup” in chat."
+            " If you are on macOS or Linux, configure the bridge from a Windows host "
+            "or a trusted bridge server.[/yellow]"
         )
     if broker in {"ibkr", "alpaca", "twelve-data", "ctrader"}:
         console.print(
@@ -5142,10 +5204,7 @@ def _handle_chat_clipboard_chart_intent(
         scope=scope,
         playbook_version_id=playbook_version_id,
     )
-    console.print(
-        "[dim]Reading the copied image, checking what is visible, and preparing "
-        "a chart review…[/dim]"
-    )
+    console.print("[dim]Analyzing copied chart…[/dim]")
     chart_context = message.replace(IMAGE_MARKER, "").strip() or "Analyze this copied chart."
     try:
         if provider is None and clipboard_image is None:
@@ -5175,6 +5234,7 @@ def _handle_chat_clipboard_chart_intent(
                 provider=provider,
                 model=model,
                 reasoning_effort=reasoning_effort,
+                interactive_chat=True,
             )
     except KeyboardInterrupt:
         add_turn(
@@ -5185,6 +5245,8 @@ def _handle_chat_clipboard_chart_intent(
             "and the conversation remained open.",
             scope=scope,
             playbook_version_id=playbook_version_id,
+            status="failed",
+            error_type="CancelledByTrader",
         )
         console.print()
         console.print(
@@ -5954,6 +6016,8 @@ def _run_chat(
                 console.print(
                     "/exit · leave\n"
                     "/health · run diagnostics\n"
+                    "/import · import TradingView Paper Trading history\n"
+                    "/connect · import TradingView Paper Trading history\n"
                     "/onboard · update guided setup and return here\n"
                     "/examples · show starter prompts\n"
                     "/cost · show configured model prices\n"
@@ -5963,6 +6027,8 @@ def _run_chat(
                     "/memory · show source-backed goals and recent records in scope\n"
                     "/memory use · include bounded recall in the next model request\n"
                     "/memory off · cancel pending recall\n"
+                    "/new or /clear · start a fresh conversation\n"
+                    "/resume · switch to a saved conversation\n"
                     "/account · choose the default account for new sessions\n"
                     "/strategy · show active isolated strategy\n"
                     "/strategy use NAME · switch to exactly one strategy version\n"
@@ -5982,6 +6048,95 @@ def _run_chat(
                     "Press Ctrl-C while the agent is working to cancel only that response.\n"
                     "Everything else is natural language. Press Ctrl-V to attach a copied "
                     "screenshot, or say 'analyze my copied chart'—no file path needed."
+                )
+                continue
+            if message == "/clear" or _matches_chat_command(message, "/new"):
+                requested_name = (
+                    message.removeprefix("/new").strip()
+                    if message.startswith("/new")
+                    else ""
+                )
+                try:
+                    conversation = create_conversation(
+                        db,
+                        name=requested_name or None,
+                        scope=scope,
+                    )
+                except ValueError as exc:
+                    console.print(f"[red]{exc}[/red]")
+                    continue
+                active_strategy = None
+                agent.active_playbook_version_id = None
+                agent.last_references = []
+                agent.last_tool_audit = None
+                startup_memory = build_startup_memory(db, conversation, scope=scope)
+                startup_memory_pending = False
+                last_response_details = None
+                console.print(
+                    f"[green]New conversation ready.[/green] "
+                    f"[dim]{conversation.name}[/dim]"
+                )
+                continue
+            if _matches_chat_command(message, "/resume"):
+                requested_session = message.removeprefix("/resume").strip()
+                if not requested_session:
+                    conversations = list_conversations(db, limit=20, scope=scope)
+                    if not conversations:
+                        console.print("[dim]No saved conversations yet.[/dim]")
+                        continue
+                    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+                        names = ", ".join(item.name for item in conversations)
+                        console.print(
+                            f"Saved conversations: {escape_markup(names)}. "
+                            "Use /resume NAME."
+                        )
+                        continue
+                    selected_session = choose_terminal_option(
+                        "Resume conversation",
+                        "Choose a conversation in this account.",
+                        tuple(
+                            TerminalMenuOption(
+                                value=str(item.id),
+                                label=item.name,
+                                description=(
+                                    "current" if item.id == conversation.id else item.title
+                                ),
+                            )
+                            for item in conversations
+                        ),
+                    )
+                    if selected_session is None:
+                        continue
+                    resumed = next(
+                        item
+                        for item in conversations
+                        if str(item.id) == selected_session
+                    )
+                else:
+                    resumed = resolve_conversation(db, requested_session, scope=scope)
+                    if resumed is None:
+                        console.print(
+                            f"[red]Conversation not found: "
+                            f"{escape_markup(requested_session)}[/red]"
+                        )
+                        continue
+                conversation = resumed
+                active_strategy = active_session_strategy(
+                    db,
+                    conversation,
+                    scope=scope,
+                )
+                agent.active_playbook_version_id = (
+                    active_strategy[1].id if active_strategy is not None else None
+                )
+                agent.last_references = []
+                agent.last_tool_audit = None
+                startup_memory = build_startup_memory(db, conversation, scope=scope)
+                startup_memory_pending = False
+                last_response_details = None
+                console.print(
+                    f"[green]Resumed {escape_markup(conversation.name)}.[/green] "
+                    "What would you like to do next?"
                 )
                 continue
             if message == "/onboard":
@@ -6068,7 +6223,8 @@ def _run_chat(
                         value=str(account.id),
                         label=account.label,
                         description=(
-                            f"{account.broker} · {account.mode} · "
+                            f"{account.broker} · "
+                            f"{_display_account_mode(account.broker, account.mode)} · "
                             + (
                                 "current session"
                                 if account.id == scope.account_id
@@ -6104,7 +6260,7 @@ def _run_chat(
                             "workspace": workspace.slug,
                             "account": account.label,
                             "broker": account.broker,
-                            "mode": account.mode,
+                            "mode": _display_account_mode(account.broker, account.mode),
                         },
                         mutating=True,
                     )
@@ -6134,6 +6290,54 @@ def _run_chat(
                     "[dim]This conversation remains isolated to its original account.[/dim]"
                 )
                 continue
+            if _matches_chat_command(message, "/connect"):
+                requested_connection = message.removeprefix("/connect").strip()
+                normalized_connection = requested_connection.casefold()
+                if requested_connection and normalized_connection not in {
+                    "tradingview",
+                    "trading view",
+                    "tradingview alerts",
+                    "trading view alerts",
+                    "alerts",
+                }:
+                    console.print(
+                        "[yellow]The guided connection available here is TradingView "
+                        "Paper Trading history.[/yellow] Use [cyan]/connect[/cyan] without "
+                        "extra text."
+                    )
+                    continue
+                if "alert" not in normalized_connection:
+                    try:
+                        _run_tradingview_import_flow(db, scope=scope, path=None)
+                    except (LookupError, TradingViewImportError, PolicyViolation) as exc:
+                        console.print(f"[red]{escape_markup(str(exc))}[/red]")
+                        console.print("[dim]Nothing was changed.[/dim]")
+                    continue
+                try:
+                    changed = _configure_tradingview_alerts(db, public_url=None)
+                except (LookupError, ValueError, PolicyViolation) as exc:
+                    console.print(f"[red]{escape_markup(str(exc))}[/red]")
+                    continue
+                if changed:
+                    get_settings.cache_clear()
+                    settings = get_settings()
+                    agent.settings = settings
+                continue
+            if _matches_chat_command(message, "/import"):
+                requested_path = message.removeprefix("/import").strip()
+                path = _tradingview_csv_path(requested_path) if requested_path else None
+                if requested_path and path is None:
+                    console.print(
+                        "[red]Drag one TradingView CSV after /import, or use /import "
+                        "by itself for guidance.[/red]"
+                    )
+                    continue
+                try:
+                    _run_tradingview_import_flow(db, scope=scope, path=path)
+                except (LookupError, TradingViewImportError, PolicyViolation) as exc:
+                    console.print(f"[red]{escape_markup(str(exc))}[/red]")
+                    console.print("[dim]Nothing was changed.[/dim]")
+                continue
             if message == "/learn":
                 try:
                     _, curriculum, learning_scope = _learning_context(db)
@@ -6161,7 +6365,8 @@ def _run_chat(
                     scope=scope,
                 )
                 summaries = list_strategy_summaries(db, scope=scope)
-                if sys.stdin.isatty() and sys.stdout.isatty() and summaries:
+                drafts = list_local_strategy_templates()
+                if sys.stdin.isatty() and sys.stdout.isatty() and (summaries or drafts):
                     strategy_options = tuple(
                         TerminalMenuOption(
                             value=f"use\0{item.name}",
@@ -6174,6 +6379,13 @@ def _run_chat(
                             ),
                         )
                         for item in summaries
+                    ) + tuple(
+                        TerminalMenuOption(
+                            value=f"draft\0{item['name']}",
+                            label=f"{item['name']} (draft)",
+                            description="review before saving or activating",
+                        )
+                        for item in drafts
                     ) + (
                         TerminalMenuOption(
                             value="clear",
@@ -6191,9 +6403,9 @@ def _run_chat(
                     if selected_strategy == "clear":
                         message = "/strategy clear"
                     else:
-                        message = "/strategy use " + selected_strategy.split("\0", 1)[1]
+                        action, strategy_name = selected_strategy.split("\0", 1)
+                        message = f"/strategy {action} {strategy_name}"
                 elif active_strategy is None:
-                    drafts = list_local_strategy_templates()
                     if summaries:
                         names = ", ".join(item.name for item in summaries)
                         console.print(
@@ -6217,7 +6429,41 @@ def _run_chat(
                         f"{active_strategy[0].name} v{active_strategy[1].version} · "
                         f"sha256={active_strategy[1].content_hash[:12]}"
                     )
+                    if summaries:
+                        console.print(
+                            "Saved strategies: "
+                            + ", ".join(item.name for item in summaries)
+                        )
+                    if drafts:
+                        console.print(
+                            "Draft templates: "
+                            + ", ".join(item["name"] for item in drafts)
+                        )
                     continue
+            if message.startswith("/strategy draft "):
+                draft_name = message.removeprefix("/strategy draft ").strip()
+                draft = next(
+                    (
+                        item
+                        for item in list_local_strategy_templates()
+                        if item["name"].casefold() == draft_name.casefold()
+                    ),
+                    None,
+                )
+                if draft is None:
+                    console.print(f"[red]Strategy draft not found: {draft_name}[/red]")
+                    continue
+                console.print(
+                    Panel(
+                        f"Methodology: {escape_markup(draft['methodology'])}\n"
+                        f"Objective: {escape_markup(draft['objective'])}\n"
+                        f"Source: {escape_markup(draft['path'])}\n\n"
+                        "This is a draft, not an active strategy. Ask me to review and "
+                        "save it when you are ready.",
+                        title=f"{escape_markup(draft['name'])} · draft",
+                    )
+                )
+                continue
             if message.startswith("/strategy use "):
                 strategy_name = message.removeprefix("/strategy use ").strip()
                 try:
@@ -6418,6 +6664,54 @@ def _run_chat(
                     f"[green]Using {provider_label} · {selected_model} for this "
                     "conversation.[/green]"
                 )
+                continue
+            if is_tradingview_history_import_request(message):
+                path = _tradingview_csv_path(message)
+                try:
+                    _run_tradingview_import_flow(db, scope=scope, path=path)
+                except (LookupError, TradingViewImportError, PolicyViolation) as exc:
+                    console.print(f"[red]{escape_markup(str(exc))}[/red]")
+                    console.print("[dim]Nothing was changed.[/dim]")
+                continue
+            if is_tradingview_connection_request(message):
+                normalized_connection = message.casefold()
+                if not any(
+                    term in normalized_connection for term in ("alert", "webhook")
+                ):
+                    try:
+                        _run_tradingview_import_flow(db, scope=scope, path=None)
+                    except (LookupError, TradingViewImportError, PolicyViolation) as exc:
+                        console.print(f"[red]{escape_markup(str(exc))}[/red]")
+                        console.print("[dim]Nothing was changed.[/dim]")
+                    continue
+                try:
+                    changed = _configure_tradingview_alerts(
+                        db,
+                        public_url=None,
+                    )
+                except (LookupError, ValueError, PolicyViolation) as exc:
+                    console.print(f"[red]{escape_markup(str(exc))}[/red]")
+                    continue
+                if changed:
+                    get_settings.cache_clear()
+                    settings = get_settings()
+                    agent.settings = settings
+                continue
+            if message.startswith("/") and not _matches_chat_command(
+                message,
+                "/develop",
+            ):
+                suggestion = _chat_command_suggestion(message)
+                if suggestion is not None:
+                    console.print(
+                        f"[yellow]Unknown command.[/yellow] Did you mean "
+                        f"[cyan]{suggestion}[/cyan]?"
+                    )
+                else:
+                    console.print(
+                        "[yellow]Unknown command.[/yellow] Type [cyan]/help[/cyan] "
+                        "to see available commands."
+                    )
                 continue
             chart_effort = {
                 "economy": "low",
@@ -7519,10 +7813,11 @@ def setup_agent(
         )
     if selected_broker == "metatrader":
         console.print(
-            f"[yellow]Add METATRADER_BRIDGE_URL, METATRADER_BRIDGE_TOKEN, "
-            f"METATRADER_ACCOUNT_ID, and METATRADER_PLATFORM to {resolved_config}; "
-            "start with METATRADER_MODE=practice.[/yellow]"
-        )
+                f"[yellow]Add METATRADER_BRIDGE_URL, METATRADER_BRIDGE_TOKEN, "
+                f"METATRADER_ACCOUNT_ID, and METATRADER_PLATFORM to {resolved_config}; "
+                "start with METATRADER_MODE=demo.[/yellow]"
+            )
+        console.print(f"[yellow]{_metatrader_runtime_hint()}[/yellow]")
     if selected_news == "trading-economics":
         console.print(f"[yellow]Add TRADING_ECONOMICS_API_KEY to {resolved_config}.[/yellow]")
     if selected_tradingview == "enabled":
@@ -8060,6 +8355,535 @@ def mindset_list(
         raise typer.Exit(2) from exc
 
 
+def _configure_tradingview_alerts(
+    db,
+    *,
+    public_url: str | None,
+    account_reference: str | None = None,
+    assume_yes: bool = False,
+    copy_message: bool = False,
+) -> bool:
+    """Configure one account and render the two values TradingView needs."""
+    workspace = _configured_workspace(db)
+    current = _current_scope(db)
+    account = resolve_account(
+        db,
+        workspace.id,
+        account_reference or current.account_id,
+        active_only=True,
+    )
+    if account is None:
+        raise LookupError("Account was not found in the configured workspace.")
+
+    console.print()
+    console.print("[bold green]Connect TradingView chart alerts[/bold green]")
+    console.print(
+        "This sends chart conditions and OHLCV evidence into Trading Agent. "
+        "It does not expose your TradingView login, place orders, or sync the "
+        "Paper Trading balance, positions, or trade history."
+    )
+    candidate = public_url
+    if candidate is None:
+        console.print()
+        console.print(
+            "[bold]Public Trading Agent address[/bold]\n"
+            "[dim]TradingView cannot reach localhost. Enter the HTTPS address of "
+            "your verified TradingView receiver. Leave blank to stop without "
+            "changing anything.[/dim]"
+        )
+        candidate = console.input("[bold]HTTPS address ❯[/bold] ").strip()
+    if not candidate:
+        console.print(
+            "[yellow]Setup paused. No settings or secrets were changed.[/yellow]\n"
+            "A public HTTPS receiver is the one remaining requirement for alerts "
+            "to reach this computer."
+        )
+        return False
+    endpoint = tradingview_webhook_url(candidate, account.id)
+
+    _authorize_direct(
+        "configure_tradingview_webhook",
+        {
+            "workspace": workspace.slug,
+            "account": account.label,
+            "operation": "enable receiver and rotate account webhook secret",
+            "public_endpoint": endpoint,
+        },
+        mutating=True,
+        assume_yes=assume_yes,
+    )
+    config_path = default_config_path()
+    env_snapshot = snapshot_env_file(config_path)
+    try:
+        update_env_file(config_path, {"TRADINGVIEW_WEBHOOK_ENABLED": "true"})
+        secret = set_tradingview_webhook_secret(db, account=account)
+    except Exception:
+        db.rollback()
+        restore_env_file(config_path, env_snapshot)
+        raise
+    get_settings.cache_clear()
+    message = tradingview_alert_message(secret)
+
+    console.print()
+    console.print("[bold]1. Webhook URL[/bold]")
+    console.print(Text(endpoint))
+    console.print()
+    console.print("[bold]2. Alert message[/bold]")
+    console.print(Syntax(message, "json", word_wrap=False))
+    console.print(
+        "[dim]In TradingView, create an alert, open Notifications, enable "
+        "Webhook URL, paste item 1, then paste item 2 into Message. TradingView "
+        "requires two-factor authentication for webhooks.[/dim]"
+    )
+    if copy_message:
+        try:
+            copy_text_to_clipboard(message)
+        except ClipboardTextError as exc:
+            console.print(f"[yellow]{escape_markup(str(exc))}[/yellow]")
+        else:
+            console.print(
+                "[green]✓ Alert message copied to the clipboard.[/green] "
+                "[dim]It contains the one-time webhook secret; paste it only into "
+                "this TradingView alert.[/dim]"
+            )
+    console.print()
+    console.print(
+        "[bold yellow]Waiting for the first real alert[/bold yellow]\n"
+        "The receiver is configured, but Trading Agent will call it connected only "
+        "after TradingView delivers an alert successfully. Ask “show my latest "
+        "TradingView alert” after it fires."
+    )
+    return True
+
+
+def _tradingview_csv_path(value: str) -> Path | None:
+    """Extract a dragged or pasted CSV path without accepting extra shell syntax."""
+    try:
+        parts = shlex.split(value.strip())
+    except ValueError:
+        return None
+    matches = [part for part in parts if part.casefold().endswith(".csv")]
+    return Path(matches[-1]) if len(matches) == 1 else None
+
+
+def _render_tradingview_import_preview(
+    export: TradingViewExport,
+    *,
+    account_label: str,
+    display_timezone: ZoneInfo,
+) -> None:
+    record_count = export.rows_received - export.rows_ignored
+    kind = "Account History" if export.export_kind == "account_history" else "History"
+    console.print()
+    console.print("[bold green]Trading Agent: Import TradingView trades[/bold green]")
+    console.print(
+        f"[bold]Source[/bold]  Paper Trading {kind} · "
+        f"{record_count} record{'s' if record_count != 1 else ''}"
+    )
+    if export.export_kind == "order_history":
+        filled = sum(item.event.event_type == "order_fill" for item in export.events)
+        canceled = sum(item.event.event_type == "order_canceled" for item in export.events)
+        rejected = sum(item.event.event_type == "order_rejected" for item in export.events)
+        console.print(
+            f"[bold]Order status[/bold]  {filled} filled · {canceled} canceled · "
+            f"{rejected} rejected"
+        )
+    console.print(f"[bold]Journal account[/bold]  {escape_markup(account_label)}")
+    console.print(
+        f"[bold]Markets[/bold]  {escape_markup(', '.join(export.instruments))}"
+    )
+    if export.started_at is not None and export.ended_at is not None:
+        console.print(
+            "[bold]Period[/bold]  "
+            f"{_format_profile_datetime(export.started_at, display_timezone)} → "
+            f"{_format_profile_datetime(export.ended_at, display_timezone)}"
+        )
+    pnl_label = (
+        "Included by TradingView"
+        if export.realized_pnl_available
+        else "Not included; outcomes remain unknown"
+    )
+    console.print(f"[bold]Realized P&L[/bold]  {pnl_label}")
+    if export.rows_ignored:
+        console.print(
+            f"[dim]{export.rows_ignored} empty "
+            f"record{'s were' if export.rows_ignored != 1 else ' was'} ignored.[/dim]"
+        )
+    if export.export_kind == "order_history":
+        if export.history_coverage == "complete":
+            console.print(
+                "[yellow]This Order History export was explicitly marked complete, so "
+                "fill lifecycles can be reconstructed. Realized P&L remains unknown "
+                "unless TradingView supplied it.[/yellow]"
+            )
+        else:
+            console.print(
+                "[yellow]Order History is saved as execution evidence only. It will not "
+                "invent positions from a possibly partial file. Use Account History for "
+                "authoritative closed-trade lifecycles.[/yellow]"
+            )
+
+
+def _run_tradingview_import_flow(
+    db,
+    *,
+    scope: RequestScope,
+    path: Path | None,
+    timezone_name: str | None = None,
+    assume_yes: bool = False,
+) -> bool:
+    """Preview and import one TradingView Paper Trading export."""
+    if path is None:
+        console.print()
+        console.print("[bold green]Import TradingView Paper Trading[/bold green]")
+        console.print(
+            "In TradingView, open Paper Trading → Account Manager, choose "
+            "[bold]Account History[/bold] (best for completed trades) or "
+            "[bold]History[/bold] (fills), then Download data."
+        )
+        raw_path = console.input(
+            "[bold]Drag the downloaded CSV here, then press Enter ❯[/bold] "
+        ).strip()
+        if raw_path.casefold() in {"", "cancel", "/cancel", "exit", "/exit"}:
+            console.print("[dim]Import cancelled. Nothing was saved.[/dim]")
+            return False
+        path = _tradingview_csv_path(raw_path)
+        if path is None:
+            raise TradingViewImportError(
+                "I could not find one CSV path. Drag one TradingView export into "
+                "the prompt and press Enter."
+            )
+
+    if timezone_name is None:
+        display_timezone = _profile_timezone(db, scope)
+    else:
+        normalized = _normalize_timezone(timezone_name)
+        if normalized is None:
+            raise TradingViewImportError(
+                "That timezone is not recognized. Use a city timezone such as "
+                "America/New_York."
+            )
+        display_timezone = ZoneInfo(normalized)
+    export = parse_tradingview_export(path, default_timezone=display_timezone)
+    workspace = _configured_workspace(db)
+    account = resolve_account(db, workspace.id, scope.account_id, active_only=True)
+    if account is None:
+        raise LookupError("The selected journal account was not found.")
+    _render_tradingview_import_preview(
+        export,
+        account_label=account.label,
+        display_timezone=display_timezone,
+    )
+    _authorize_direct(
+        "import_tradingview_history",
+        {
+            "account": account.label,
+            "export_kind": export.export_kind,
+            "source_file": export.path.name,
+            "source_sha256": export.source_sha256,
+            "records": export.rows_received - export.rows_ignored,
+        },
+        mutating=True,
+        assume_yes=assume_yes,
+        scope=scope,
+    )
+    result = import_tradingview_export(db, export, scope=scope)
+    console.print()
+    if result.imported_executions:
+        console.print(
+            f"[bold green]✓ Imported {result.imported_executions} TradingView "
+            f"record{'s' if result.imported_executions != 1 else ''}[/bold green]"
+        )
+        console.print(
+            f"{result.imported_fills} fill{'s' if result.imported_fills != 1 else ''} · "
+            f"{result.imported_trades} trade lifecycle"
+            f"{'s' if result.imported_trades != 1 else ''} updated in "
+            f"[bold]{escape_markup(account.label)}[/bold]."
+        )
+    else:
+        console.print(
+            "[bold green]✓ TradingView history is already current[/bold green]\n"
+            f"{result.duplicate_executions} previously imported records matched; "
+            "nothing was duplicated."
+        )
+    if not result.realized_pnl_available:
+        console.print(
+            "[dim]The export did not supply realized P&L, so reviews will label "
+            "those outcomes unknown.[/dim]"
+        )
+    return True
+
+
+@tradingview_app.command("import")
+def tradingview_import_history(
+    history: Annotated[
+        Path | None,
+        typer.Argument(
+            help="TradingView Paper Trading History or Account History CSV.",
+        ),
+    ] = None,
+    timezone: Annotated[
+        str | None,
+        typer.Option(
+            "--timezone",
+            help="Timezone used by naive timestamps; trader profile by default.",
+        ),
+    ] = None,
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+) -> None:
+    """Import Paper Trading records into the same journal ledger as broker history."""
+    try:
+        upgrade_database()
+        with SessionLocal() as db:
+            scope = _current_scope(db)
+            _run_tradingview_import_flow(
+                db,
+                scope=scope,
+                path=history,
+                timezone_name=timezone,
+                assume_yes=yes,
+            )
+    except PolicyViolation:
+        _render_cancelled_mutation()
+        raise typer.Exit(0) from None
+    except (LookupError, TradingViewImportError) as exc:
+        console.print(f"[red]{escape_markup(str(exc))}[/red]")
+        console.print("[dim]Nothing was changed.[/dim]")
+        raise typer.Exit(2) from exc
+
+
+@tradingview_app.command("connect")
+def tradingview_connect(
+    public_url: Annotated[
+        str | None,
+        typer.Option(
+            "--public-url",
+            help="Public HTTPS origin or complete account webhook URL.",
+        ),
+    ] = None,
+    account_reference: Annotated[
+        str | None,
+        typer.Option(
+            "--account",
+            help="Account label, broker ID, or internal UUID; current by default.",
+        ),
+    ] = None,
+    copy_message: Annotated[
+        bool,
+        typer.Option(
+            "--copy-message",
+            help="Copy the generated alert JSON, including its secret, to the clipboard.",
+        ),
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes")] = False,
+) -> None:
+    """Guide a TradingView alert connection without requesting TradingView login data."""
+    try:
+        upgrade_database()
+        with SessionLocal() as db:
+            _configure_tradingview_alerts(
+                db,
+                public_url=public_url,
+                account_reference=account_reference,
+                assume_yes=yes,
+                copy_message=copy_message,
+            )
+    except (LookupError, ValueError, PolicyViolation) as exc:
+        console.print(f"[red]{escape_markup(str(exc))}[/red]")
+        raise typer.Exit(2) from exc
+
+
+@tradingview_app.command("status")
+def tradingview_status(
+    account_reference: Annotated[
+        str | None,
+        typer.Option(
+            "--account",
+            help="Account label, broker ID, or internal UUID; current by default.",
+        ),
+    ] = None,
+) -> None:
+    """Show imported Paper history and optional chart-alert status."""
+    upgrade_database()
+    settings = get_settings()
+    with SessionLocal() as db:
+        workspace = _configured_workspace(db)
+        current = _current_scope(db)
+        account = resolve_account(
+            db,
+            workspace.id,
+            account_reference or current.account_id,
+            active_only=True,
+        )
+        if account is None:
+            console.print("[red]Account was not found in the configured workspace.[/red]")
+            raise typer.Exit(1)
+        scope = RequestScope(workspace_id=workspace.id, account_id=account.id)
+        display_timezone = _profile_timezone(db, scope)
+        recent = recent_tradingview_alerts(db, scope=scope, limit=1)
+        paper_connection = db.scalar(
+            select(BrokerConnection).where(
+                BrokerConnection.workspace_id == workspace.id,
+                BrokerConnection.account_id == account.id,
+                BrokerConnection.provider == TRADINGVIEW_PAPER_PROVIDER,
+            )
+        )
+        imported_fills = 0
+        imported_trades = 0
+        imported_records = 0
+        canceled_orders = 0
+        rejected_orders = 0
+        recent_nonfills: list[ExecutionEvent] = []
+        last_import = None
+        if paper_connection is not None:
+            import_filters = (
+                ExecutionEvent.workspace_id == workspace.id,
+                ExecutionEvent.account_id == account.id,
+                ExecutionEvent.connection_id == paper_connection.id,
+            )
+            imported_records = int(
+                db.scalar(
+                    select(func.count())
+                    .select_from(ExecutionEvent)
+                    .where(*import_filters)
+                )
+                or 0
+            )
+            imported_fills = int(
+                db.scalar(
+                    select(func.count())
+                    .select_from(Fill)
+                    .where(
+                        Fill.workspace_id == workspace.id,
+                        Fill.account_id == account.id,
+                        Fill.connection_id == paper_connection.id,
+                    )
+                )
+                or 0
+            )
+            imported_trades = int(
+                db.scalar(
+                    select(func.count(func.distinct(ExecutionEvent.trade_id))).where(
+                        ExecutionEvent.workspace_id == workspace.id,
+                        ExecutionEvent.account_id == account.id,
+                        ExecutionEvent.connection_id == paper_connection.id,
+                        ExecutionEvent.trade_id.is_not(None),
+                    )
+                )
+                or 0
+            )
+            canceled_orders = int(
+                db.scalar(
+                    select(func.count())
+                    .select_from(ExecutionEvent)
+                    .where(
+                        *import_filters,
+                        ExecutionEvent.event_type == "order_canceled",
+                    )
+                )
+                or 0
+            )
+            rejected_orders = int(
+                db.scalar(
+                    select(func.count())
+                    .select_from(ExecutionEvent)
+                    .where(
+                        *import_filters,
+                        ExecutionEvent.event_type == "order_rejected",
+                    )
+                )
+                or 0
+            )
+            recent_nonfills = list(
+                db.scalars(
+                    select(ExecutionEvent)
+                    .where(
+                        *import_filters,
+                        ExecutionEvent.event_type.in_(
+                            ("order_canceled", "order_rejected")
+                        ),
+                    )
+                    .order_by(ExecutionEvent.occurred_at.desc())
+                    .limit(5)
+                )
+            )
+            last_import = db.scalar(
+                select(func.max(ExecutionEvent.ingested_at)).where(
+                    ExecutionEvent.workspace_id == workspace.id,
+                    ExecutionEvent.account_id == account.id,
+                    ExecutionEvent.connection_id == paper_connection.id,
+                )
+            )
+
+    receiver_enabled = settings.tradingview_webhook_enabled
+    secret_ready = bool(account.tradingview_webhook_secret_sha256)
+    real_alert = recent[0] if recent else None
+    table = Table(title="TradingView", show_header=False)
+    table.add_column("Check", style="bold")
+    table.add_column("Status")
+    table.add_row("Account", Text(account.label))
+    table.add_row(
+        "Paper history",
+        (
+            f"{imported_records} records · {imported_fills} fills · "
+            f"{imported_trades} trade lifecycles"
+            if paper_connection is not None
+            else "Not imported yet"
+        ),
+    )
+    table.add_row(
+        "Canceled / rejected",
+        f"{canceled_orders} canceled · {rejected_orders} rejected",
+    )
+    table.add_row(
+        "Latest import",
+        last_import.isoformat() if last_import is not None else "Never",
+    )
+    table.add_row("Live paper sync", "Not available from TradingView")
+    table.add_row("Receiver", "Enabled" if receiver_enabled else "Disabled")
+    table.add_row("Account secret", "Ready" if secret_ready else "Not configured")
+    table.add_row(
+        "Real delivery",
+        (
+            f"Verified · {real_alert.received_at.isoformat()}"
+            if real_alert is not None
+            else "Not observed yet"
+        ),
+    )
+    console.print(table)
+    if recent_nonfills:
+        order_table = Table(title="Recent canceled and rejected paper orders")
+        order_table.add_column("Time")
+        order_table.add_column("Status")
+        order_table.add_column("Instrument")
+        order_table.add_column("Side")
+        order_table.add_column("Quantity", justify="right")
+        order_table.add_column("Intended price", justify="right")
+        for event in recent_nonfills:
+            metadata = event.provider_metadata or {}
+            order_table.add_row(
+                _format_profile_datetime(event.occurred_at, display_timezone),
+                Text(str(metadata.get("order_status") or "unknown")),
+                Text(str(metadata.get("source_symbol") or "unknown")),
+                Text(str(metadata.get("order_side") or "unknown")),
+                Text(str(metadata.get("order_quantity") or "unknown")),
+                Text(str(metadata.get("intended_price") or "unknown")),
+            )
+        console.print(order_table)
+    if receiver_enabled and secret_ready and real_alert is None:
+        console.print(
+            "[yellow]Configured, not yet verified.[/yellow] Fire one TradingView "
+            "alert, then run this status again."
+        )
+    elif real_alert is not None:
+        console.print("[green]✓ TradingView delivered a verified chart alert.[/green]")
+    else:
+        console.print(
+            "Say [cyan]“import my TradingView trades”[/cyan] inside the agent and "
+            "drag in a Paper Trading export. Chart alerts are optional."
+        )
+
+
 @account_app.command("list")
 def account_list() -> None:
     """List accounts in the configured workspace and show the active default."""
@@ -8084,7 +8908,7 @@ def account_list() -> None:
                 "yes" if current is not None and account.id == current.account_id else "",
                 account.label,
                 account.broker,
-                account.mode,
+                _display_account_mode(account.broker, account.mode),
                 account.currency,
                 "active" if account.active else "inactive",
                 account.external_account_id,
@@ -8135,7 +8959,7 @@ def account_use(
                 "workspace": workspace.slug,
                 "account": account.label,
                 "broker": account.broker,
-                "mode": account.mode,
+                "mode": _display_account_mode(account.broker, account.mode),
             },
             mutating=True,
             assume_yes=yes,
@@ -8839,11 +9663,15 @@ def broker_configure_metatrader(
             operation="verification",
         )
         raise typer.Exit(1) from exc
+    display_mode = _display_account_mode(
+        settings.metatrader_platform,
+        settings.metatrader_mode,
+    )
     arguments = {
         "provider": connector.name,
         "label": label,
         "currency": account_state.currency,
-        "environment": settings.metatrader_mode,
+        "environment": display_mode,
         "platform": settings.metatrader_platform,
         "read_only": health["read_only"],
     }
@@ -8869,7 +9697,7 @@ def broker_configure_metatrader(
             currency=account_state.currency,
             mode=settings.metatrader_mode,
             provider=connector.name,
-            environment=settings.metatrader_mode,
+            environment=display_mode,
             config_reference="env:METATRADER_BRIDGE_TOKEN" if legacy else None,
             make_default=True,
             commit=False,
@@ -10394,6 +11222,7 @@ def _analyze_chart_command(
     reasoning_effort: str,
     captured_clipboard_image: ClipboardImage | None = None,
     provider: ModelProvider | None = None,
+    interactive_chat: bool = False,
 ) -> None:
     if clipboard == (image is not None):
         console.print(
@@ -10403,6 +11232,16 @@ def _analyze_chart_command(
         raise typer.Exit(2)
     source_label = "clipboard" if clipboard else str(image)
     authorization_source = {"clipboard": True} if clipboard else {"image_path": str(image)}
+    # Submitting an attached image after the toolbar states "analyze and save"
+    # is the trader's explicit confirmation. A natural clipboard request without
+    # an attachment still receives one concise confirmation. In both cases the
+    # policy hook and durable mutation audit remain active.
+    if interactive_chat and captured_clipboard_image is None and not typer.confirm(
+        "Analyze and save this copied chart?"
+    ):
+        console.print("[yellow]Chart review cancelled. Nothing was saved.[/yellow]")
+        raise typer.Exit(1)
+    authorization_options = {"assume_yes": True} if interactive_chat else {}
     _authorize_direct(
         "analyze_chart",
         {
@@ -10417,6 +11256,7 @@ def _analyze_chart_command(
             "reasoning_effort": reasoning_effort,
         },
         mutating=True,
+        **authorization_options,
     )
     settings = get_settings()
     resolved_image: Path | None = None
@@ -10510,7 +11350,7 @@ def _analyze_chart_command(
             loaded,
         )
         if assessment is not None:
-            _render_model_assessment(assessment)
+            _render_model_assessment(assessment, compact=interactive_chat)
             if assessment.status == "block":
                 console.print(
                     "[red]Chart analysis was not started. Close memory-heavy applications, "
@@ -10633,6 +11473,96 @@ def chart(
         model=model,
         reasoning_effort=reasoning_effort,
     )
+
+
+@app.command("dashboard", rich_help_panel="Core advisor workflow")
+def dashboard_interface(
+    port: Annotated[
+        int,
+        typer.Option(min=1, max=65535, help="Local dashboard port."),
+    ] = 8000,
+    open_browser: Annotated[
+        bool,
+        typer.Option("--open-browser/--no-open-browser"),
+    ] = True,
+) -> None:
+    """Open the Trading-Agent dashboard using existing configured connections."""
+    try:
+        plan = build_dashboard_launch_plan(
+            trading_directory=Path(__file__).resolve().parent.parent,
+            port=port,
+        )
+    except DashboardLaunchError as exc:
+        console.print(f"[red]{escape_markup(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
+    console.print("[bold green]Starting Trading-Agent dashboard[/bold green]")
+    console.print(
+        "[dim]Reusing your configured workspace, read-only broker, news, and "
+        "model connections. Credentials stay server-side.[/dim]"
+    )
+    console.print(f"[dim]Dashboard: {plan.service_url} · press Ctrl+C to stop[/dim]")
+    try:
+        run_dashboard(plan, open_browser=open_browser)
+    except DashboardLaunchError as exc:
+        console.print(f"[red]{escape_markup(str(exc))}[/red]")
+        console.print(
+            "[dim]If the port is already in use, stop the older server or choose "
+            "--port.[/dim]"
+        )
+        raise typer.Exit(1) from exc
+
+
+@app.command("pippy", rich_help_panel="Core advisor workflow")
+def pippy_interface(
+    pippy_directory: Annotated[
+        Path | None,
+        typer.Option(
+            "--pippy-directory",
+            file_okay=False,
+            help="Pippy project directory; defaults to ~/Projects/pippy.",
+        ),
+    ] = None,
+    trading_port: Annotated[
+        int,
+        typer.Option(min=1, max=65535, help="Local Trading Agent API port."),
+    ] = 8000,
+    pippy_port: Annotated[
+        int,
+        typer.Option(min=1, max=65535, help="Local Pippy web port."),
+    ] = 8001,
+    open_browser: Annotated[
+        bool,
+        typer.Option("--open-browser/--no-open-browser"),
+    ] = True,
+) -> None:
+    """Start the complete Pippy voice experience with one local command."""
+    try:
+        plan = build_pippy_launch_plan(
+            trading_directory=Path(__file__).resolve().parent.parent,
+            pippy_directory=pippy_directory,
+            trading_port=trading_port,
+            pippy_port=pippy_port,
+        )
+    except PippyLaunchError as exc:
+        console.print(f"[red]{escape_markup(str(exc))}[/red]")
+        raise typer.Exit(1) from exc
+
+    console.print("[bold green]Starting Pippy[/bold green]")
+    console.print(
+        "[dim]Creating a temporary local connection key in memory; "
+        "nothing needs to be copied or saved.[/dim]"
+    )
+    console.print(f"[dim]Pippy: {plan.pippy_url} · press Ctrl+C to stop[/dim]")
+    try:
+        run_pippy_stack(plan, open_browser=open_browser)
+    except PippyLaunchError as exc:
+        console.print(f"[red]{escape_markup(str(exc))}[/red]")
+        console.print(
+            "[dim]If a port is already in use, stop the older server or choose "
+            "--trading-port and --pippy-port.[/dim]"
+        )
+        raise typer.Exit(1) from exc
 
 
 @app.command("api", rich_help_panel="Setup and administration")

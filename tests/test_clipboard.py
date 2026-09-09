@@ -13,7 +13,9 @@ from app.clipboard import (
     ClipboardImage,
     ClipboardImageError,
     ClipboardImageNotFoundError,
+    ClipboardTextError,
     _read_bounded_regular_file,
+    copy_text_to_clipboard,
     detect_image_content_type,
     read_clipboard_image,
 )
@@ -121,6 +123,31 @@ def test_clipboard_reader_rejects_type_mismatch(monkeypatch) -> None:
 
     with pytest.raises(ClipboardImageError, match="did not match"):
         read_clipboard_image()
+
+
+def test_macos_text_clipboard_uses_pbcopy_without_a_shell(monkeypatch) -> None:
+    run = Mock()
+    monkeypatch.setattr(clipboard_module.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(
+        clipboard_module.shutil,
+        "which",
+        lambda name: "/usr/bin/pbcopy" if name == "pbcopy" else None,
+    )
+    monkeypatch.setattr(clipboard_module.subprocess, "run", run)
+
+    copy_text_to_clipboard("copy-ready message")
+
+    assert run.call_args.args == (["/usr/bin/pbcopy"],)
+    assert run.call_args.kwargs["input"] == b"copy-ready message"
+    assert "shell" not in run.call_args.kwargs
+
+
+def test_text_clipboard_rejects_missing_platform_command(monkeypatch) -> None:
+    monkeypatch.setattr(clipboard_module.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(clipboard_module.shutil, "which", lambda _name: None)
+
+    with pytest.raises(ClipboardTextError, match="No supported"):
+        copy_text_to_clipboard("message")
 
 
 def test_chart_requires_exactly_one_path_or_clipboard_source(monkeypatch) -> None:

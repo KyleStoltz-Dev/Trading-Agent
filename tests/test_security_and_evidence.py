@@ -15,7 +15,7 @@ from starlette.requests import Request
 import app.main as main_module
 from app.config import Settings
 from app.models import AnalysisRun, EvidenceItem, Observation
-from app.schemas import ChartAnalysis, PlaybookCheck
+from app.schemas import ChartAnalysis, ChartObservedMetadata, PlaybookCheck
 from app.services.evidence import record_chart_analysis, store_evidence_file
 from app.services.workspaces import RequestScope
 
@@ -432,6 +432,16 @@ def test_chart_evidence_is_content_addressed_private_and_auditable(
     db_session, request_scope, tmp_path
 ) -> None:
     analysis = ChartAnalysis(
+        observed_metadata=ChartObservedMetadata(
+            instrument=None,
+            instrument_evidence=None,
+            venue=None,
+            venue_evidence=None,
+            timeframe=None,
+            timeframe_evidence=None,
+            market_time=None,
+            market_time_evidence=None,
+        ),
         visible_facts=["Price reclaimed the marked low."],
         unreadable_or_missing=["Broker spread is not shown."],
         context_hypotheses=["The range may be reaccumulation."],
@@ -516,3 +526,71 @@ def test_chart_evidence_is_content_addressed_private_and_auditable(
     assert run.input_hash == evidence.sha256
     assert run.policy_hash == "a" * 64
     assert {item.kind for item in observations} == {"fact", "hypothesis"}
+
+
+def test_chart_evidence_uses_only_supported_visible_metadata(
+    db_session, request_scope, tmp_path
+) -> None:
+    visible_time = datetime(2026, 9, 8, 14, 35, tzinfo=UTC)
+    analysis = ChartAnalysis(
+        observed_metadata=ChartObservedMetadata(
+            instrument="XAUUSD",
+            instrument_evidence="Top-left label reads XAUUSD.",
+            venue="OANDA",
+            venue_evidence="Header venue label reads OANDA.",
+            timeframe="5m",
+            timeframe_evidence="Toolbar interval selector reads 5m.",
+            market_time=visible_time,
+            market_time_evidence="Crosshair label shows 2026-09-08 14:35 UTC.",
+        ),
+        visible_facts=["The instrument and timeframe labels are legible."],
+        unreadable_or_missing=[],
+        context_hypotheses=[],
+        trigger_hypotheses=[],
+        playbook_checks=[],
+        risk_questions=[],
+        management_questions=[],
+        disclaimer="Decision support only.",
+    )
+
+    evidence, _ = record_chart_analysis(
+        db_session,
+        scope=request_scope,
+        image_bytes=b"\x89PNG\r\n\x1a\nmetadata-test",
+        content_type="image/png",
+        evidence_directory=tmp_path / "evidence",
+        analysis=analysis,
+        provider=SimpleNamespace(name="test-provider", model="test-model"),
+        policy_hash="c" * 64,
+        prompt="Extract only visible metadata.",
+        source="test",
+        market_time=None,
+        instrument=None,
+        venue=None,
+        timeframe=None,
+    )
+
+    assert evidence.metadata_json["instrument"] == "XAUUSD"
+    assert evidence.metadata_json["venue"] == "OANDA"
+    assert evidence.metadata_json["timeframe"] == "5m"
+    assert evidence.market_time == visible_time
+    assert evidence.metadata_json["auto_detected_evidence"] == {
+        "instrument": "Top-left label reads XAUUSD.",
+        "venue": "Header venue label reads OANDA.",
+        "timeframe": "Toolbar interval selector reads 5m.",
+        "market_time": "Crosshair label shows 2026-09-08 14:35 UTC.",
+    }
+
+
+def test_observed_chart_metadata_rejects_values_without_visible_evidence() -> None:
+    with pytest.raises(ValueError, match="instrument_evidence"):
+        ChartObservedMetadata(
+            instrument="XAUUSD",
+            instrument_evidence=None,
+            venue=None,
+            venue_evidence=None,
+            timeframe=None,
+            timeframe_evidence=None,
+            market_time=None,
+            market_time_evidence=None,
+        )

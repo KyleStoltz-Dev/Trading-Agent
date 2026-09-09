@@ -24,6 +24,10 @@ class ClipboardImageNotFoundError(ClipboardImageError):
     pass
 
 
+class ClipboardTextError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class ClipboardImage:
     data: bytes
@@ -246,3 +250,39 @@ def read_clipboard_image(
             f"Clipboard image capture is not supported on {platform.system() or 'this platform'}. "
             "Save the chart as PNG, JPEG, or WebP and pass its path instead."
         )
+
+
+def copy_text_to_clipboard(value: str, *, timeout_seconds: float = 5) -> None:
+    """Copy bounded setup text with the native clipboard command for this platform."""
+    encoded = value.encode("utf-8")
+    if not encoded or len(encoded) > 64 * 1024:
+        raise ClipboardTextError("Clipboard text must be between 1 byte and 64 KB.")
+    system = platform.system().lower()
+    if system == "darwin":
+        executable = shutil.which("pbcopy")
+        command = [executable] if executable else None
+    elif system == "windows":
+        executable = shutil.which("clip")
+        command = [executable] if executable else None
+    elif system == "linux":
+        executable = shutil.which("wl-copy")
+        if executable:
+            command = [executable]
+        else:
+            executable = shutil.which("xclip")
+            command = [executable, "-selection", "clipboard"] if executable else None
+    else:
+        command = None
+    if command is None:
+        raise ClipboardTextError("No supported text clipboard command is available.")
+    try:
+        subprocess.run(  # noqa: S603
+            command,
+            input=encoded,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+            timeout=timeout_seconds,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ClipboardTextError("Could not copy text to the clipboard.") from exc
