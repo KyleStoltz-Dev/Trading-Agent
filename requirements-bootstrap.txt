@@ -1,6 +1,6 @@
 # Bootstrap-only dependency for synchronizing uv.lock.
-# Hashes are the official PyPI uv 0.11.32 wheel digests. Source archives are
-# deliberately omitted; installers require a matching binary wheel.
+# Hashes are the official PyPI wheel digests for the uv version pinned below.
+# Source archives are deliberately omitted; installers require a matching binary wheel.
 uv==0.12.8 \
     --hash=sha256:1a2f848916a6e5b3111e5d4c9e6ac66d9e38c561da4fa3a4ff51691e3c55974c \
     --hash=sha256:53984d68cddd227e6433b70b510d4b47fe82e658f22f4a6ca416b4e373406393 \

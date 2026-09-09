@@ -5,6 +5,7 @@ from pathlib import Path
 SUPPORTED_BOOTSTRAP_UV_HASH_COUNTS = {
     "0.11.32": 18,
     "0.12.1": 19,
+    "0.12.8": 19,
 }
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
