@@ -207,6 +207,22 @@ class AgentSessionRead(BaseModel):
     title: str
 
 
+class AgentSessionSummaryRead(AgentSessionRead):
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentTranscriptTurnRead(BaseModel):
+    role: Literal["user", "assistant", "system"]
+    content: str
+    status: Literal["pending", "complete", "partial", "failed"] = "complete"
+    error_type: str | None = None
+
+
+class AgentSessionTranscriptRead(AgentSessionSummaryRead):
+    turns: list[AgentTranscriptTurnRead]
+
+
 class AgentContextRead(BaseModel):
     workspace_id: uuid.UUID
     account_id: uuid.UUID

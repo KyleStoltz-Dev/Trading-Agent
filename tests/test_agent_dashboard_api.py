@@ -1,5 +1,6 @@
 import uuid
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -72,6 +73,64 @@ def test_agent_context_and_model_catalog_are_available_to_dashboard(
     }
     assert models.status_code == 200
     assert models.json()[0]["model"] == "qwen3.5:9b"
+
+
+def test_pippy_history_lists_scoped_sessions_and_reads_transcript(monkeypatch) -> None:
+    scope = RequestScope(workspace_id=uuid.uuid4(), account_id=uuid.uuid4())
+    session_id = uuid.uuid4()
+    now = datetime.now(UTC)
+    conversation = SimpleNamespace(
+        id=session_id,
+        workspace_id=scope.workspace_id,
+        account_id=scope.account_id,
+        name="daily-2026-09-08",
+        title="Pippy voice session",
+        created_at=now,
+        updated_at=now,
+    )
+    database = Mock()
+    monkeypatch.setattr(main_module, "get_settings", _settings)
+    monkeypatch.setattr(
+        main_module,
+        "list_conversations",
+        Mock(return_value=[conversation]),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "get_conversation",
+        Mock(return_value=conversation),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "conversation_transcript",
+        Mock(
+            return_value=[
+                {"role": "user", "content": "Show my saved strategies."},
+                {"role": "assistant", "content": "You have one active strategy."},
+            ]
+        ),
+    )
+    main_module.app.dependency_overrides[main_module.get_db] = lambda: database
+    main_module.app.dependency_overrides[main_module.require_request_scope] = lambda: scope
+
+    try:
+        with TestClient(main_module.app) as client:
+            headers = {"X-API-Key": "x" * 32}
+            history = client.get("/api/agent/sessions?limit=10", headers=headers)
+            transcript = client.get(
+                f"/api/agent/sessions/{session_id}/transcript",
+                headers=headers,
+            )
+    finally:
+        main_module.app.dependency_overrides.clear()
+
+    assert history.status_code == 200
+    assert history.json()[0]["session_id"] == str(session_id)
+    assert transcript.status_code == 200
+    assert [turn["role"] for turn in transcript.json()["turns"]] == [
+        "user",
+        "assistant",
+    ]
 
 
 def test_launcher_fragment_is_exchanged_once_without_root_auto_auth(monkeypatch) -> None:

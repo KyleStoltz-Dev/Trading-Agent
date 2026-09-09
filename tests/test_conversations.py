@@ -8,9 +8,12 @@ import pytest
 from app.models import Playbook, PlaybookVersion, TradingAccount, Workspace
 from app.services.conversations import (
     add_turn,
+    conversation_display_title,
     conversation_history,
+    conversation_topic_title,
     conversation_transcript,
     create_conversation,
+    generate_conversation_title,
     get_conversation,
     get_conversation_by_name,
     latest_conversation,
@@ -125,6 +128,71 @@ def test_session_names_are_predictable_slugs() -> None:
 def test_empty_session_name_is_rejected() -> None:
     with pytest.raises(ValueError, match="letters or numbers"):
         normalize_session_name("***")
+
+
+def test_conversation_title_is_generated_locally_from_opening_topic(db_session) -> None:
+    suffix = uuid.uuid4().hex[:10]
+    _, _, scope = _workspace_scope(db_session, suffix=f"title-{suffix}")
+    conversation = create_conversation(
+        db_session,
+        name=f"title-{suffix}",
+        title="Pippy voice session",
+        scope=scope,
+    )
+
+    add_turn(
+        db_session,
+        conversation,
+        "user",
+        "Could you help me refine my trading strategies that are in the agent?",
+        scope=scope,
+        playbook_version_id=None,
+    )
+
+    assert conversation.title == "Refine My Trading Strategies"
+    assert (
+        generate_conversation_title("How do we review API usage?")
+        == "How Do We Review API Usage"
+    )
+
+
+def test_legacy_generic_title_is_improved_without_mutating_on_read(db_session) -> None:
+    suffix = uuid.uuid4().hex[:10]
+    _, _, scope = _workspace_scope(db_session, suffix=f"legacy-title-{suffix}")
+    conversation = create_conversation(
+        db_session,
+        name=f"legacy-title-{suffix}",
+        title="Pippy voice session",
+        scope=scope,
+    )
+    add_turn(
+        db_session,
+        conversation,
+        "user",
+        "Let's review yesterday's gold trade and the entry rules.",
+        scope=scope,
+        playbook_version_id=None,
+    )
+    conversation.title = "Pippy voice session"
+    db_session.commit()
+
+    assert (
+        conversation_display_title(db_session, conversation, scope=scope)
+        == "Review Yesterday's Gold Trade and the Entry Rules"
+    )
+    db_session.refresh(conversation)
+    assert conversation.title == "Pippy voice session"
+
+
+def test_conversation_title_skips_vague_opening_for_first_substantive_topic() -> None:
+    assert conversation_topic_title(
+        [
+            "From the last conversation we were having.",
+            "I want you to help organize my voice agent architecture.",
+        ],
+        fallback="Pippy voice session",
+    ) == "Help Organize My Voice Agent Architecture"
+    assert conversation_topic_title([], fallback="Pippy voice session") == "Empty Session"
 
 
 def test_workspace_and_account_resolvers_never_cross_workspace(db_session) -> None:

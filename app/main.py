@@ -49,7 +49,13 @@ from app.db import (
     verify_hosted_rls,
 )
 from app.market_data.contracts import MarketInstrument
-from app.models import BrokerConnection, TradePlan, TradeReflection, TradingAccount
+from app.models import (
+    BrokerConnection,
+    ConversationSession,
+    TradePlan,
+    TradeReflection,
+    TradingAccount,
+)
 from app.policy import PolicyEngine, ToolContext
 from app.providers import ProviderConfigurationError, create_model_provider
 from app.providers.openai_realtime import create_realtime_client_secret
@@ -66,6 +72,9 @@ from app.schemas import (
     AgentProviderRead,
     AgentSessionCreate,
     AgentSessionRead,
+    AgentSessionSummaryRead,
+    AgentSessionTranscriptRead,
+    AgentTranscriptTurnRead,
     BrokerPositionRead,
     BrokerStateRead,
     ChartAnalysis,
@@ -108,6 +117,12 @@ from app.services.chat_webhooks import (
     chat_webhook_secret_is_valid,
     ingest_chat_webhook_message,
     recent_chat_webhooks,
+)
+from app.services.conversations import (
+    conversation_display_title,
+    conversation_transcript,
+    get_conversation,
+    list_conversations,
 )
 from app.services.dashboard_customization import (
     DashboardCustomizationError,
@@ -1093,6 +1108,72 @@ def issue_realtime_client_secret(
     except (ProviderConfigurationError, ValueError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return RealtimeClientSecretRead(**payload)
+
+
+def _agent_session_summary(
+    db: Session,
+    session: ConversationSession,
+    *,
+    scope: RequestScope,
+) -> AgentSessionSummaryRead:
+    return AgentSessionSummaryRead(
+        session_id=session.id,
+        name=session.name,
+        title=conversation_display_title(db, session, scope=scope),
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+    )
+
+
+@app.get("/api/agent/sessions", response_model=list[AgentSessionSummaryRead])
+def agent_session_history(
+    db: DatabaseSession,
+    policy: RuntimePolicyDependency,
+    scope: ScopeDependency,
+    _api_key: ApiKeyDependency,
+    limit: Annotated[int, Query(ge=1, le=100)] = 30,
+) -> list[AgentSessionSummaryRead]:
+    """List recent durable conversations in the selected account scope."""
+
+    authorize_api_call(policy, name="list_agent_sessions", arguments={"limit": limit})
+    return [
+        _agent_session_summary(db, session, scope=scope)
+        for session in list_conversations(db, limit=limit, scope=scope)
+    ]
+
+
+@app.get(
+    "/api/agent/sessions/{session_id}/transcript",
+    response_model=AgentSessionTranscriptRead,
+)
+def agent_session_transcript(
+    session_id: uuid.UUID,
+    db: DatabaseSession,
+    policy: RuntimePolicyDependency,
+    scope: ScopeDependency,
+    _api_key: ApiKeyDependency,
+) -> AgentSessionTranscriptRead:
+    """Read one scoped conversation transcript without adding it to model context."""
+
+    authorize_api_call(
+        policy,
+        name="get_agent_session_transcript",
+        arguments={"session_id": str(session_id)},
+    )
+    session = get_conversation(db, session_id, scope=scope)
+    if session is None:
+        raise HTTPException(status_code=404, detail="conversation session was not found")
+    turns = [
+        AgentTranscriptTurnRead(
+            role=turn["role"],
+            content=turn["content"],
+            status=turn.get("status", "complete"),
+            error_type=turn.get("error_type"),
+        )
+        for turn in conversation_transcript(db, session, scope=scope)
+    ]
+    summary = _agent_session_summary(db, session, scope=scope)
+    return AgentSessionTranscriptRead(**summary.model_dump(), turns=turns)
 
 
 @app.post("/api/agent/sessions", response_model=AgentSessionRead, status_code=201)

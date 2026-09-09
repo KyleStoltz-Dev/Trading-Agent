@@ -633,6 +633,71 @@ def test_all_function_schemas_are_strict() -> None:
         assert_strict_objects(tool["parameters"])
 
 
+def test_prior_conversation_tools_are_scoped_and_return_untrusted_history(
+    monkeypatch,
+) -> None:
+    current_id = uuid.uuid4()
+    earlier = SimpleNamespace(
+        id=uuid.uuid4(),
+        name="strategy-refinement",
+        title="Refine My Trading Strategy",
+        updated_at=datetime.now(UTC),
+    )
+    current = SimpleNamespace(
+        id=current_id,
+        name="current",
+        title="Current Conversation",
+        updated_at=datetime.now(UTC),
+    )
+    scoped_history = [
+        {"role": "user", "content": "Refine my entry rule."},
+        {"role": "assistant", "content": "We identified one rule to test."},
+    ]
+    monkeypatch.setattr(
+        "app.services.agent.list_conversations",
+        Mock(return_value=[current, earlier]),
+    )
+    monkeypatch.setattr(
+        "app.services.agent.resolve_conversation",
+        Mock(return_value=earlier),
+    )
+    history_reader = Mock(return_value=scoped_history)
+    monkeypatch.setattr("app.services.agent.conversation_history", history_reader)
+    monkeypatch.setattr(
+        "app.services.agent.conversation_display_title",
+        Mock(return_value="Refine My Trading Strategy"),
+    )
+    agent = TradingAgent(
+        settings=Settings(),
+        db=Mock(),
+        engine=Mock(),
+        confirm_mutation=Mock(return_value=False),
+        provider=RiskToolProvider(),
+        active_playbook_version_id=uuid.uuid4(),
+    )
+    agent._conversation_session_id = current_id
+
+    sessions = json.loads(
+        agent._execute_tool("list_conversation_sessions", {"limit": 5})
+    )["result"]
+    transcript = json.loads(
+        agent._execute_tool(
+            "get_conversation_history",
+            {"session_reference": "strategy-refinement", "limit": 20},
+        )
+    )["result"]
+
+    assert sessions["trust"] == "untrusted_content"
+    assert sessions["content"][0]["session_reference"] == "strategy-refinement"
+    assert transcript["trust"] == "untrusted_content"
+    assert transcript["content"] == scoped_history
+    assert all(
+        call.kwargs["playbook_version_id"] == agent.active_playbook_version_id
+        for call in history_reader.call_args_list
+    )
+    assert agent.last_references[-1].locator == "conversation-session:strategy-refinement"
+
+
 def test_calendar_tools_describe_natural_defaults_and_on_demand_history() -> None:
     tools = {tool["name"]: tool for tool in TOOLS}
 
