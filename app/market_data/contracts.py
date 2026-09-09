@@ -75,6 +75,24 @@ class Candle:
 
 
 @dataclass(frozen=True, slots=True)
+class MarketInstrument:
+    """One real provider instrument available to the connected data source."""
+
+    symbol: str
+    display_name: str
+    asset_class: str
+    source: str
+    venue: str
+    tradable: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.symbol.strip():
+            raise ValueError("instrument symbol is required")
+        if not self.display_name.strip():
+            raise ValueError("instrument display name is required")
+
+
+@dataclass(frozen=True, slots=True)
 class PositionState:
     external_id: str
     instrument: str
@@ -177,6 +195,8 @@ class MarketDataConnector(Protocol):
 
     name: str
     venue: str
+
+    async def instruments(self) -> Sequence[MarketInstrument]: ...
 
     async def latest_quote(self, instrument: str) -> Quote: ...
 

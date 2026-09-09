@@ -6,7 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
@@ -66,6 +66,7 @@ class Settings(BaseSettings):
     openai_auth_mode: Literal["auto", "subscription", "api"] = "auto"
     openai_api_key: SecretStr | None = None
     openai_model: str = "gpt-5.6-sol"
+    openai_realtime_model: str = "gpt-realtime-2.1-mini"
     openai_economy_model: str | None = None
     openai_balanced_model: str | None = None
     openai_deep_model: str | None = None
@@ -112,6 +113,8 @@ class Settings(BaseSettings):
     app_env: Literal["development", "test", "production"] = "development"
     database_auto_migrate: bool = True
     trading_agent_api_key: SecretStr | None = None
+    trading_dashboard_autoconnect: bool = False
+    trading_dashboard_bootstrap_token: SecretStr | None = None
     trading_workspace: str = "legacy-local"
     trading_account: str | None = None
     api_confirmation_ttl_seconds: int = Field(default=60, ge=10, le=300)
@@ -227,6 +230,13 @@ class Settings(BaseSettings):
     development_state_directory: Path = Path(".data/development")
 
     model_config = SettingsConfigDict(extra="ignore")
+
+    @field_validator("metatrader_mode", mode="before")
+    @classmethod
+    def normalize_metatrader_mode(cls, value: str | None) -> str | None:
+        if isinstance(value, str) and value.casefold() == "demo":
+            return "practice"
+        return value
 
     @model_validator(mode="after")
     def enforce_security_invariants(self) -> "Settings":

@@ -69,6 +69,178 @@ class BrokerStateRead(BaseModel):
     positions: list[BrokerPositionRead]
 
 
+DashboardAccent = Literal["teal", "blue", "violet", "gold"]
+DashboardDensity = Literal["comfortable", "compact"]
+DashboardWidth = Literal["wide", "focused"]
+DashboardCardStyle = Literal["rounded", "square"]
+DashboardSection = Literal["metrics", "market", "workflow", "context"]
+
+DASHBOARD_WIDGET_KEYS = frozenset(
+    {
+        "balance",
+        "equity",
+        "profit-target",
+        "win-rate",
+        "drawdown",
+        "market-chart",
+        "risk-distribution",
+        "connections",
+        "journal",
+        "position-sizing",
+        "positions",
+        "calendar",
+    }
+)
+
+
+class DashboardLayoutSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    version: Literal[1] = 1
+    name: str = Field(min_length=1, max_length=60)
+    accent: DashboardAccent
+    density: DashboardDensity
+    width: DashboardWidth
+    card_style: DashboardCardStyle = Field(alias="cardStyle")
+    widgets: dict[str, bool]
+    section_order: list[DashboardSection] = Field(alias="sectionOrder")
+
+    @model_validator(mode="after")
+    def validate_layout_members(self) -> "DashboardLayoutSpec":
+        if set(self.widgets) != DASHBOARD_WIDGET_KEYS:
+            raise ValueError("widgets must contain every supported dashboard widget exactly once")
+        if len(self.section_order) != 4 or set(self.section_order) != {
+            "metrics",
+            "market",
+            "workflow",
+            "context",
+        }:
+            raise ValueError("sectionOrder must contain every dashboard section exactly once")
+        return self
+
+
+class DashboardCustomizeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request: str = Field(min_length=3, max_length=1000)
+    current: DashboardLayoutSpec
+
+
+class DashboardCustomizeResponse(BaseModel):
+    spec: DashboardLayoutSpec
+    summary: str = Field(min_length=1, max_length=300)
+    provider: str
+    model: str
+
+
+class AgentModelRead(BaseModel):
+    provider: Literal["ollama", "openai", "anthropic"]
+    model: str
+    label: str
+    location: Literal["local", "cloud"]
+    available: bool
+    selected: bool
+
+
+class AgentProviderRead(BaseModel):
+    provider: Literal["ollama", "openai", "anthropic"]
+    label: str
+    configured: bool
+    location: Literal["local", "cloud"]
+    credential_storage: str
+    access_mode: Literal["local", "subscription", "api"]
+
+
+class AgentProviderCredentialWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    api_key: SecretStr
+
+
+class RealtimeProviderRead(BaseModel):
+    configured: bool
+    model: str
+    credential_storage: str
+
+
+class RealtimeClientSecretCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    voice: Literal["marin", "cedar"] = "marin"
+
+
+class RealtimeClientSecretRead(BaseModel):
+    value: str
+    expires_at: int | None = None
+
+
+class RealtimeUsageCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    response_id: str = Field(min_length=1, max_length=200)
+    model: str = Field(min_length=1, max_length=200)
+    input_text_tokens: int = Field(default=0, ge=0)
+    input_audio_tokens: int = Field(default=0, ge=0)
+    cached_text_tokens: int = Field(default=0, ge=0)
+    cached_audio_tokens: int = Field(default=0, ge=0)
+    output_text_tokens: int = Field(default=0, ge=0)
+    output_audio_tokens: int = Field(default=0, ge=0)
+    estimated_cost_usd: Decimal = Field(default=Decimal("0"), ge=0)
+
+
+class RealtimeUsageRead(RealtimeUsageCreate):
+    id: uuid.UUID
+    session_id: uuid.UUID
+    created_at: datetime
+
+
+class AgentSessionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    title: str = Field(default="Pippy voice session", min_length=1, max_length=160)
+
+
+class AgentSessionRead(BaseModel):
+    session_id: uuid.UUID
+    name: str
+    title: str
+
+
+class AgentContextRead(BaseModel):
+    workspace_id: uuid.UUID
+    account_id: uuid.UUID
+    broker_provider: str
+    news_provider: str
+
+
+class AgentMessageCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    message: str = Field(min_length=1, max_length=20_000)
+    provider: Literal["ollama", "openai", "anthropic"]
+    model: str = Field(min_length=1, max_length=200)
+    mode: Literal["auto", "economy", "balanced", "deep"] = "auto"
+
+
+class AgentReferenceRead(BaseModel):
+    kind: str
+    label: str
+    locator: str
+    retrieved_at: str | None = None
+
+
+class AgentMessageRead(BaseModel):
+    session_id: uuid.UUID
+    response: str
+    provider: str
+    model: str
+    mode: str
+    input_tokens: int
+    output_tokens: int
+    references: list[AgentReferenceRead]
+
+
 class TradingViewAlertCreate(BaseModel):
     """Strict TradingView payload; every text field remains untrusted evidence."""
 
@@ -362,6 +534,23 @@ class MarketDataRead(BaseModel):
     timeframe: str
     quote: MarketQuoteRead
     candles: list[MarketCandleRead]
+
+
+class MarketInstrumentRead(BaseModel):
+    symbol: str
+    display_name: str
+    asset_class: str
+    source: str
+    venue: str
+    tradable: bool
+
+
+class MarketInstrumentCatalogRead(BaseModel):
+    provider: str
+    retrieved_at: datetime
+    total: int
+    has_more: bool
+    instruments: list[MarketInstrumentRead]
 
 
 class InstrumentSpecificationCreate(BaseModel):

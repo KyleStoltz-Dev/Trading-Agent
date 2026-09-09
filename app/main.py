@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import (
     Depends,
@@ -25,6 +25,7 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
+    Response,
     UploadFile,
 )
 from fastapi.responses import FileResponse, JSONResponse
@@ -42,33 +43,63 @@ from app.connectors.oanda import OandaConnectorError
 from app.db import (
     SessionLocal,
     bind_database_scope,
+    engine,
     get_db,
     upgrade_database,
     verify_hosted_rls,
 )
+from app.market_data.contracts import MarketInstrument
 from app.models import BrokerConnection, TradePlan, TradeReflection, TradingAccount
 from app.policy import PolicyEngine, ToolContext
-from app.providers import create_model_provider
+from app.providers import ProviderConfigurationError, create_model_provider
+from app.providers.openai_realtime import create_realtime_client_secret
+from app.providers.subscription_provider import (
+    claude_subscription_status,
+    codex_subscription_status,
+)
 from app.schemas import (
+    AgentContextRead,
+    AgentMessageCreate,
+    AgentMessageRead,
+    AgentModelRead,
+    AgentProviderCredentialWrite,
+    AgentProviderRead,
+    AgentSessionCreate,
+    AgentSessionRead,
     BrokerPositionRead,
     BrokerStateRead,
     ChartAnalysis,
     ChatWebhookMessageRead,
     ChatWebhookReceipt,
+    DashboardCustomizeRequest,
+    DashboardCustomizeResponse,
     DiscordWebhookCreate,
     MarketCandleRead,
     MarketDataRead,
+    MarketInstrumentCatalogRead,
+    MarketInstrumentRead,
     MarketQuoteRead,
     PositionSizeRequest,
     PositionSizeResult,
+    RealtimeClientSecretCreate,
+    RealtimeClientSecretRead,
+    RealtimeProviderRead,
+    RealtimeUsageCreate,
+    RealtimeUsageRead,
     ReflectionCreate,
     ReflectionRead,
+    StrategySummary,
     TelegramWebhookCreate,
     TradePlanCreate,
     TradePlanRead,
     TradingViewAlertRead,
     TradingViewWebhookCreate,
     TradingViewWebhookReceipt,
+)
+from app.services.agent_gateway import (
+    run_agent_turn,
+    selectable_agent_models,
+    start_agent_session,
 )
 from app.services.chart_analysis import SYSTEM_PROMPT, analyze_chart
 from app.services.chat_webhooks import (
@@ -77,6 +108,10 @@ from app.services.chat_webhooks import (
     chat_webhook_secret_is_valid,
     ingest_chat_webhook_message,
     recent_chat_webhooks,
+)
+from app.services.dashboard_customization import (
+    DashboardCustomizationError,
+    customize_dashboard_layout,
 )
 from app.services.evidence import record_chart_analysis
 from app.services.journal import (
@@ -87,9 +122,19 @@ from app.services.journal import (
     get_trade_plan,
     list_trade_plans,
 )
+from app.services.model_credentials import (
+    model_api_key_configured,
+    resolve_model_credentials,
+    store_model_api_key,
+)
 from app.services.principals import authenticate_principal
+from app.services.realtime_usage import (
+    RealtimeUsageConflictError,
+    record_realtime_usage,
+)
 from app.services.risk import calculate_position_size
-from app.services.secrets import validate_secret_backend
+from app.services.secrets import SecretBackendError, validate_secret_backend
+from app.services.strategy_workspace import list_strategy_summaries
 from app.services.tool_audit import (
     complete_mutation_audit,
     record_direct_cli_confirmation,
@@ -104,6 +149,7 @@ from app.services.tradingview import (
 from app.services.workspaces import (
     RequestScope,
     resolve_account,
+    resolve_current_scope,
     resolve_workspace,
     validate_scope,
     validate_strategy_scope,
@@ -138,14 +184,42 @@ class WebhookRateLimiter:
             return True
 
 
+class DashboardBootstrapToken:
+    """Consume one launcher-generated browser bootstrap token exactly once."""
+
+    def __init__(self, token: str | None) -> None:
+        self._token_hash = (
+            hashlib.sha256(token.encode("utf-8")).digest() if token else None
+        )
+        self._consumed = False
+        self._lock = threading.Lock()
+
+    def consume(self, candidate: str | None) -> bool:
+        if candidate is None or not re.fullmatch(r"[A-Za-z0-9_-]{43}", candidate):
+            return False
+        candidate_hash = hashlib.sha256(candidate.encode("utf-8")).digest()
+        with self._lock:
+            if self._consumed or self._token_hash is None:
+                return False
+            if not hmac.compare_digest(self._token_hash, candidate_hash):
+                return False
+            self._consumed = True
+            return True
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
+    with _market_instrument_cache_lock:
+        _market_instrument_cache.clear()
     application.state.policy = PolicyEngine.load()
     application.state.confirmations = ConfirmationStore(
         ttl_seconds=get_settings().api_confirmation_ttl_seconds
     )
     application.state.tradingview_rate_limiter = WebhookRateLimiter()
     application.state.api_rate_limiter = WebhookRateLimiter()
+    application.state.dashboard_bootstrap = DashboardBootstrapToken(
+        secret_value(get_settings().trading_dashboard_bootstrap_token)
+    )
     if get_settings().database_auto_migrate:
         upgrade_database()
     if get_settings().deployment_mode == "hosted-multi-user":
@@ -162,6 +236,7 @@ app = FastAPI(
 )
 
 MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+DASHBOARD_SESSION_COOKIE = "trading_agent_dashboard_session"
 TRADINGVIEW_WEBHOOK_PATH = "/api/webhooks/tradingview/{account_id}"
 TRADINGVIEW_WEBHOOK_PREFIX = "/api/webhooks/tradingview/"
 TELEGRAM_WEBHOOK_PATH = "/api/webhooks/telegram/{account_id}"
@@ -171,6 +246,11 @@ CHAT_WEBHOOK_PREFIXES = (
     "/api/webhooks/telegram/",
     "/api/webhooks/discord/",
 )
+_market_instrument_cache: dict[
+    tuple[str, str, str],
+    tuple[float, str, tuple[MarketInstrument, ...]],
+] = {}
+_market_instrument_cache_lock = threading.Lock()
 
 
 def _is_tradingview_webhook_path(path: str) -> bool:
@@ -204,6 +284,13 @@ def _api_key_is_valid(api_key: str | None) -> bool:
     )
 
 
+def _local_api_credential(request: Request) -> str | None:
+    """Read a manual API key or the HttpOnly dashboard session cookie."""
+    return request.headers.get("X-API-Key") or request.cookies.get(
+        DASHBOARD_SESSION_COOKIE
+    )
+
+
 @app.middleware("http")
 async def bind_confirmation_to_raw_body(
     request: Request,
@@ -211,6 +298,10 @@ async def bind_confirmation_to_raw_body(
 ):
     """Hash raw API mutation bytes before JSON or multipart parsing consumes them."""
     if request.method in MUTATING_METHODS and request.url.path.startswith("/api/"):
+        is_dashboard_bootstrap = (
+            request.method == "POST"
+            and request.url.path == "/api/dashboard/session"
+        )
         is_webhook_delivery = (
             request.method == "POST"
             and (
@@ -246,8 +337,9 @@ async def bind_confirmation_to_raw_body(
                 )
         if (
             not is_webhook_delivery
+            and not is_dashboard_bootstrap
             and get_settings().deployment_mode != "hosted-multi-user"
-            and not _api_key_is_valid(request.headers.get("X-API-Key"))
+            and not _api_key_is_valid(_local_api_credential(request))
         ):
             return JSONResponse(
                 status_code=401,
@@ -257,7 +349,11 @@ async def bind_confirmation_to_raw_body(
             api_key = (
                 request.headers.get("Authorization", "")
                 if get_settings().deployment_mode == "hosted-multi-user"
-                else request.headers.get("X-API-Key", "")
+                else (
+                    "dashboard-bootstrap"
+                    if is_dashboard_bootstrap
+                    else _local_api_credential(request) or ""
+                )
             )
             client_ip = request.client.host if request.client else "unknown"
             limiter = request.app.state.api_rate_limiter
@@ -530,7 +626,23 @@ def require_api_authentication(
         if getattr(request.state, "principal", None) is None:
             raise HTTPException(status_code=401, detail="valid bearer principal required")
         return
-    require_api_key(api_key)
+    require_api_key(api_key or request.cookies.get(DASHBOARD_SESSION_COOKIE))
+
+
+def require_dashboard_bootstrap(
+    request: Request,
+    bootstrap_token: ApiKeyHeader = None,
+) -> None:
+    """Accept only the launcher's single-use local browser bootstrap token."""
+    settings = get_settings()
+    if (
+        settings.deployment_mode != "local-single-user"
+        or not settings.trading_dashboard_autoconnect
+    ):
+        raise HTTPException(status_code=404, detail="not found")
+    store: DashboardBootstrapToken = request.app.state.dashboard_bootstrap
+    if not store.consume(bootstrap_token):
+        raise HTTPException(status_code=401, detail="invalid dashboard bootstrap token")
 
 
 def require_request_scope(
@@ -729,6 +841,473 @@ def health(policy: RuntimePolicyDependency) -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.post("/api/dashboard/session", status_code=204)
+def create_dashboard_session(
+    response: Response,
+    policy: RuntimePolicyDependency,
+    _bootstrap: Annotated[None, Depends(require_dashboard_bootstrap)],
+) -> None:
+    """Exchange the one-use browser fragment for an HttpOnly local session cookie."""
+    policy.assert_unchanged()
+    settings = get_settings()
+    if settings.deployment_mode != "local-single-user":
+        raise HTTPException(status_code=404, detail="not found")
+    session_key = secret_value(settings.trading_agent_api_key)
+    if session_key is None:
+        raise HTTPException(status_code=503, detail="dashboard session is unavailable")
+    response.set_cookie(
+        DASHBOARD_SESSION_COOKIE,
+        session_key,
+        httponly=True,
+        samesite="strict",
+        secure=False,
+        path="/",
+    )
+
+
+@app.get("/api/agent/context", response_model=AgentContextRead)
+def agent_context(
+    db: DatabaseSession,
+    policy: RuntimePolicyDependency,
+    _api_key: ApiKeyDependency,
+) -> AgentContextRead:
+    """Resolve Pippy's configured local account without weakening scoped routes."""
+    authorize_api_call(
+        policy,
+        name="get_agent_context",
+        arguments={},
+    )
+    settings = get_settings()
+    if settings.deployment_mode != "local-single-user":
+        raise HTTPException(
+            status_code=404,
+            detail="the configured agent context is available only in local mode",
+        )
+    try:
+        scope = resolve_current_scope(
+            db,
+            workspace_reference=settings.trading_workspace,
+            account_reference=settings.trading_account,
+        )
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return AgentContextRead(
+        workspace_id=scope.workspace_id,
+        account_id=scope.account_id,
+        broker_provider=settings.broker_provider,
+        news_provider=settings.news_provider,
+    )
+
+
+@app.get("/api/agent/models", response_model=list[AgentModelRead])
+def agent_models(
+    policy: RuntimePolicyDependency,
+    _api_key: ApiKeyDependency,
+) -> list[AgentModelRead]:
+    """Expose Trading Agent's selectable model catalog to trusted local clients."""
+    authorize_api_call(policy, name="list_agent_models", arguments={})
+    return [
+        AgentModelRead(
+            provider=option.provider,
+            model=option.model,
+            label=option.label,
+            location=option.location,
+            available=option.available,
+            selected=option.selected,
+        )
+        for option in selectable_agent_models(get_settings())
+    ]
+
+
+@app.get("/api/agent/providers", response_model=list[AgentProviderRead])
+def agent_providers(
+    policy: RuntimePolicyDependency,
+    _api_key: ApiKeyDependency,
+) -> list[AgentProviderRead]:
+    """Report local and cloud brains without exposing credential material."""
+    authorize_api_call(policy, name="list_agent_providers", arguments={})
+    settings = get_settings()
+    if settings.deployment_mode != "local-single-user":
+        raise HTTPException(
+            status_code=404,
+            detail="provider setup is available only in local mode",
+        )
+    try:
+        openai_configured = model_api_key_configured(settings, provider="openai")
+        anthropic_configured = model_api_key_configured(settings, provider="anthropic")
+    except SecretBackendError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    storage = f"{settings.broker_secret_backend} credential vault"
+    openai_subscription = codex_subscription_status()
+    anthropic_subscription = claude_subscription_status()
+    openai_uses_subscription = settings.openai_auth_mode == "subscription" or (
+        settings.openai_auth_mode == "auto" and openai_subscription.ready
+    )
+    anthropic_uses_subscription = settings.anthropic_auth_mode == "subscription" or (
+        settings.anthropic_auth_mode == "auto" and anthropic_subscription.ready
+    )
+    return [
+        AgentProviderRead(
+            provider="ollama",
+            label="Local · Ollama",
+            configured=True,
+            location="local",
+            credential_storage="No API key required",
+            access_mode="local",
+        ),
+        AgentProviderRead(
+            provider="openai",
+            label=("ChatGPT subscription" if openai_uses_subscription else "OpenAI API"),
+            configured=(
+                openai_subscription.ready
+                if openai_uses_subscription
+                else openai_configured
+            ),
+            location="cloud",
+            credential_storage=(
+                "Codex sign-in" if openai_uses_subscription else storage
+            ),
+            access_mode="subscription" if openai_uses_subscription else "api",
+        ),
+        AgentProviderRead(
+            provider="anthropic",
+            label=("Claude subscription" if anthropic_uses_subscription else "Claude API"),
+            configured=(
+                anthropic_subscription.ready
+                if anthropic_uses_subscription
+                else anthropic_configured
+            ),
+            location="cloud",
+            credential_storage=(
+                "Claude Code sign-in" if anthropic_uses_subscription else storage
+            ),
+            access_mode="subscription" if anthropic_uses_subscription else "api",
+        ),
+    ]
+
+
+@app.post(
+    "/api/agent/providers/{provider}/credentials",
+    response_model=AgentProviderRead,
+)
+def configure_agent_provider(
+    provider: Literal["openai", "anthropic"],
+    request: AgentProviderCredentialWrite,
+    db: DatabaseSession,
+    policy: RuntimePolicyDependency,
+    scope: ScopeDependency,
+    _api_key: ApiKeyDependency,
+    _confirmation: ConfirmationDependency,
+) -> AgentProviderRead:
+    """Store a user-supplied model key in the configured operating-system vault."""
+    authorize_api_call(
+        policy,
+        name="configure_agent_provider",
+        arguments={"provider": provider},
+        mutating=True,
+    )
+    settings = get_settings()
+    if settings.deployment_mode != "local-single-user":
+        raise HTTPException(
+            status_code=404,
+            detail="provider setup is available only in local mode",
+        )
+    arguments = {"provider": provider}
+    with audit_api_mutation(
+        db,
+        scope=scope,
+        action="configure_agent_provider",
+        arguments=arguments,
+    ):
+        try:
+            store_model_api_key(
+                settings,
+                provider=provider,
+                api_key=request.api_key.get_secret_value(),
+            )
+        except SecretBackendError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return AgentProviderRead(
+        provider=provider,
+        label="OpenAI API" if provider == "openai" else "Claude API",
+        configured=True,
+        location="cloud",
+        credential_storage=f"{settings.broker_secret_backend} credential vault",
+        access_mode="api",
+    )
+
+
+@app.get("/api/agent/realtime", response_model=RealtimeProviderRead)
+def realtime_provider(
+    policy: RuntimePolicyDependency,
+    _api_key: ApiKeyDependency,
+) -> RealtimeProviderRead:
+    """Report whether the vault contains an API key usable by Pippy Realtime."""
+
+    authorize_api_call(policy, name="get_realtime_provider", arguments={})
+    settings = get_settings()
+    try:
+        configured = model_api_key_configured(settings, provider="openai")
+    except SecretBackendError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return RealtimeProviderRead(
+        configured=configured,
+        model=settings.openai_realtime_model,
+        credential_storage=f"{settings.broker_secret_backend} credential vault",
+    )
+
+
+@app.post(
+    "/api/agent/realtime/client-secret",
+    response_model=RealtimeClientSecretRead,
+)
+def issue_realtime_client_secret(
+    request: RealtimeClientSecretCreate,
+    policy: RuntimePolicyDependency,
+    _api_key: ApiKeyDependency,
+) -> RealtimeClientSecretRead:
+    """Create a short-lived Realtime credential from the vault-held project key."""
+
+    authorize_api_call(
+        policy,
+        name="create_realtime_client_secret",
+        arguments={"voice": request.voice},
+    )
+    settings = get_settings()
+    try:
+        credentials = resolve_model_credentials(settings, provider="openai")
+    except SecretBackendError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if credentials is None:
+        raise HTTPException(
+            status_code=503,
+            detail="An OpenAI API key is required for Realtime voice.",
+        )
+    try:
+        payload = create_realtime_client_secret(
+            api_key=credentials.api_key,
+            model=settings.openai_realtime_model,
+            voice=request.voice,
+            safety_identifier=settings.openai_safety_identifier,
+        )
+    except (ProviderConfigurationError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return RealtimeClientSecretRead(**payload)
+
+
+@app.post("/api/agent/sessions", response_model=AgentSessionRead, status_code=201)
+def create_agent_session(
+    request: AgentSessionCreate,
+    db: DatabaseSession,
+    policy: RuntimePolicyDependency,
+    scope: ScopeDependency,
+    _api_key: ApiKeyDependency,
+) -> AgentSessionRead:
+    """Create the durable PostgreSQL conversation used by one Pippy session."""
+    authorize_api_call(
+        policy,
+        name="start_agent_session",
+        arguments={"name": request.name, "title": request.title},
+        mutating=True,
+    )
+    arguments = {"name": request.name, "title": request.title}
+    with audit_api_mutation(
+        db,
+        scope=scope,
+        action="start_agent_session",
+        arguments=arguments,
+    ):
+        try:
+            session = start_agent_session(
+                db,
+                scope=scope,
+                name=request.name,
+                title=request.title,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return AgentSessionRead(
+        session_id=session.id,
+        name=session.name,
+        title=session.title,
+    )
+
+
+@app.post(
+    "/api/agent/sessions/{session_id}/messages",
+    response_model=AgentMessageRead,
+)
+def create_agent_message(
+    session_id: uuid.UUID,
+    request: AgentMessageCreate,
+    db: DatabaseSession,
+    policy: RuntimePolicyDependency,
+    scope: ScopeDependency,
+    _api_key: ApiKeyDependency,
+) -> AgentMessageRead:
+    """Run Pippy through the same provider, tools, policy, and audit path as chat."""
+    authorize_api_call(
+        policy,
+        name="run_agent_turn",
+        arguments={
+            "session_id": str(session_id),
+            "provider": request.provider,
+            "model": request.model,
+            "mode": request.mode,
+        },
+        mutating=True,
+    )
+    arguments = {
+        "session_id": str(session_id),
+        "provider": request.provider,
+        "model": request.model,
+        "mode": request.mode,
+    }
+    with audit_api_mutation(
+        db,
+        scope=scope,
+        action="run_agent_turn",
+        arguments=arguments,
+    ):
+        try:
+            result = run_agent_turn(
+                db,
+                engine=engine,
+                settings=get_settings(),
+                policy=policy,
+                scope=scope,
+                session_id=session_id,
+                message=request.message,
+                provider_name=request.provider,
+                model=request.model,
+                mode=request.mode,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ProviderConfigurationError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return AgentMessageRead(
+        session_id=result.session_id,
+        response=result.response,
+        provider=result.provider,
+        model=result.model,
+        mode=result.mode,
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+        references=list(result.references),
+    )
+
+
+@app.post(
+    "/api/agent/sessions/{session_id}/realtime-usage",
+    response_model=RealtimeUsageRead,
+)
+def create_realtime_usage_event(
+    session_id: uuid.UUID,
+    request: RealtimeUsageCreate,
+    db: DatabaseSession,
+    policy: RuntimePolicyDependency,
+    scope: ScopeDependency,
+    _api_key: ApiKeyDependency,
+) -> RealtimeUsageRead:
+    """Persist one idempotent Realtime response usage event in PostgreSQL."""
+
+    authorize_api_call(
+        policy,
+        name="record_realtime_usage",
+        arguments={
+            "session_id": str(session_id),
+            "response_id": request.response_id,
+            "model": request.model,
+        },
+        mutating=True,
+        deterministic=True,
+    )
+    arguments = {
+        "session_id": str(session_id),
+        "response_id": request.response_id,
+        "model": request.model,
+    }
+    with audit_api_mutation(
+        db,
+        scope=scope,
+        action="record_realtime_usage",
+        arguments=arguments,
+    ):
+        try:
+            event = record_realtime_usage(
+                db,
+                scope=scope,
+                session_id=session_id,
+                **request.model_dump(),
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RealtimeUsageConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return RealtimeUsageRead(
+        id=event.id,
+        session_id=event.session_id,
+        response_id=event.response_id,
+        model=event.model,
+        input_text_tokens=event.input_text_tokens,
+        input_audio_tokens=event.input_audio_tokens,
+        cached_text_tokens=event.cached_text_tokens,
+        cached_audio_tokens=event.cached_audio_tokens,
+        output_text_tokens=event.output_text_tokens,
+        output_audio_tokens=event.output_audio_tokens,
+        estimated_cost_usd=event.estimated_cost_usd,
+        created_at=event.created_at,
+    )
+
+
+@app.get("/api/strategies", response_model=list[StrategySummary])
+def strategy_catalog(
+    db: DatabaseSession,
+    policy: RuntimePolicyDependency,
+    scope: ScopeDependency,
+    _api_key: ApiKeyDependency,
+) -> list[StrategySummary]:
+    """List only the latest immutable version of each scoped strategy."""
+    authorize_api_call(
+        policy,
+        name="list_strategies",
+        arguments={},
+    )
+    return list_strategy_summaries(db, scope=scope)
+
+
+@app.post("/api/dashboard/customize", response_model=DashboardCustomizeResponse)
+def customize_dashboard(
+    request: DashboardCustomizeRequest,
+    policy: RuntimePolicyDependency,
+    _scope: ScopeDependency,
+    _api_key: ApiKeyDependency,
+) -> DashboardCustomizeResponse:
+    authorize_api_call(
+        policy,
+        name="customize_dashboard",
+        arguments={"request": request.request},
+    )
+    provider = create_model_provider(get_settings())
+    try:
+        spec, summary = customize_dashboard_layout(provider, request)
+    except DashboardCustomizationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return DashboardCustomizeResponse(
+        spec=spec,
+        summary=summary,
+        provider=provider.name,
+        model=provider.model,
+    )
+
+
 @app.get("/api/broker-state", response_model=BrokerStateRead)
 def broker_state(
     db: DatabaseSession,
@@ -834,16 +1413,24 @@ def market_data(
         try:
             settings = get_settings()
             normalized_provider = provider.strip().casefold()
-            scoped_oanda = normalized_provider in {"oanda", "oanda-v20", "oanda-v2"} and (
-                workspace_id is not None or account_id is not None
+            oanda_provider = normalized_provider in {"oanda", "oanda-v20", "oanda-v2"}
+            metatrader_provider = normalized_provider in {
+                "metatrader",
+                "mt4",
+                "mt5",
+                "metatrader-mt4-bridge",
+                "metatrader-mt5-bridge",
+            }
+            scoped_broker = metatrader_provider or (
+                oanda_provider and (workspace_id is not None or account_id is not None)
             )
-            if scoped_oanda:
+            if scoped_broker:
                 if workspace_id is None or account_id is None:
                     raise HTTPException(
                         status_code=428,
                         detail=(
                             "both X-Workspace-ID and X-Account-ID are required to use "
-                            "saved OANDA credentials"
+                            "a saved broker connection"
                         ),
                     )
                 scope = RequestScope(workspace_id=workspace_id, account_id=account_id)
@@ -854,11 +1441,16 @@ def market_data(
                         status_code=404,
                         detail="workspace/account scope was not found",
                     ) from exc
+                connection_provider = (
+                    f"metatrader-{settings.metatrader_platform}-bridge"
+                    if metatrader_provider
+                    else "oanda-v20"
+                )
                 connection = db.scalar(
                     select(BrokerConnection).where(
                         BrokerConnection.workspace_id == scope.workspace_id,
                         BrokerConnection.account_id == scope.account_id,
-                        BrokerConnection.provider == "oanda-v20",
+                        BrokerConnection.provider == connection_provider,
                     )
                 )
                 connector = create_broker_connector(
@@ -874,10 +1466,18 @@ def market_data(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except (OandaConnectorError, KrakenConnectorError, AlpacaConnectorError) as exc:
+        except (
+            OandaConnectorError,
+            KrakenConnectorError,
+            AlpacaConnectorError,
+            MetaTraderBridgeError,
+        ) as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception as exc:  # pragma: no cover - provider-specific implementation detail
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=503,
+                detail="market data provider failed unexpectedly",
+            ) from exc
         finally:
             if connector is not None:
                 await connector.aclose()
@@ -915,6 +1515,160 @@ def market_data(
         )
 
     return asyncio.run(fetch_data())
+
+
+@app.get("/api/market-instruments", response_model=MarketInstrumentCatalogRead)
+def market_instruments(
+    db: DatabaseSession,
+    policy: RuntimePolicyDependency,
+    _api_key: ApiKeyDependency,
+    workspace_id: WorkspaceHeader = None,
+    account_id: AccountHeader = None,
+    provider: str = Query(default="oanda", description="market data provider"),
+    query: str = Query(default="", max_length=80, description="symbol or name search"),
+    limit: int = Query(default=50, ge=1, le=100),
+) -> MarketInstrumentCatalogRead:
+    """Return the real catalog exposed by the selected provider or broker account."""
+    authorize_api_call(
+        policy,
+        name="list_market_instruments",
+        arguments={"provider": provider, "query": query, "limit": limit},
+    )
+
+    async def fetch_instruments() -> MarketInstrumentCatalogRead:
+        connector = None
+        normalized_provider = provider.strip().casefold()
+        cache_key = (
+            normalized_provider,
+            str(workspace_id or "global"),
+            str(account_id or "global"),
+        )
+        now = time.monotonic()
+        with _market_instrument_cache_lock:
+            cached = _market_instrument_cache.get(cache_key)
+            if cached is not None and now - cached[0] < 60:
+                provider_name, items = cached[1], cached[2]
+            else:
+                provider_name, items = "", ()
+        try:
+            if not items:
+                settings = get_settings()
+                oanda_provider = normalized_provider in {
+                    "oanda",
+                    "oanda-v20",
+                    "oanda-v2",
+                }
+                metatrader_provider = normalized_provider in {
+                    "metatrader",
+                    "mt4",
+                    "mt5",
+                    "metatrader-mt4-bridge",
+                    "metatrader-mt5-bridge",
+                }
+                scoped_broker = metatrader_provider or (
+                    oanda_provider and (workspace_id is not None or account_id is not None)
+                )
+                if scoped_broker:
+                    if workspace_id is None or account_id is None:
+                        raise HTTPException(
+                            status_code=428,
+                            detail=(
+                                "both X-Workspace-ID and X-Account-ID are required to use "
+                                "a saved broker connection"
+                            ),
+                        )
+                    scope = RequestScope(workspace_id=workspace_id, account_id=account_id)
+                    try:
+                        account = validate_scope(db, scope)
+                    except LookupError as exc:
+                        raise HTTPException(
+                            status_code=404,
+                            detail="workspace/account scope was not found",
+                        ) from exc
+                    connection_provider = (
+                        f"metatrader-{settings.metatrader_platform}-bridge"
+                        if metatrader_provider
+                        else "oanda-v20"
+                    )
+                    connection = db.scalar(
+                        select(BrokerConnection).where(
+                            BrokerConnection.workspace_id == scope.workspace_id,
+                            BrokerConnection.account_id == scope.account_id,
+                            BrokerConnection.provider == connection_provider,
+                        )
+                    )
+                    connector = create_broker_connector(
+                        settings,
+                        account=account,
+                        connection=connection,
+                    )
+                else:
+                    connector = create_market_data_connector(settings, provider)
+                items = tuple(await connector.instruments())
+                provider_name = connector.name
+                with _market_instrument_cache_lock:
+                    if len(_market_instrument_cache) >= 32:
+                        oldest = min(
+                            _market_instrument_cache,
+                            key=lambda key: _market_instrument_cache[key][0],
+                        )
+                        _market_instrument_cache.pop(oldest, None)
+                    _market_instrument_cache[cache_key] = (
+                        time.monotonic(),
+                        provider_name,
+                        items,
+                    )
+        except BrokerConfigurationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except (
+            OandaConnectorError,
+            KrakenConnectorError,
+            AlpacaConnectorError,
+            MetaTraderBridgeError,
+        ) as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:  # pragma: no cover - provider-specific detail
+            raise HTTPException(
+                status_code=503,
+                detail="market instrument catalog failed unexpectedly",
+            ) from exc
+        finally:
+            if connector is not None:
+                await connector.aclose()
+        normalized_query = query.strip().casefold()
+        filtered = sorted(
+            (
+                item
+                for item in items
+                if not normalized_query
+                or normalized_query in item.symbol.casefold()
+                or normalized_query in item.display_name.casefold()
+                or normalized_query in item.venue.casefold()
+                or normalized_query in item.asset_class.casefold()
+            ),
+            key=lambda candidate: candidate.symbol,
+        )
+        return MarketInstrumentCatalogRead(
+            provider=provider_name,
+            retrieved_at=datetime.now(UTC),
+            total=len(filtered),
+            has_more=len(filtered) > limit,
+            instruments=[
+                MarketInstrumentRead(
+                    symbol=item.symbol,
+                    display_name=item.display_name,
+                    asset_class=item.asset_class,
+                    source=item.source,
+                    venue=item.venue,
+                    tradable=item.tradable,
+                )
+                for item in filtered[:limit]
+            ],
+        )
+
+    return asyncio.run(fetch_instruments())
 
 
 @app.post(

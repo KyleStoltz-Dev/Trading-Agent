@@ -24,6 +24,7 @@ from app.market_data.contracts import (
     BrokerEvent,
     BrokerTradeEffect,
     Candle,
+    MarketInstrument,
     PositionState,
     Quote,
     SyncPage,
@@ -445,6 +446,22 @@ class MetaTraderReadOnlyBridgeConnector:
             retrieved_at=retrieved_at,
             source=self.name,
             venue=self.venue,
+        )
+
+    async def instruments(self) -> Sequence[MarketInstrument]:
+        payload = await self._get_json("/v1/symbols")
+        self._verify_account(str(payload.get("account_id", "")))
+        items = _object_items(payload, "symbols")
+        return tuple(
+            MarketInstrument(
+                symbol=_symbol(item),
+                display_name=str(item.get("description") or _symbol(item)),
+                asset_class=str(item.get("path") or "unknown"),
+                source=self.name,
+                venue=self.venue,
+                tradable=bool(item.get("tradable", True)),
+            )
+            for item in items
         )
 
     async def candles(

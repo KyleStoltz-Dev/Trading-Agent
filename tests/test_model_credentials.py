@@ -51,10 +51,24 @@ def test_model_api_key_round_trip_uses_vault_without_exposing_key(monkeypatch) -
     assert not model_api_key_configured(settings, provider="openai")
 
 
-def test_environment_model_key_takes_precedence_over_vault(monkeypatch) -> None:
+def test_explicitly_saved_vault_key_takes_precedence_over_environment(monkeypatch) -> None:
     backend = MemorySecretBackend()
     backend.values["keyring:model/openai"] = {"api_key": "vault-key"}
     monkeypatch.setattr(model_credentials, "secret_backend", lambda _settings: backend)
+    settings = Settings(openai_api_key=SecretStr("environment-key"))
+
+    credentials = resolve_model_credentials(settings, provider="openai")
+
+    assert credentials is not None
+    assert credentials.api_key == "vault-key"
+
+
+def test_environment_model_key_is_fallback_when_vault_is_empty(monkeypatch) -> None:
+    monkeypatch.setattr(
+        model_credentials,
+        "secret_backend",
+        lambda _settings: MemorySecretBackend(),
+    )
     settings = Settings(openai_api_key=SecretStr("environment-key"))
 
     credentials = resolve_model_credentials(settings, provider="openai")
