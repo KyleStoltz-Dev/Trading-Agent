@@ -120,7 +120,9 @@ scenarios, not proof of manipulation or a direction.
 
 TradingView's Account Manager exports each selected tab as a CSV. Inside the agent, say
 `import my TradingView trades`; it explains where to download the file and accepts a dragged
-Trade History, Order History, or Account History CSV path. The equivalent direct command is:
+Trade History, Order History, or Account History CSV path. Traders may also drag the entire
+set of downloaded CSVs or their containing folder; Trading Agent selects Trade History first
+because it contains the richest completed-trade evidence. The equivalent direct command is:
 
 ```bash
 trade tradingview import ~/Downloads/paper-trading-trade-history.csv
