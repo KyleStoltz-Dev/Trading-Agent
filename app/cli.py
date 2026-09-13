@@ -6411,15 +6411,23 @@ def _run_chat(
                 continue
             if _matches_chat_command(message, "/import"):
                 requested_path = message.removeprefix("/import").strip()
-                path = _tradingview_csv_path(requested_path) if requested_path else None
+                paths = (
+                    _tradingview_csv_paths(requested_path) if requested_path else ()
+                )
+                path = _preferred_tradingview_csv(paths) if paths else None
                 if requested_path and path is None:
                     console.print(
-                        "[red]Drag one TradingView CSV after /import, or use /import "
-                        "by itself for guidance.[/red]"
+                        "[red]Drag the TradingView CSVs or their folder after "
+                        "/import, or use /import by itself for guidance.[/red]"
                     )
                     continue
                 try:
-                    _run_tradingview_import_flow(db, scope=scope, path=path)
+                    _run_tradingview_import_flow(
+                        db,
+                        scope=scope,
+                        path=path,
+                        bundle_size=max(1, len(paths)),
+                    )
                 except (LookupError, TradingViewImportError, PolicyViolation) as exc:
                     console.print(f"[red]{escape_markup(str(exc))}[/red]")
                     console.print("[dim]Nothing was changed.[/dim]")
@@ -6752,9 +6760,15 @@ def _run_chat(
                 )
                 continue
             if is_tradingview_history_import_request(message):
-                path = _tradingview_csv_path(message)
+                paths = _tradingview_csv_paths(message)
+                path = _preferred_tradingview_csv(paths) if paths else None
                 try:
-                    _run_tradingview_import_flow(db, scope=scope, path=path)
+                    _run_tradingview_import_flow(
+                        db,
+                        scope=scope,
+                        path=path,
+                        bundle_size=max(1, len(paths)),
+                    )
                 except (LookupError, TradingViewImportError, PolicyViolation) as exc:
                     console.print(f"[red]{escape_markup(str(exc))}[/red]")
                     console.print("[dim]Nothing was changed.[/dim]")
@@ -8674,9 +8688,9 @@ def _run_tradingview_import_flow(
     path: Path | None,
     timezone_name: str | None = None,
     assume_yes: bool = False,
+    bundle_size: int = 1,
 ) -> bool:
     """Preview and import the richest journal history from a TradingView export bundle."""
-    bundle_size = 1
     if path is None:
         console.print()
         console.print("[bold green]Import TradingView Paper Trading[/bold green]")

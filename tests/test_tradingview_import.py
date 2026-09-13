@@ -466,6 +466,11 @@ def test_export_reader_uses_a_bounded_descriptor_read(monkeypatch, tmp_path) -> 
         "Import my TradingView trades",
         "Sync Trading View paper history",
         "Load executions from TradingView",
+        "Upload these TradingView CSVs",
+        "Use my TradingView export",
+        "Can TradingView read these files?",
+        "Import paper-trading-trade-history.csv",
+        "/tmp/paper-trading-trade-history.csv",
     ),
 )
 def test_explicit_tradingview_import_requests_are_recognized(message: str) -> None:
