@@ -6411,15 +6411,23 @@ def _run_chat(
                 continue
             if _matches_chat_command(message, "/import"):
                 requested_path = message.removeprefix("/import").strip()
-                path = _tradingview_csv_path(requested_path) if requested_path else None
+                paths = (
+                    _tradingview_csv_paths(requested_path) if requested_path else ()
+                )
+                path = _preferred_tradingview_csv(paths) if paths else None
                 if requested_path and path is None:
                     console.print(
-                        "[red]Drag one TradingView CSV after /import, or use /import "
-                        "by itself for guidance.[/red]"
+                        "[red]Drag the TradingView CSVs or their folder after "
+                        "/import, or use /import by itself for guidance.[/red]"
                     )
                     continue
                 try:
-                    _run_tradingview_import_flow(db, scope=scope, path=path)
+                    _run_tradingview_import_flow(
+                        db,
+                        scope=scope,
+                        path=path,
+                        bundle_size=max(1, len(paths)),
+                    )
                 except (LookupError, TradingViewImportError, PolicyViolation) as exc:
                     console.print(f"[red]{escape_markup(str(exc))}[/red]")
                     console.print("[dim]Nothing was changed.[/dim]")
@@ -6752,9 +6760,15 @@ def _run_chat(
                 )
                 continue
             if is_tradingview_history_import_request(message):
-                path = _tradingview_csv_path(message)
+                paths = _tradingview_csv_paths(message)
+                path = _preferred_tradingview_csv(paths) if paths else None
                 try:
-                    _run_tradingview_import_flow(db, scope=scope, path=path)
+                    _run_tradingview_import_flow(
+                        db,
+                        scope=scope,
+                        path=path,
+                        bundle_size=max(1, len(paths)),
+                    )
                 except (LookupError, TradingViewImportError, PolicyViolation) as exc:
                     console.print(f"[red]{escape_markup(str(exc))}[/red]")
                     console.print("[dim]Nothing was changed.[/dim]")
@@ -8545,14 +8559,57 @@ def _configure_tradingview_alerts(
     return True
 
 
-def _tradingview_csv_path(value: str) -> Path | None:
-    """Extract a dragged or pasted CSV path without accepting extra shell syntax."""
+def _tradingview_csv_paths(value: str) -> tuple[Path, ...]:
+    """Extract one or more dragged CSV paths without executing shell syntax."""
     try:
         parts = shlex.split(value.strip())
     except ValueError:
+        return ()
+    matches: list[Path] = []
+    for part in parts:
+        candidate = Path(part).expanduser()
+        if candidate.suffix.casefold() == ".csv":
+            matches.append(candidate)
+            continue
+        try:
+            if candidate.is_dir():
+                matches.extend(
+                    sorted(
+                        item
+                        for item in candidate.iterdir()
+                        if item.is_file() and item.suffix.casefold() == ".csv"
+                    )
+                )
+        except OSError:
+            continue
+    return tuple(dict.fromkeys(matches))
+
+
+def _tradingview_csv_path(value: str) -> Path | None:
+    """Extract one dragged or pasted CSV path for existing single-file callers."""
+    matches = _tradingview_csv_paths(value)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _preferred_tradingview_csv(paths: tuple[Path, ...]) -> Path | None:
+    """Choose the richest standard TradingView history export from a dragged bundle."""
+    if len(paths) == 1:
+        return paths[0]
+    ranked: list[tuple[int, str, Path]] = []
+    for path in paths:
+        normalized = re.sub(r"[\s_]+", "-", path.name.casefold())
+        if "trade-history" in normalized:
+            rank = 3
+        elif "account-history" in normalized:
+            rank = 2
+        elif "order-history" in normalized:
+            rank = 1
+        else:
+            continue
+        ranked.append((rank, normalized, path))
+    if not ranked:
         return None
-    matches = [part for part in parts if part.casefold().endswith(".csv")]
-    return Path(matches[-1]) if len(matches) == 1 else None
+    return max(ranked, key=lambda item: (item[0], item[1]))[2]
 
 
 def _render_tradingview_import_preview(
@@ -8560,6 +8617,7 @@ def _render_tradingview_import_preview(
     *,
     account_label: str,
     display_timezone: ZoneInfo,
+    bundle_size: int = 1,
 ) -> None:
     record_count = export.rows_received - export.rows_ignored
     kind = {
@@ -8573,6 +8631,12 @@ def _render_tradingview_import_preview(
         f"[bold]Source[/bold]  Paper Trading {kind} · "
         f"{record_count} record{'s' if record_count != 1 else ''}"
     )
+    if bundle_size > 1:
+        skipped = bundle_size - 1
+        console.print(
+            f"[bold]Files[/bold]  {bundle_size} received · selected {kind} · "
+            f"{skipped} other export{'s' if skipped != 1 else ''} left unchanged"
+        )
     if export.export_kind == "order_history":
         filled = sum(item.event.event_type == "order_fill" for item in export.events)
         canceled = sum(item.event.event_type == "order_canceled" for item in export.events)
@@ -8624,8 +8688,9 @@ def _run_tradingview_import_flow(
     path: Path | None,
     timezone_name: str | None = None,
     assume_yes: bool = False,
+    bundle_size: int = 1,
 ) -> bool:
-    """Preview and import one TradingView Paper Trading export."""
+    """Preview and import the richest journal history from a TradingView export bundle."""
     if path is None:
         console.print()
         console.print("[bold green]Import TradingView Paper Trading[/bold green]")
@@ -8635,16 +8700,19 @@ def _run_tradingview_import_flow(
             "[bold]Order History[/bold] (orders and fills), then Download data."
         )
         raw_path = console.input(
-            "[bold]Drag the downloaded CSV here, then press Enter ❯[/bold] "
+            "[bold]Drag one CSV, all CSVs, or their folder here, then press Enter ❯[/bold] "
         ).strip()
         if raw_path.casefold() in {"", "cancel", "/cancel", "exit", "/exit"}:
             console.print("[dim]Import cancelled. Nothing was saved.[/dim]")
             return False
-        path = _tradingview_csv_path(raw_path)
+        paths = _tradingview_csv_paths(raw_path)
+        bundle_size = len(paths)
+        path = _preferred_tradingview_csv(paths)
         if path is None:
             raise TradingViewImportError(
-                "I could not find one CSV path. Drag one TradingView export into "
-                "the prompt and press Enter."
+                "I could not identify a Trade History, Account History, or Order "
+                "History CSV in those files. Drag the TradingView export files or "
+                "their folder into the prompt and press Enter."
             )
 
     if timezone_name is None:
@@ -8666,6 +8734,7 @@ def _run_tradingview_import_flow(
         export,
         account_label=account.label,
         display_timezone=display_timezone,
+        bundle_size=bundle_size,
     )
     _authorize_direct(
         "import_tradingview_history",

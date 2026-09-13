@@ -40,8 +40,10 @@ _ANSI_ESCAPE = re.compile(
     r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])"
 )
 _IMPORT_INTENT = re.compile(
-    r"\b(import|sync|load|bring\s+in|add)\b.*\b(history|trades?|executions?|fills?)\b"
-    r"|\b(history|trades?|executions?|fills?)\b.*\b(import|sync|load|bring\s+in|add)\b",
+    r"\b(import|sync|load|upload|use|read|open|bring\s+in|add)\b.*"
+    r"\b(history|trades?|executions?|fills?|csvs?|exports?|files?)\b"
+    r"|\b(history|trades?|executions?|fills?|csvs?|exports?|files?)\b.*"
+    r"\b(import|sync|load|upload|use|read|open|bring\s+in|add)\b",
     re.IGNORECASE,
 )
 
@@ -150,8 +152,15 @@ class TradingViewImportResult:
 def is_tradingview_history_import_request(message: str) -> bool:
     """Recognize an explicit request to import TradingView trading records."""
     normalized = " ".join(message.casefold().split())
-    mentions_tradingview = "tradingview" in normalized or "trading view" in normalized
-    return mentions_tradingview and _IMPORT_INTENT.search(normalized) is not None
+    mentions_tradingview = (
+        "tradingview" in normalized
+        or "trading view" in normalized
+        or "paper-trading-" in normalized
+    )
+    direct_export = "paper-trading-" in normalized and ".csv" in normalized
+    return mentions_tradingview and (
+        _IMPORT_INTENT.search(normalized) is not None or direct_export
+    )
 
 
 def _sanitized_text(value: str, *, limit: int) -> str:

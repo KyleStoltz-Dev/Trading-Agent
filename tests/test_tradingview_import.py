@@ -1,3 +1,4 @@
+import shlex
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -465,6 +466,11 @@ def test_export_reader_uses_a_bounded_descriptor_read(monkeypatch, tmp_path) -> 
         "Import my TradingView trades",
         "Sync Trading View paper history",
         "Load executions from TradingView",
+        "Upload these TradingView CSVs",
+        "Use my TradingView export",
+        "Can TradingView read these files?",
+        "Import paper-trading-trade-history.csv",
+        "/tmp/paper-trading-trade-history.csv",
     ),
 )
 def test_explicit_tradingview_import_requests_are_recognized(message: str) -> None:
@@ -475,6 +481,102 @@ def test_tradingview_csv_path_accepts_a_dragged_escaped_path() -> None:
     assert cli_module._tradingview_csv_path(
         r"import TradingView /Users/Kyle/Downloads/Paper\ Trading\ History.csv"
     ) == Path("/Users/Kyle/Downloads/Paper Trading History.csv")
+
+
+def test_tradingview_csv_bundle_prefers_trade_history(tmp_path) -> None:
+    activity = tmp_path / "paper-trading-activity-log.csv"
+    order_history = tmp_path / "paper-trading-order-history-all.csv"
+    trade_history = tmp_path / "paper-trading-trade-history.csv"
+    for item in (activity, order_history, trade_history):
+        item.touch()
+    dragged = " ".join(
+        shlex.quote(str(item)) for item in (activity, order_history, trade_history)
+    )
+
+    paths = cli_module._tradingview_csv_paths(dragged)
+
+    assert paths == (activity, order_history, trade_history)
+    assert cli_module._preferred_tradingview_csv(paths) == trade_history
+
+
+def test_tradingview_csv_bundle_accepts_a_dragged_folder(tmp_path) -> None:
+    (tmp_path / "paper-trading-balance-history.csv").touch()
+    trade_history = tmp_path / "paper-trading-trade-history.csv"
+    trade_history.touch()
+
+    paths = cli_module._tradingview_csv_paths(shlex.quote(str(tmp_path)))
+
+    assert len(paths) == 2
+    assert cli_module._preferred_tradingview_csv(paths) == trade_history
+
+
+def test_import_flow_selects_trade_history_from_dragged_bundle(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    request_scope = RequestScope(uuid.uuid4(), uuid.uuid4())
+    activity = tmp_path / "paper-trading-activity-log.csv"
+    orders = tmp_path / "paper-trading-order-history-all.csv"
+    trade_history = tmp_path / "paper-trading-trade-history.csv"
+    for item in (activity, orders, trade_history):
+        item.touch()
+    dragged = " ".join(
+        shlex.quote(str(item)) for item in (activity, orders, trade_history)
+    )
+    export = TradingViewExport(
+        path=trade_history,
+        export_kind="trade_history",
+        source_sha256="a" * 64,
+        rows_received=2,
+        rows_ignored=0,
+        instruments=("XAUUSD",),
+        started_at=datetime(2026, 9, 8, 13, tzinfo=UTC),
+        ended_at=datetime(2026, 9, 8, 14, tzinfo=UTC),
+        realized_pnl_available=True,
+        lifecycle_evidence="trade_history",
+        events=(),
+    )
+    result = SimpleNamespace(
+        imported_executions=2,
+        imported_fills=2,
+        imported_trades=1,
+        duplicate_executions=0,
+        realized_pnl_available=True,
+    )
+    monkeypatch.setattr(cli_module.console, "input", Mock(return_value=dragged))
+    monkeypatch.setattr(cli_module, "parse_tradingview_export", Mock(return_value=export))
+    monkeypatch.setattr(cli_module, "_profile_timezone", Mock(return_value=ZoneInfo("UTC")))
+    monkeypatch.setattr(
+        cli_module,
+        "_configured_workspace",
+        Mock(return_value=SimpleNamespace(id=request_scope.workspace_id)),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "resolve_account",
+        Mock(return_value=SimpleNamespace(label="Paper journal")),
+    )
+    preview = Mock()
+    monkeypatch.setattr(cli_module, "_render_tradingview_import_preview", preview)
+    monkeypatch.setattr(cli_module, "_authorize_direct", Mock())
+    monkeypatch.setattr(
+        cli_module,
+        "import_tradingview_export",
+        Mock(return_value=result),
+    )
+
+    assert cli_module._run_tradingview_import_flow(
+        Mock(),
+        scope=request_scope,
+        path=None,
+        assume_yes=True,
+    )
+
+    cli_module.parse_tradingview_export.assert_called_once_with(
+        trade_history,
+        default_timezone=ZoneInfo("UTC"),
+    )
+    assert preview.call_args.kwargs["bundle_size"] == 3
 
 
 def test_import_flow_previews_and_authorizes_before_saving(
