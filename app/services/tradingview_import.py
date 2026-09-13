@@ -87,9 +87,36 @@ class _ParsedOrder:
 
 
 @dataclass(frozen=True, slots=True)
+class _TradeHistoryRow:
+    row_number: int
+    trade_number: str
+    symbol: str
+    source_symbol: str
+    source_venue: str
+    phase: Literal["entry", "exit"]
+    direction: Literal["long", "short"]
+    quantity: Decimal
+    price: Decimal
+    occurred_at: datetime
+    order_id: str | None
+    realized_pnl: Decimal | None
+    commission: Decimal | None
+
+
+@dataclass(frozen=True, slots=True)
+class _OpenTradeMarker:
+    row_number: int
+    trade_number: str
+    symbol: str
+    source_symbol: str
+    direction: Literal["long", "short"]
+    quantity: Decimal
+
+
+@dataclass(frozen=True, slots=True)
 class TradingViewExport:
     path: Path
-    export_kind: Literal["order_history", "account_history"]
+    export_kind: Literal["order_history", "account_history", "trade_history"]
     source_sha256: str
     rows_received: int
     rows_ignored: int
@@ -99,7 +126,7 @@ class TradingViewExport:
     realized_pnl_available: bool
     history_coverage: Literal["unverified", "complete"] = "unverified"
     lifecycle_evidence: Literal[
-        "execution_only", "complete_order_history", "account_history"
+        "execution_only", "complete_order_history", "account_history", "trade_history"
     ] = "execution_only"
     events: tuple[_ImportEvent, ...] = field(default_factory=tuple, repr=False)
 
@@ -116,7 +143,7 @@ class TradingViewImportResult:
     realized_pnl_available: bool
     history_coverage: Literal["unverified", "complete"]
     lifecycle_evidence: Literal[
-        "execution_only", "complete_order_history", "account_history"
+        "execution_only", "complete_order_history", "account_history", "trade_history"
     ]
 
 
@@ -210,6 +237,8 @@ def _timestamp(
             "%Y-%m-%d %H:%M",
             "%m/%d/%Y %H:%M:%S",
             "%m/%d/%Y %H:%M",
+            "%b %d, %Y, %H:%M:%S",
+            "%b %d, %Y, %H:%M",
             "%b %d, %Y %H:%M:%S",
             "%b %d, %Y %H:%M",
         ):
@@ -815,6 +844,264 @@ def _account_history_events(
     return tuple(events), ignored, True
 
 
+def _trade_history_events(
+    rows: list[dict[str, str | None]],
+    headers: dict[str, str],
+    *,
+    default_timezone: ZoneInfo,
+) -> tuple[tuple[_ImportEvent, ...], int, bool]:
+    """Normalize TradingView's paired-row Paper Trading Trade History export."""
+    symbol_col = _column(headers, "Symbol")
+    trade_number_col = _column(headers, "Trade number", "Trade #")
+    type_col = _column(headers, "Type")
+    occurred_at_col = _column(headers, "Date and time", "Date & time")
+    price_col = _column(headers, "Price")
+    quantity_col = _column(headers, "Size (qty)", "Quantity", "Qty")
+    pnl_col = _column(headers, "Net PnL USD", "Net P&L USD", "Net PnL")
+    order_id_col = _column(headers, "Order ID", "Order Id", required=False)
+    commission_col = _column(
+        headers,
+        "Commission USD",
+        "Commission",
+        required=False,
+    )
+
+    parsed: list[_TradeHistoryRow] = []
+    open_markers: dict[str, list[_OpenTradeMarker]] = {}
+    ignored = 0
+    for row_number, row in enumerate(rows, start=2):
+        if not any(str(value or "").strip() for value in row.values()):
+            ignored += 1
+            continue
+        trade_number = _sanitized_text(_cell(row, trade_number_col), limit=161)
+        if not trade_number or len(trade_number) > 160:
+            raise TradingViewImportError(
+                f"Row {row_number} has an invalid trade number."
+            )
+        type_value = _sanitized_text(_cell(row, type_col), limit=40).casefold()
+        type_match = re.fullmatch(r"(entry|exit)\s+(long|short)", type_value)
+        if type_match is None:
+            raise TradingViewImportError(
+                f"Row {row_number} has an unsupported Trade History type."
+            )
+        phase, direction = type_match.groups()
+        symbol, source_symbol, source_venue = _symbol(
+            _cell(row, symbol_col), row_number=row_number
+        )
+        quantity = _decimal(
+            _cell(row, quantity_col), field_name="quantity", row_number=row_number
+        )
+        if quantity <= 0:
+            raise TradingViewImportError(
+                f"Row {row_number} quantity must be positive."
+            )
+        price_text = _cell(row, price_col)
+        occurred_at_text = _cell(row, occurred_at_col)
+        if (
+            phase == "exit"
+            and occurred_at_text.casefold() == "open"
+            and price_text in {"", "-", "—"}
+        ):
+            marker = _OpenTradeMarker(
+                row_number=row_number,
+                trade_number=trade_number,
+                symbol=symbol,
+                source_symbol=source_symbol,
+                direction=direction,  # type: ignore[arg-type]
+                quantity=quantity,
+            )
+            open_markers.setdefault(trade_number, []).append(marker)
+            continue
+        price = _decimal(price_text, field_name="price", row_number=row_number)
+        if price <= 0:
+            raise TradingViewImportError(
+                f"Row {row_number} price must be positive."
+            )
+        occurred_at = _timestamp(
+            occurred_at_text,
+            field_name="date and time",
+            row_number=row_number,
+            default_timezone=default_timezone,
+        )
+        order_id = _sanitized_text(_cell(row, order_id_col), limit=161) or None
+        if order_id is not None and len(order_id) > 160:
+            raise TradingViewImportError(f"Row {row_number} has an invalid order ID.")
+        realized_pnl = (
+            _decimal(
+                _cell(row, pnl_col),
+                field_name="net P&L",
+                row_number=row_number,
+            )
+            if _cell(row, pnl_col)
+            else None
+        )
+        commission = (
+            -abs(
+                _decimal(
+                    _cell(row, commission_col),
+                    field_name="commission",
+                    row_number=row_number,
+                )
+            )
+            if _cell(row, commission_col)
+            else None
+        )
+        parsed.append(
+            _TradeHistoryRow(
+                row_number=row_number,
+                trade_number=trade_number,
+                symbol=symbol,
+                source_symbol=source_symbol,
+                source_venue=source_venue,
+                phase=phase,  # type: ignore[arg-type]
+                direction=direction,  # type: ignore[arg-type]
+                quantity=quantity,
+                price=price,
+                occurred_at=occurred_at,
+                order_id=order_id,
+                realized_pnl=realized_pnl,
+                commission=commission,
+            )
+        )
+
+    groups: dict[str, list[_TradeHistoryRow]] = {}
+    for item in parsed:
+        groups.setdefault(item.trade_number, []).append(item)
+
+    events: list[_ImportEvent] = []
+    pnl_available = False
+    all_trade_numbers = set(groups) | set(open_markers)
+    for trade_number in all_trade_numbers:
+        group = groups.get(trade_number, [])
+        markers = open_markers.get(trade_number, [])
+        entries = [item for item in group if item.phase == "entry"]
+        exits = [item for item in group if item.phase == "exit"]
+        is_complete = (
+            len(group) == 2
+            and len(entries) == 1
+            and len(exits) == 1
+            and not markers
+        )
+        is_open = (
+            len(group) == 1
+            and len(entries) == 1
+            and not exits
+            and len(markers) == 1
+        )
+        if not is_complete and not is_open:
+            raise TradingViewImportError(
+                f"Trade {trade_number} must contain one entry and either one exit "
+                "or TradingView's explicit open-trade marker."
+            )
+        entry = entries[0]
+        counterpart = exits[0] if is_complete else markers[0]
+        if (
+            entry.symbol != counterpart.symbol
+            or entry.source_symbol != counterpart.source_symbol
+            or entry.direction != counterpart.direction
+            or entry.quantity != counterpart.quantity
+        ):
+            raise TradingViewImportError(
+                f"Trade {trade_number} has conflicting entry and exit details."
+            )
+        exit_row = exits[0] if is_complete else None
+        if exit_row is not None and exit_row.occurred_at < entry.occurred_at:
+            raise TradingViewImportError(
+                f"Trade {trade_number} exits before its entry time."
+            )
+        entry_pnl = entry.realized_pnl if is_complete else None
+        exit_pnl = exit_row.realized_pnl if exit_row is not None else None
+        if (
+            exit_pnl is not None
+            and entry_pnl is not None
+            and entry_pnl not in {Decimal("0"), exit_pnl}
+        ):
+            raise TradingViewImportError(
+                f"Trade {trade_number} has conflicting net P&L values."
+            )
+        realized_pnl = exit_pnl if exit_pnl is not None else entry_pnl
+        pnl_available = pnl_available or realized_pnl is not None
+        opening_side: Literal["buy", "sell"] = (
+            "buy" if entry.direction == "long" else "sell"
+        )
+        closing_side: Literal["buy", "sell"] = (
+            "sell" if opening_side == "buy" else "buy"
+        )
+        signed_open = entry.quantity if opening_side == "buy" else -entry.quantity
+        trade_key = _stable_key(
+            trade_number,
+            entry.source_symbol,
+            entry.direction,
+            entry.quantity,
+            entry.occurred_at,
+        )
+        trade_id = f"tv-paper-trade:{trade_key}"
+
+        event_rows: list[
+            tuple[
+                str,
+                _TradeHistoryRow,
+                Literal["buy", "sell"],
+                Decimal,
+                Literal["opened", "closed"],
+                Decimal | None,
+            ]
+        ] = [("open", entry, opening_side, signed_open, "opened", None)]
+        if exit_row is not None:
+            event_rows.append(
+                (
+                    "close",
+                    exit_row,
+                    closing_side,
+                    -signed_open,
+                    "closed",
+                    realized_pnl,
+                )
+            )
+        for suffix, item, side, signed, effect, pnl in event_rows:
+            external_order_id = item.order_id or f"{trade_key}:{suffix}"
+            source_row = _SourceRow(
+                row_number=item.row_number,
+                source_symbol=item.source_symbol,
+                source_venue=item.source_venue,
+                status="closed" if suffix == "close" else "filled",
+                side=side,
+                quantity=item.quantity,
+                intended_price=item.price,
+                order_type=f"Trade History {item.phase}",
+                placing_time=item.occurred_at,
+            )
+            events.append(
+                _ImportEvent(
+                    event=BrokerEvent(
+                        external_id=f"tv-paper:{trade_key}:{suffix}",
+                        event_type="order_fill",
+                        occurred_at=item.occurred_at,
+                        instrument=item.symbol,
+                        external_order_id=external_order_id,
+                        external_trade_id=trade_id,
+                        quantity=signed,
+                        price=item.price,
+                        realized_pnl=pnl,
+                        commission=item.commission,
+                        source=TRADINGVIEW_PAPER_PROVIDER,
+                        trade_effects=(
+                            BrokerTradeEffect(
+                                external_trade_id=trade_id,
+                                effect=effect,  # type: ignore[arg-type]
+                                quantity=signed,
+                                realized_pnl=pnl,
+                            ),
+                        ),
+                        infer_trade_open=False,
+                    ),
+                    source_row=source_row,
+                )
+            )
+    events.sort(key=lambda item: (item.event.occurred_at, item.event.external_id))
+    return tuple(events), ignored, pnl_available
+
+
 def parse_tradingview_export(
     path: Path,
     *,
@@ -825,8 +1112,9 @@ def parse_tradingview_export(
 
     Order History does not prove the position state before its first row. Its fills
     therefore remain execution-only unless the caller has separately established
-    that the export contains the complete account history. Account History rows
-    explicitly carry their own open/close lifecycle and are authoritative per row.
+    that the export contains the complete account history. Account History rows and
+    paired Trade History rows explicitly carry their own open/close lifecycle and are
+    authoritative per trade.
     """
     if order_history_coverage not in {"unverified", "complete"}:
         raise TradingViewImportError(
@@ -838,7 +1126,9 @@ def parse_tradingview_export(
     tokens = set(headers)
     try:
         if {"status", "fillprice", "closingtime", "orderid"} <= tokens:
-            export_kind: Literal["order_history", "account_history"] = "order_history"
+            export_kind: Literal[
+                "order_history", "account_history", "trade_history"
+            ] = "order_history"
             events, ignored, pnl_available = _order_history_events(
                 rows,
                 headers,
@@ -847,12 +1137,32 @@ def parse_tradingview_export(
             )
             history_coverage = order_history_coverage
             lifecycle_evidence: Literal[
-                "execution_only", "complete_order_history", "account_history"
+                "execution_only",
+                "complete_order_history",
+                "account_history",
+                "trade_history",
             ] = (
                 "complete_order_history"
                 if order_history_coverage == "complete"
                 else "execution_only"
             )
+        elif {
+            "symbol",
+            "tradenumber",
+            "type",
+            "dateandtime",
+            "price",
+            "sizeqty",
+            "netpnlusd",
+        } <= tokens:
+            export_kind = "trade_history"
+            events, ignored, pnl_available = _trade_history_events(
+                rows,
+                headers,
+                default_timezone=default_timezone,
+            )
+            history_coverage = "unverified"
+            lifecycle_evidence = "trade_history"
         elif (
             {"symbol", "side", "closingtime"} <= tokens
             and any(item in tokens for item in ("entryprice", "avgentryprice", "avgfillprice"))
@@ -878,8 +1188,8 @@ def parse_tradingview_export(
         else:
             shown = ", ".join(header_names[:12])[:600]
             raise TradingViewImportError(
-                "This does not look like TradingView Paper Trading History or Account "
-                f"History. Detected columns: {shown or 'none'}."
+                "This does not look like TradingView Paper Trading Order History, "
+                f"Trade History, or Account History. Detected columns: {shown or 'none'}."
             )
     except TradingViewImportError:
         raise

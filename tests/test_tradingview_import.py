@@ -239,6 +239,161 @@ def test_account_history_preserves_exported_realized_pnl(tmp_path) -> None:
     assert opening.external_trade_id == closing.external_trade_id
 
 
+def test_current_trade_history_pairs_rows_and_preserves_realized_pnl(tmp_path) -> None:
+    path = _write_csv(
+        tmp_path / "paper-trading-trade-history.csv",
+        "Symbol,Trade number,Type,Date and time,Order ID,Signal,Price,Size (qty),"
+        "Size (value),Net PnL USD,Return %,Commission USD,Cumulative PnL USD,"
+        "Cumulative PnL %\n"
+        'OANDA:XAUUSD,21,Entry long,"Feb 28, 2024, 22:53",open-21,,2030.50,2,'
+        "4061.00,15.25,0.37,0.10,15.25,0.15\n"
+        'OANDA:XAUUSD,21,Exit long,"Feb 29, 2024, 01:05",close-21,,2038.25,2,'
+        "4076.50,15.25,0.37,0.15,15.25,0.15\n"
+        'OANDA:XAUUSD,22,Entry short,"Mar 01, 2024, 09:30",open-22,,2040,1,'
+        "2040,-5,-0.25,0,-5,-0.05\n"
+        'OANDA:XAUUSD,22,Exit short,"Mar 01, 2024, 10:00",close-22,,2045,1,'
+        "2045,-5,-0.25,0,-5,-0.05\n",
+    )
+
+    export = parse_tradingview_export(
+        path,
+        default_timezone=ZoneInfo("America/New_York"),
+    )
+
+    assert export.export_kind == "trade_history"
+    assert export.rows_received == 4
+    assert export.rows_ignored == 0
+    assert export.realized_pnl_available is True
+    assert export.lifecycle_evidence == "trade_history"
+    assert len(export.events) == 4
+    assert [item.event.trade_effects[0].effect for item in export.events] == [
+        "opened",
+        "closed",
+        "opened",
+        "closed",
+    ]
+    assert [item.event.quantity for item in export.events] == [
+        Decimal("2"),
+        Decimal("-2"),
+        Decimal("-1"),
+        Decimal("1"),
+    ]
+    assert [item.event.realized_pnl for item in export.events] == [
+        None,
+        Decimal("15.25"),
+        None,
+        Decimal("-5"),
+    ]
+    assert export.events[0].event.commission == Decimal("-0.10")
+    assert export.events[1].event.commission == Decimal("-0.15")
+    assert export.events[0].event.occurred_at == datetime(
+        2024, 2, 29, 3, 53, tzinfo=UTC
+    )
+    assert export.events[0].event.external_trade_id == (
+        export.events[1].event.external_trade_id
+    )
+
+
+def test_trade_history_rejects_incomplete_or_conflicting_pairs(tmp_path) -> None:
+    header = (
+        "Symbol,Trade number,Type,Date and time,Order ID,Price,Size (qty),Net PnL USD\n"
+    )
+    incomplete = _write_csv(
+        tmp_path / "incomplete.csv",
+        header + 'NASDAQ:AAPL,7,Entry long,"Sep 08, 2026, 09:30",1,200,1,5\n',
+    )
+    with pytest.raises(TradingViewImportError, match="one entry and either one exit"):
+        parse_tradingview_export(incomplete, default_timezone=ZoneInfo("UTC"))
+
+    conflicting = _write_csv(
+        tmp_path / "conflicting.csv",
+        header
+        + 'NASDAQ:AAPL,8,Entry long,"Sep 08, 2026, 09:30",1,200,1,5\n'
+        + 'NASDAQ:AAPL,8,Exit long,"Sep 08, 2026, 10:30",2,205,1,6\n',
+    )
+    with pytest.raises(TradingViewImportError, match="conflicting net P&L"):
+        parse_tradingview_export(conflicting, default_timezone=ZoneInfo("UTC"))
+
+
+def test_trade_history_preserves_an_explicitly_open_trade(tmp_path) -> None:
+    path = _write_csv(
+        tmp_path / "Trade History.csv",
+        "Symbol,Trade number,Type,Date and time,Order ID,Price,Size (qty),"
+        "Net PnL USD,Commission USD\n"
+        "NASDAQ:AAPL,9,Exit long,Open,,—,3,0,0\n"
+        'NASDAQ:AAPL,9,Entry long,"Sep 08, 2026, 09:30",91,200,3,0,0\n',
+    )
+
+    export = parse_tradingview_export(path, default_timezone=ZoneInfo("UTC"))
+
+    assert export.export_kind == "trade_history"
+    assert export.rows_ignored == 0
+    assert export.realized_pnl_available is False
+    assert len(export.events) == 1
+    event = export.events[0].event
+    assert event.quantity == Decimal("3")
+    assert event.realized_pnl is None
+    assert event.trade_effects[0].effect == "opened"
+
+
+def test_trade_history_opening_identity_survives_a_later_close(tmp_path) -> None:
+    header = (
+        "Symbol,Trade number,Type,Date and time,Order ID,Price,Size (qty),Net PnL USD\n"
+    )
+    entry = 'NASDAQ:AAPL,9,Entry long,"Sep 08, 2026, 09:30",91,200,3,0\n'
+    open_export = parse_tradingview_export(
+        _write_csv(
+            tmp_path / "open.csv",
+            header + "NASDAQ:AAPL,9,Exit long,Open,,—,3,0\n" + entry,
+        ),
+        default_timezone=ZoneInfo("UTC"),
+    )
+    closed_export = parse_tradingview_export(
+        _write_csv(
+            tmp_path / "closed.csv",
+            header
+            + entry
+            + 'NASDAQ:AAPL,9,Exit long,"Sep 08, 2026, 10:30",92,205,3,15\n',
+        ),
+        default_timezone=ZoneInfo("UTC"),
+    )
+
+    assert open_export.events[0].event.external_id == (
+        closed_export.events[0].event.external_id
+    )
+    assert open_export.events[0].event.external_trade_id == (
+        closed_export.events[0].event.external_trade_id
+    )
+
+
+def test_trade_history_import_is_idempotent_and_updates_review(
+    tmp_path,
+    db_session,
+    request_scope,
+) -> None:
+    path = _write_csv(
+        tmp_path / "Trade History.csv",
+        "Symbol,Trade number,Type,Date and time,Order ID,Price,Size (qty),"
+        "Net PnL USD,Commission USD\n"
+        'OANDA:EURUSD,3,Entry short,"Sep 08, 2026, 09:30",31,1.1050,1000,10,0\n'
+        'OANDA:EURUSD,3,Exit short,"Sep 08, 2026, 10:30",32,1.1040,1000,10,0\n',
+    )
+    export = parse_tradingview_export(path, default_timezone=ZoneInfo("UTC"))
+
+    first = import_tradingview_export(db_session, export, scope=request_scope)
+    second = import_tradingview_export(db_session, export, scope=request_scope)
+
+    assert first.imported_executions == 2
+    assert first.imported_fills == 2
+    assert first.imported_trades == 1
+    assert second.imported_executions == 0
+    assert second.duplicate_executions == 2
+    review = broker_trade_review(db_session, scope=request_scope)
+    assert review.trade_count == 1
+    assert review.unknown_outcomes == 0
+    assert review.net_pnl == Decimal("10")
+
+
 def test_import_rejects_non_tradingview_columns_without_echoing_rows(tmp_path) -> None:
     path = _write_csv(tmp_path / "other.csv", "name,secret\nKyle,do-not-echo\n")
 

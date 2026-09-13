@@ -120,10 +120,10 @@ scenarios, not proof of manipulation or a direction.
 
 TradingView's Account Manager exports each selected tab as a CSV. Inside the agent, say
 `import my TradingView trades`; it explains where to download the file and accepts a dragged
-History or Account History CSV path. The equivalent direct command is:
+Trade History, Order History, or Account History CSV path. The equivalent direct command is:
 
 ```bash
-trade tradingview import ~/Downloads/paper-trading-account-history.csv
+trade tradingview import ~/Downloads/paper-trading-trade-history.csv
 ```
 
 The host—not the model—validates the regular UTF-8 CSV, applies row and file-size limits,
@@ -134,11 +134,12 @@ retained in `execution_events` for execution-process review without being mislab
 The original rows are not retained; provenance includes the export hash, source row, original
 symbol, status, and TradingView event identifiers. Repeated exports do not create duplicates.
 
-Account History is preferred for completed-trade review because it supplies entry, close, and
-realized P&L. History supplies order fills and may omit P&L; in that case Trading Agent does
-not apply a stock, FX, crypto, or futures contract assumption and records the outcome as
-unknown. History can reconstruct only the lifecycle represented in that export, so it must
-not be described as proof of complete account history.
+Trade History or Account History is preferred for completed-trade review because each
+supplies entry, close, and realized P&L. Order History supplies order status and fills but may
+omit P&L; in that case Trading Agent does not apply a stock, FX, crypto, or futures contract
+assumption and records the outcome as unknown. Order History can reconstruct only the
+lifecycle represented in that export, so it must not be described as proof of complete
+account history.
 
 This is not live synchronization. TradingView Paper Trading does not expose a normal retail
 account API, and the alert webhook below carries chart conditions rather than account history.
