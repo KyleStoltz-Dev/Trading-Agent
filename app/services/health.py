@@ -11,7 +11,6 @@ from app.config import LEGACY_ENV_BACKEND, Settings, secret_value
 from app.connectors.factory import (
     BrokerConfigurationError,
     news_provider_configured,
-    validate_broker_account_selection,
 )
 from app.db import inspect_schema
 from app.models import BrokerConnection, TradingAccount
@@ -21,6 +20,10 @@ from app.providers import (
     resolve_provider_name,
 )
 from app.providers.ollama_provider import OllamaProvider
+from app.services.broker_selection import (
+    SUPPORTED_REGISTERED_BROKERS,
+    selected_account_broker_connection,
+)
 from app.services.secrets import SecretBackendError, validate_secret_backend
 from app.services.tradingview import trusted_proxy_networks
 from app.services.web_fetch import (
@@ -173,7 +176,7 @@ def check_health(
                 HealthCheck(
                     "broker-secrets",
                     "ok",
-                    "per-account secret backend selected; no broker needs it yet",
+                    "per-account secret backend selected; account connections checked below",
                 )
             )
         else:
@@ -685,29 +688,22 @@ def check_health(
                                 )
                             )
                     if (
-                        settings.broker_provider != "none"
+                        (
+                            settings.broker_provider != "none"
+                            or any(
+                                item.provider in SUPPORTED_REGISTERED_BROKERS
+                                for item in connections
+                            )
+                        )
                         and selected_account is not None
                     ):
-                        expected_provider = (
-                            "oanda-v20"
-                            if settings.broker_provider == "oanda"
-                            else f"metatrader-{settings.metatrader_platform}-bridge"
-                        )
-                        selected_connection = next(
-                            (
-                                item
-                                for item in connections
-                                if item.provider == expected_provider
-                            ),
-                            None,
-                        )
                         try:
-                            validate_broker_account_selection(
-                                settings,
-                                selected_account,
-                                selected_connection,
+                            selected_account_broker_connection(
+                                session, scope=selected_scope,
+                                configured_provider=settings.broker_provider,
+                                metatrader_platform=settings.metatrader_platform,
                             )
-                        except BrokerConfigurationError as exc:
+                        except (BrokerConfigurationError, LookupError) as exc:
                             checks.append(
                                 HealthCheck(
                                     "broker_account_scope",
@@ -720,7 +716,7 @@ def check_health(
                                 HealthCheck(
                                     "broker_account_scope",
                                     "ok",
-                                    "broker credentials and connection match the "
+                                    "registered broker connection matches the "
                                     "selected account",
                                 )
                             )

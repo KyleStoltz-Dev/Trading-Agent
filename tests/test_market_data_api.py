@@ -250,7 +250,8 @@ def test_broker_state_endpoint_returns_account_and_positions(monkeypatch) -> Non
         status="healthy",
     )
     database = Mock()
-    database.scalar.side_effect = (account, connection)
+    database.scalar.return_value = account
+    database.scalars.return_value = [connection]
     captured = {}
     monkeypatch.setattr(main_module, "get_settings", lambda: settings)
 

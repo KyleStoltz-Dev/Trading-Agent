@@ -122,11 +122,11 @@ def create_broker_connector(
 
 
 def validate_broker_account_selection(
-    settings: Settings,
+    settings: Settings | None,
     account: "TradingAccount",
     connection: "BrokerConnection | None",
 ) -> None:
-    """Fail closed when process credentials do not belong to the selected account."""
+    """Validate durable account/connection state independently of process preferences."""
     if not account.active:
         raise BrokerConfigurationError("the selected trading account is archived")
     if connection is None:

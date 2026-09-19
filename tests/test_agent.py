@@ -895,12 +895,14 @@ def test_market_outlook_wraps_provider_text_as_untrusted(monkeypatch) -> None:
     )
     monkeypatch.setattr("app.services.agent.store_calendar_events", store_events)
     monkeypatch.setattr("app.services.agent.store_news_items", store_headlines)
+    database = Mock()
+    database.scalar.return_value = None
     agent = TradingAgent(
         settings=Settings(
             news_provider="trading-economics",
             trading_economics_api_key="configured-test-key",
         ),
-        db=Mock(),
+        db=database,
         engine=Mock(),
         confirm_mutation=Mock(return_value=False),
         provider=RiskToolProvider(),
