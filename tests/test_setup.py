@@ -1,5 +1,7 @@
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
@@ -46,6 +48,34 @@ def test_setup_refuses_to_write_secret_settings(tmp_path: Path) -> None:
         update_env_file(tmp_path / ".env", {"OPENAI_API_KEY": "secret"})
 
 
+def test_concurrent_settings_updates_preserve_each_interfaces_changes(tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    changes = [
+        {"MODEL_PROVIDER": "openai", "OPENAI_MODEL": "gpt-6-astra"},
+        {"BROKER_PROVIDER": "oanda"},
+        {"NEWS_PROVIDER": "forex-factory"},
+    ]
+    barrier = Barrier(len(changes))
+
+    def update(values):
+        barrier.wait(timeout=5)
+        update_env_file(env_file, values)
+
+    with ThreadPoolExecutor(max_workers=len(changes)) as pool:
+        list(pool.map(update, changes))
+    contents = env_file.read_text()
+    for values in changes:
+        for key, value in values.items():
+            assert f"{key}={value}\n" in contents
+
+
+def test_settings_update_replaces_exported_and_padded_duplicate_keys(tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("export MODEL_PROVIDER = ollama\nMODEL_PROVIDER=anthropic\n")
+    update_env_file(env_file, {"MODEL_PROVIDER": "openai"})
+    assert env_file.read_text() == "MODEL_PROVIDER=openai\n"
+
+
 def test_beginner_setup_is_usable_without_storing_secrets() -> None:
     values = beginner_setup_settings()
 
@@ -88,6 +118,9 @@ def test_setup_rejects_environment_injection(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="model name"):
         provider_settings("ollama", "qwen3.5:9b\nOPENAI_API_KEY=injected")
+
+    with pytest.raises(ValueError, match="interpolate"):
+        update_env_file(tmp_path / ".env", {"TRADING_ACCOUNT": "${OPENAI_API_KEY}"})
 
 
 def test_ollama_quality_profile_changes_balanced_and_deep_only() -> None:

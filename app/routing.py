@@ -73,6 +73,9 @@ def route_model(
     if model_override:
         model = model_override
         reason = f"session model override ({resolved_mode} effort)"
+    elif settings.agent_model_pinned and provider == settings.model_provider:
+        model = getattr(settings, f"{provider}_model")
+        reason = f"saved model selection ({resolved_mode} effort)"
     elif provider in {"openai", "anthropic", "ollama"}:
         fallback = getattr(settings, f"{provider}_model")
         model = getattr(settings, f"{provider}_{resolved_mode}_model") or fallback

@@ -273,6 +273,49 @@ def test_first_run_applies_recommended_managed_settings(monkeypatch, tmp_path: P
     assert not any("KEY" in key or "TOKEN" in key for key in values)
 
 
+def test_quickstart_preserves_existing_broker_when_option_is_omitted(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    written = Mock()
+    monkeypatch.setattr(
+        cli_module,
+        "get_settings",
+        Mock(return_value=Settings(broker_provider="oanda")),
+    )
+    monkeypatch.setattr(cli_module.get_settings, "cache_clear", Mock())
+    monkeypatch.setattr(
+        cli_module,
+        "default_config_path",
+        Mock(return_value=tmp_path / ".env"),
+    )
+    monkeypatch.setattr(cli_module, "update_env_file", written)
+
+    result = runner.invoke(app, ["quickstart"])
+
+    assert result.exit_code == 0
+    assert written.call_args.args[1]["BROKER_PROVIDER"] == "oanda"
+
+
+def test_quickstart_does_not_reset_existing_profile_or_authentication(monkeypatch, tmp_path):
+    config_path = tmp_path / ".env"
+    initial = (
+        "MODEL_PROVIDER=openai\nOPENAI_MODEL=gpt-6-astra\nOPENAI_AUTH_MODE=subscription\n"
+        "DATABASE_MODE=neon\nBROKER_PROVIDER=metatrader\nMETATRADER_PLATFORM=mt4\n"
+        "NEWS_PROVIDER=none\nTRADINGVIEW_WEBHOOK_ENABLED=true\n"
+        "OLLAMA_BALANCED_MODEL=qwen3.5:35b-a3b\n"
+    )
+    config_path.write_text(initial)
+    monkeypatch.setattr(cli_module, "default_config_path", lambda: config_path)
+    settings_reader = Mock(return_value=Settings(_env_file=config_path))
+    monkeypatch.setattr(cli_module, "get_settings", settings_reader)
+
+    result = runner.invoke(app, ["quickstart"])
+
+    assert result.exit_code == 0, result.output
+    assert config_path.read_text() == initial
+
+
 def test_first_run_can_exit_without_writing(monkeypatch) -> None:
     written = Mock()
     monkeypatch.setattr(cli_module, "environment_files", Mock(return_value=()))

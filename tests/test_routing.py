@@ -2,6 +2,20 @@ from app.config import Settings
 from app.routing import classify_task, route_model
 
 
+def test_saved_model_choice_survives_routing_and_can_return_to_auto():
+    settings = Settings(
+        model_provider="ollama", agent_model_pinned=True,
+        ollama_model="chosen-model", ollama_economy_model="small-model",
+        ollama_balanced_model="balanced-model", ollama_deep_model="large-model",
+    )
+    for mode in ("economy", "balanced", "deep"):
+        route = route_model(settings, "ollama", "Review my trades", mode=mode)
+        assert route.model == "chosen-model"
+        assert route.mode == mode
+    settings.agent_model_pinned = False
+    assert route_model(settings, "ollama", "Review my trades", mode="deep").model == "large-model"
+
+
 def test_auto_routing_uses_effort_profiles_without_inventing_model_names() -> None:
     settings = Settings(
         openai_model="base-model",
