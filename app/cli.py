@@ -100,6 +100,7 @@ from app.providers import (
     ProviderConfigurationError,
     create_model_provider,
 )
+from app.providers.base import valid_model_id
 from app.providers.catalog import SUPPORTED_CLOUD_AGENT_MODELS
 from app.providers.ollama_provider import OllamaProvider
 from app.providers.subscription_provider import (
@@ -3107,6 +3108,31 @@ def _model_cost_label(provider: str, model: str, access_mode: str) -> str:
     )
 
 
+def _remember_model_selection(provider_name: str, model: str) -> None:
+    """Persist one explicit model choice in the managed local configuration."""
+    if provider_name not in {"ollama", "openai", "anthropic"}:
+        raise ValueError("unsupported model provider")
+    if not valid_model_id(model):
+        raise ValueError("model name contains unsupported characters")
+    update_env_file(
+        default_config_path(),
+        {
+            "MODEL_PROVIDER": provider_name,
+            f"{provider_name.upper()}_MODEL": model,
+            "AGENT_MODEL_PINNED": "true",
+        },
+    )
+    get_settings.cache_clear()
+
+
+def _remember_automatic_model_selection() -> None:
+    """Persist the trader's choice to return to automatic provider selection."""
+    update_env_file(
+        default_config_path(), {"MODEL_PROVIDER": "auto", "AGENT_MODEL_PINNED": "false"}
+    )
+    get_settings.cache_clear()
+
+
 MODE_MENU_CHOICES: tuple[tuple[AgentMode, str, str], ...] = (
     (
         "auto",
@@ -3215,7 +3241,7 @@ def _mode_browser_summary(
     if model_override:
         lines.extend(
             (
-                f"Session model override: {model_override}",
+                f"Selected model: {model_override}",
                 "  All modes keep this model; only reasoning effort changes.",
             )
         )
@@ -3592,7 +3618,7 @@ def _switch_session_model(
     last_runtime_model: str | None,
     conversation_turns: int,
 ) -> tuple[ModelProvider, str | None] | None:
-    """Validate, disclose, and commit one session-only model switch."""
+    """Validate, disclose, and commit one model switch."""
     try:
         selected_provider = controller.validate_selection(provider_name, model)
     except ProviderConfigurationError as exc:
@@ -5956,7 +5982,11 @@ def _run_chat(
                 get_settings.cache_clear()
                 settings = get_settings()
         current_mode: AgentMode = settings.agent_mode
-        current_model_override: str | None = None
+        current_model_override: str | None = (
+            getattr(settings, f"{provider.name}_model")
+            if settings.agent_model_pinned and settings.model_provider == provider.name
+            else None
+        )
         last_runtime_model: str | None = None
         last_response_details: ResponseDetails | None = None
         conversation = (
@@ -6126,7 +6156,7 @@ def _run_chat(
                     "/mode auto|economy|balanced|deep · set it directly\n"
                     "/model · choose a configured local or cloud model\n"
                     "/model browse · open the full provider and model browser\n"
-                    "/model use NAME or PROVIDER/NAME · override this session\n"
+                    "/model use NAME or PROVIDER/NAME · choose and remember a model\n"
                     "/model auto · return to automatic profile routing\n"
                     "/model unload · release this session's local model from memory\n"
                     "/develop <change> · hand a software change to the coding agent\n"
@@ -6689,9 +6719,25 @@ def _run_chat(
                 agent.provider = provider
                 current_model_override = selected_model
                 provider_label = _provider_display_name(provider)
+                remembered = True
+                try:
+                    _remember_model_selection(selected_provider_name, selected_model)
+                    settings = get_settings()
+                    agent.settings = settings
+                    model_controller.settings = settings
+                except (OSError, ValueError) as exc:
+                    remembered = False
+                    console.print(
+                        f"[yellow]Using this model now, but its restart preference could "
+                        f"not be saved ({type(exc).__name__}).[/yellow]"
+                    )
                 console.print(
-                    f"[green]Using {provider_label} · {selected_model} for this "
-                    "conversation.[/green]"
+                    f"[green]Using {provider_label} · {selected_model}"
+                    + (
+                        ". This choice will be remembered after restart.[/green]"
+                        if remembered
+                        else ".[/green]"
+                    )
                 )
                 continue
             if message == "/model auto":
@@ -6703,7 +6749,26 @@ def _run_chat(
                     last_runtime_model = None
                 current_model_override = None
                 model_controller.automatic_profile()
-                console.print("[green]Returned to automatic model-profile routing.[/green]")
+                remembered = True
+                try:
+                    _remember_automatic_model_selection()
+                    settings = get_settings()
+                    agent.settings = settings
+                    model_controller.settings = settings
+                except OSError as exc:
+                    remembered = False
+                    console.print(
+                        f"[yellow]Automatic routing is active now, but its restart "
+                        f"preference could not be saved ({type(exc).__name__}).[/yellow]"
+                    )
+                console.print(
+                    "[green]Returned to automatic model-profile routing"
+                    + (
+                        ". This choice will be remembered after restart.[/green]"
+                        if remembered
+                        else ".[/green]"
+                    )
+                )
                 continue
             if message == "/model unload":
                 if not isinstance(provider, OllamaProvider):
@@ -6754,9 +6819,25 @@ def _run_chat(
                 agent.provider = provider
                 current_model_override = selected_model
                 provider_label = _provider_display_name(provider)
+                remembered = True
+                try:
+                    _remember_model_selection(selected_provider_name, selected_model)
+                    settings = get_settings()
+                    agent.settings = settings
+                    model_controller.settings = settings
+                except (OSError, ValueError) as exc:
+                    remembered = False
+                    console.print(
+                        f"[yellow]Using this model now, but its restart preference could "
+                        f"not be saved ({type(exc).__name__}).[/yellow]"
+                    )
                 console.print(
-                    f"[green]Using {provider_label} · {selected_model} for this "
-                    "conversation.[/green]"
+                    f"[green]Using {provider_label} · {selected_model}"
+                    + (
+                        ". This choice will be remembered after restart.[/green]"
+                        if remembered
+                        else ".[/green]"
+                    )
                 )
                 continue
             if is_tradingview_history_import_request(message):
@@ -7939,58 +8020,75 @@ def setup_agent(
 @app.command("quickstart", rich_help_panel="Setup and administration")
 def quickstart_setup(
     provider: Annotated[
-        str,
-        typer.Option(help="Model provider name: Ollama, OpenAI, or Anthropic."),
-    ] = "ollama",
+        str | None,
+        typer.Option(help="Model provider. Omit to keep the current selection."),
+    ] = None,
     model: Annotated[
-        str,
-        typer.Option(help="Local Ollama model tag to configure."),
-    ] = "qwen3.5:9b",
+        str | None,
+        typer.Option(help="Local Ollama model. Omit to keep current routing profiles."),
+    ] = None,
     database: Annotated[
-        str,
-        typer.Option(help="Database mode: local, neon, or custom."),
-    ] = "local",
+        str | None,
+        typer.Option(help="Database mode: local, neon, or custom. Omit to preserve it."),
+    ] = None,
     broker: Annotated[
-        str,
-        typer.Option(help="Broker name: none, oanda, or metatrader."),
-    ] = "none",
+        str | None,
+        typer.Option(
+            help=(
+                "Broker name: none, oanda, or metatrader. Omit to preserve the "
+                "current selection."
+            )
+        ),
+    ] = None,
     news: Annotated[
-        str,
+        str | None,
         typer.Option(help="News provider: none, forex-factory, or trading-economics."),
-    ] = "forex-factory",
+    ] = None,
     tradingview: Annotated[
-        str,
+        str | None,
         typer.Option(help="TradingView alerts: enabled or disabled."),
-    ] = "disabled",
+    ] = None,
     metatrader_platform: Annotated[
         str | None,
         typer.Option(help="MetaTrader terminal generation: MT4 or MT5 (metatrader only)."),
     ] = None,
 ) -> None:
-    """Apply a common setup profile without interactive prompts."""
+    """Start with a simple profile; preserve existing choices unless explicitly changed."""
+    resolved_config = default_config_path().expanduser().absolute()
+    existing = resolved_config.exists()
+    settings = get_settings()
+    selected_model = model or (settings.ollama_model if existing else "qwen3.5:9b")
     try:
-        selected_provider = _resolve_cli_choice(
-            provider,
-            MODEL_PROVIDER_CHOICES,
-            option_name="model provider",
+        selected_provider = (
+            (settings.model_provider if existing else "ollama")
+            if provider is None
+            else _resolve_cli_choice(
+                provider,
+                MODEL_PROVIDER_CHOICES,
+                option_name="model provider",
+            )
         )
         selected_database = _resolve_cli_choice(
-            database,
+            database or settings.database_mode,
             DATABASE_CHOICES,
             option_name="database",
         )
-        selected_broker = _resolve_cli_choice(
-            broker,
-            BROKER_CHOICES,
-            option_name="broker",
+        selected_broker = (
+            settings.broker_provider
+            if broker is None
+            else _resolve_cli_choice(
+                broker,
+                BROKER_CHOICES,
+                option_name="broker",
+            )
         )
         selected_news = _resolve_cli_choice(
-            news,
+            news or (settings.news_provider if existing else "forex-factory"),
             NEWS_CHOICES,
             option_name="news provider",
         )
         selected_tradingview = _resolve_cli_choice(
-            tradingview,
+            tradingview or ("enabled" if settings.tradingview_webhook_enabled else "disabled"),
             TRADINGVIEW_CHOICES,
             option_name="TradingView alerts",
         )
@@ -8002,7 +8100,7 @@ def quickstart_setup(
     if selected_broker == "metatrader":
         try:
             selected_metatrader_platform = _resolve_cli_choice(
-                metatrader_platform,
+                metatrader_platform or settings.metatrader_platform,
                 METATRADER_PLATFORM_CHOICES,
                 option_name="MetaTrader platform",
             )
@@ -8010,8 +8108,11 @@ def quickstart_setup(
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(2) from exc
 
-    resolved_config = default_config_path().expanduser().resolve()
-    values = provider_settings(selected_provider, model)
+    values = {} if existing else provider_settings(selected_provider, selected_model)
+    if provider is not None:
+        values["MODEL_PROVIDER"] = selected_provider
+    if model is not None:
+        values.update(ollama_profile_settings(model, "all"))
     values.update(
         {
             "DATABASE_MODE": selected_database,
@@ -8022,7 +8123,19 @@ def quickstart_setup(
     )
     if selected_metatrader_platform is not None:
         values["METATRADER_PLATFORM"] = selected_metatrader_platform
-    update_env_file(resolved_config, values)
+    if existing:
+        explicit_keys = {
+            "DATABASE_MODE": database,
+            "BROKER_PROVIDER": broker,
+            "NEWS_PROVIDER": news,
+            "TRADINGVIEW_WEBHOOK_ENABLED": tradingview,
+            "METATRADER_PLATFORM": metatrader_platform,
+        }
+        for key, argument in explicit_keys.items():
+            if argument is None:
+                values.pop(key, None)
+    if values:
+        update_env_file(resolved_config, values)
     get_settings.cache_clear()
 
     table = Table(title="Quickstart profile")
@@ -8030,9 +8143,14 @@ def quickstart_setup(
     table.add_column("Value")
     table.add_row(
         "Model provider",
-        next(choice.label for choice in MODEL_PROVIDER_CHOICES if choice.key == selected_provider),
+        next(
+            (choice.label for choice in MODEL_PROVIDER_CHOICES if choice.key == selected_provider),
+            "Automatic",
+        ),
     )
-    table.add_row("Local model", model if selected_provider == "ollama" else "Not applicable")
+    table.add_row(
+        "Local model", selected_model if selected_provider == "ollama" else "Not applicable"
+    )
     table.add_row(
         "Database",
         next(choice.label for choice in DATABASE_CHOICES if choice.key == selected_database),
@@ -8060,7 +8178,7 @@ def quickstart_setup(
     console.print("[green]Quickstart profile saved.[/green]")
     if selected_provider == "ollama":
         console.print(
-            "[dim]Run `trade models pull qwen3.5:9b` first if the model is not installed, "
+            f"[dim]Run `trade models pull {escape_markup(selected_model)}` if it is not installed, "
             "then `trade`.[/dim]"
         )
 

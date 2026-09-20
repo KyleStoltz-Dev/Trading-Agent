@@ -63,6 +63,7 @@ class Settings(BaseSettings):
     hosted_principal_auth_enabled: bool = False
     hosted_rls_enforced: bool = False
     model_provider: Literal["auto", "openai", "anthropic", "ollama"] = "auto"
+    agent_model_pinned: bool = False
     openai_auth_mode: Literal["auto", "subscription", "api"] = "auto"
     openai_api_key: SecretStr | None = None
     openai_model: str = "gpt-5.6-sol"

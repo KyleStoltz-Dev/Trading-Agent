@@ -6,6 +6,7 @@ import pytest
 import app.cli as cli_module
 from app.config import Settings
 from app.providers.base import ProviderConfigurationError
+from app.providers.catalog import SUPPORTED_CLOUD_AGENT_MODELS
 from app.services.model_selection import SessionModelController
 
 
@@ -79,6 +80,83 @@ def test_session_model_controller_rejects_unreviewed_cloud_model() -> None:
 
     with pytest.raises(ProviderConfigurationError, match="reviewed"):
         controller.validate_selection("openai", "gpt-4o")
+
+
+def test_astra_is_available_in_the_reviewed_openai_catalog() -> None:
+    assert "gpt-6-astra" in SUPPORTED_CLOUD_AGENT_MODELS["openai"]
+
+    provider = FakeProvider("openai", "gpt-6-astra", ("gpt-6-astra",))
+    controller = SessionModelController(
+        Settings(model_provider="openai", openai_api_key="test-key"),
+        provider,
+    )
+
+    assert controller.validate_selection("openai", "gpt-6-astra") is provider
+
+
+def test_explicit_model_choice_is_saved_for_future_restarts(monkeypatch) -> None:
+    updates = []
+    cleared = Mock()
+    monkeypatch.setattr(
+        cli_module,
+        "update_env_file",
+        lambda path, values: updates.append((path, values)),
+    )
+    monkeypatch.setattr(cli_module, "default_config_path", lambda: "managed.env")
+    monkeypatch.setattr(cli_module.get_settings, "cache_clear", cleared)
+
+    cli_module._remember_model_selection("openai", "gpt-6-astra")
+
+    assert updates == [
+        (
+            "managed.env",
+            {
+                "MODEL_PROVIDER": "openai",
+                "OPENAI_MODEL": "gpt-6-astra",
+                "AGENT_MODEL_PINNED": "true",
+            },
+        )
+    ]
+    cleared.assert_called_once_with()
+
+
+def test_automatic_model_choice_is_saved_for_future_restarts(monkeypatch) -> None:
+    updates = []
+    monkeypatch.setattr(
+        cli_module,
+        "update_env_file",
+        lambda path, values: updates.append((path, values)),
+    )
+    monkeypatch.setattr(cli_module, "default_config_path", lambda: "managed.env")
+    monkeypatch.setattr(cli_module.get_settings, "cache_clear", Mock())
+
+    cli_module._remember_automatic_model_selection()
+
+    assert updates == [
+        ("managed.env", {"MODEL_PROVIDER": "auto", "AGENT_MODEL_PINNED": "false"})
+    ]
+
+
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    [("openai", "gpt-6-astra"), ("anthropic", "claude-sonnet-4-6")],
+)
+def test_cloud_model_choice_round_trips_through_real_settings_writer(
+    monkeypatch, tmp_path, provider, model,
+) -> None:
+    config_path = tmp_path / ".env"
+    config_path.write_text("BROKER_PROVIDER=oanda\nNEWS_PROVIDER=forex-factory\n")
+    monkeypatch.setattr(cli_module, "default_config_path", lambda: config_path)
+    monkeypatch.delenv("MODEL_PROVIDER", raising=False)
+    monkeypatch.delenv(f"{provider.upper()}_MODEL", raising=False)
+
+    cli_module._remember_model_selection(provider, model)
+
+    restored = Settings(_env_file=config_path)
+    assert restored.model_provider == provider
+    assert getattr(restored, f"{provider}_model") == model
+    assert restored.broker_provider == "oanda"
+    assert restored.news_provider == "forex-factory"
 
 
 def test_session_model_controller_rejects_unavailable_reviewed_cloud_model() -> None:
@@ -395,6 +473,6 @@ def test_mode_browse_explains_session_model_override() -> None:
     )
 
     assert "Provider: Claude subscription" in summary
-    assert "Session model override: claude-sonnet-5" in summary
+    assert "Selected model: claude-sonnet-5" in summary
     assert "All modes keep this model; only reasoning effort changes." in summary
     assert "Configured model profiles:" not in summary
