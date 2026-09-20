@@ -12,3 +12,5 @@ uploads/
 dist/
 *.egg-info/
 .worktrees/
+.DS_Store
+paper-trading-*.csv
