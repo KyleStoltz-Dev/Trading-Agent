@@ -7,7 +7,9 @@ by Trading Agent.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
+from contextlib import closing
 from dataclasses import dataclass, replace
 from typing import Literal
 
@@ -25,6 +27,7 @@ from app.providers import (
 )
 from app.providers.base import valid_model_id
 from app.services.agent import TradingAgent
+from app.services.conversation_context import prepare_turn_context
 from app.services.conversations import (
     add_turn,
     conversation_history,
@@ -33,6 +36,7 @@ from app.services.conversations import (
     update_turn_outcome,
 )
 from app.services.model_selection import SessionModelController
+from app.services.request_lifecycle import record_request_failure
 from app.services.trading_workflow import is_dangling_count_clarification
 from app.services.workspaces import RequestScope
 
@@ -168,7 +172,20 @@ def run_agent_turn(
 
     provider = create_named_model_provider(settings, provider_name)
     controller = SessionModelController(settings, provider)
-    provider = controller.validate_selection(provider_name, model)
+    with closing(controller):
+        provider = controller.validate_selection(provider_name, model)
+        return _run_prepared_agent_turn(
+            db, engine=engine, settings=settings, policy=policy, scope=scope,
+            conversation=conversation, message=message, provider=provider,
+            model=model, mode=mode,
+        )
+
+
+def _run_prepared_agent_turn(
+    db: Session, *, engine: Engine, settings: Settings, policy: PolicyEngine,
+    scope: RequestScope, conversation: ConversationSession, message: str,
+    provider, model: str, mode: AgentMode,
+) -> AgentTurnResult:
     request_id = uuid.uuid4()
     playbook_version_id = conversation.active_playbook_version_id
     user_turn = add_turn(
@@ -207,11 +224,17 @@ def run_agent_turn(
     )
     agent.last_tool_audit = None
     try:
+        evidence_context, evidence_references, _ = prepare_turn_context(
+            db, settings, conversation, message, history,
+            scope=scope, policy=policy, user_turn=user_turn,
+        )
         prepared = agent.prepare(
             message,
             history,
             mode,
             model_override=model,
+            evidence_context=evidence_context,
+            evidence_references=evidence_references,
         )
         prepared = replace(
             prepared,
@@ -226,33 +249,15 @@ def run_agent_turn(
             conversation_session_id=conversation.id,
             user_turn_id=user_turn.id,
         )
-    except Exception as exc:
-        partial = bool(agent.last_tool_audit and agent.last_tool_audit.succeeded)
-        outcome = "partial" if partial else "failed"
-        update_turn_outcome(
-            db,
-            user_turn,
-            scope=scope,
-            status=outcome,
-            error_type=type(exc).__name__,
-        )
-        add_turn(
-            db,
-            conversation,
-            "assistant",
-            (
-                "The voice request stopped after a confirmed database change; "
-                "the completed audit was retained."
-                if partial
-                else "The voice request failed before a complete response was produced."
+    except (Exception, KeyboardInterrupt, asyncio.CancelledError) as exc:
+        record_request_failure(
+            db, agent=agent, user_turn=user_turn, conversation=conversation, scope=scope,
+            playbook_version_id=playbook_version_id, request_id=request_id,
+            error_type=(
+                "UserCancelled" if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError))
+                else type(exc).__name__
             ),
-            scope=scope,
-            playbook_version_id=playbook_version_id,
-            request_id=request_id,
-            status=outcome,
-            error_type=type(exc).__name__,
         )
-        controller.close()
         raise
 
     clarification_only = is_dangling_count_clarification(message, response)
@@ -298,5 +303,4 @@ def run_agent_turn(
         output_tokens=usage.output_tokens,
         references=references,
     )
-    controller.close()
     return result

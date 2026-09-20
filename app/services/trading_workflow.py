@@ -12,12 +12,13 @@ class WorkflowCheckpoint:
     label: str
     instrument: str | None
     source_message: str
+    status: str = "active"
 
     def prompt_context(self) -> str:
         instrument = self.instrument or "not established"
         return (
             "CURRENT CONVERSATION WORKFLOW\n"
-            f"Stage: {self.stage}\nInstrument: {instrument}\n"
+            f"Stage: {self.stage}\nInstrument: {instrument}\nStatus: {self.status}\n"
             "Continue this workflow naturally. Gather available broker, market, news, "
             "strategy, and journal facts with read-only tools before asking the trader. "
             "Ask only for a missing human judgment that materially blocks the next step."
@@ -25,6 +26,8 @@ class WorkflowCheckpoint:
 
 
 _STAGES = {
+    "no_trade": "No trade chosen",
+    "paused": "Trading workflow paused",
     "reflect": "Reflect on the completed trade",
     "review": "Review recent trades",
     "manage": "Review an open position",
@@ -83,6 +86,10 @@ def normalize_instrument_symbol(value: str) -> str:
 
 
 def _stage(message: str) -> str | None:
+    if message.strip(" .!?") in {"pause", "pause this workflow", "stop this workflow"}:
+        return "paused"
+    if message.strip(" .!?") in {"no trade", "skip this trade", "no trade today"}:
+        return "no_trade"
     if any(phrase in message for phrase in ("reflect", "lesson learned", "post-trade")):
         return "reflect"
     if any(phrase in message for phrase in ("manage", "open position", "move my stop")):
@@ -159,11 +166,14 @@ def should_refresh_trade_context(
     """Refresh live evidence only for a new workflow cue or explicit continuation."""
     if checkpoint is None or checkpoint.instrument is None:
         return False
+    if checkpoint.status == "paused" or checkpoint.stage in {"paused", "no_trade"}:
+        return False
     if infer_workflow_checkpoint([message]) is not None:
         return True
     normalized = " ".join(message.casefold().split()).strip(" .!?")
     return normalized in {
         "continue",
+        "resume",
         "continue this",
         "what is missing",
         "what's missing",
@@ -171,3 +181,50 @@ def should_refresh_trade_context(
         "recheck",
         "refresh",
     }
+
+
+def advance_workflow(
+    previous: WorkflowCheckpoint | None, message: str,
+) -> WorkflowCheckpoint | None:
+    """Advance only from user intent; never infer an order or eligibility result."""
+    normalized = message.casefold().strip(" .!?")
+    if previous is not None and normalized in {
+        "pause", "pause this workflow", "stop this workflow",
+    }:
+        return WorkflowCheckpoint(
+            previous.stage, previous.label, previous.instrument, previous.source_message, "paused",
+        )
+    if previous is not None and normalized in {"resume", "continue", "continue this"}:
+        return WorkflowCheckpoint(
+            previous.stage, previous.label, previous.instrument, previous.source_message,
+        )
+    inferred = infer_workflow_checkpoint([message])
+    if inferred is None:
+        instrument = _instrument(message)
+        if previous is not None and instrument is not None:
+            return WorkflowCheckpoint(
+                previous.stage, previous.label, instrument, message, previous.status,
+            )
+        return previous
+    return WorkflowCheckpoint(
+        inferred.stage, inferred.label,
+        inferred.instrument or (previous.instrument if previous else None), message,
+    )
+
+
+def checkpoint_from_record(value: object) -> WorkflowCheckpoint | None:
+    if not isinstance(value, dict) or value.get("version") != 1:
+        return None
+    stage = value.get("stage")
+    instrument = value.get("instrument")
+    if (
+        not isinstance(stage, str) or stage not in _STAGES
+        or (instrument is not None and not isinstance(instrument, str))
+    ):
+        return None
+    status = value.get("status", "active")
+    if status not in {"active", "paused"}:
+        return None
+    return WorkflowCheckpoint(
+        stage, _STAGES[stage], instrument, str(value.get("source_message", "")), status,
+    )
