@@ -7,12 +7,11 @@ import re
 import shlex
 import shutil
 import sys
-import time
 import unicodedata
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
@@ -55,7 +54,6 @@ from app.connectors import (
     OandaConnectorError,
     create_broker_connector,
     create_metatrader_connector,
-    create_news_connector,
     create_oanda_connector,
     news_provider_configured,
 )
@@ -119,9 +117,6 @@ from app.schemas import (
     PositionSizeRequest,
     ReflectionCreate,
     ReflectionRead,
-    StrategyExperimentCreate,
-    StrategyExperimentRead,
-    StrategyTestSampleCreate,
     TradePlanCreate,
     TradePlanRead,
     TraderProfileUpsert,
@@ -183,7 +178,6 @@ from app.services.development import (
     detect_development_intent,
     development_request,
 )
-from app.services.event_glossary import event_insight
 from app.services.evidence import record_chart_analysis
 from app.services.execution_ledger import record_management_event
 from app.services.health import HealthReport, check_health
@@ -200,7 +194,6 @@ from app.services.journal import (
     get_trade_plan,
     list_trade_plans,
 )
-from app.services.knowledge_import import import_knowledge_path, import_knowledge_text
 from app.services.learning import (
     TOPIC_LABELS,
     all_learning_topics,
@@ -210,9 +203,7 @@ from app.services.learning import (
     update_learning_module,
 )
 from app.services.market_features import (
-    experiment_feature_correlations,
     measure_candle_features,
-    strategy_experiment_report,
 )
 from app.services.mindset import create_mindset_check_in, list_mindset_check_ins
 from app.services.model_credentials import (
@@ -220,11 +211,6 @@ from app.services.model_credentials import (
     store_model_api_key,
 )
 from app.services.model_selection import SessionModelController
-from app.services.news import (
-    economic_event_history,
-    store_calendar_events,
-    store_news_items,
-)
 from app.services.pippy_launcher import (
     PippyLaunchError,
     build_pippy_launch_plan,
@@ -260,17 +246,11 @@ from app.services.strategy_definitions import (
 )
 from app.services.strategy_workspace import (
     active_session_strategy,
-    add_strategy_test_sample,
-    complete_strategy_experiment,
-    create_strategy_experiment,
     get_trader_profile,
     list_local_strategy_templates,
     list_strategy_summaries,
-    resolve_strategy_experiment,
     resolve_strategy_version,
-    search_strategy_knowledge,
     set_session_strategy,
-    set_strategy_knowledge_excluded,
     upsert_trader_profile,
 )
 from app.services.tool_audit import (
@@ -326,6 +306,12 @@ from app.system_resources import (
     assess_model_fit,
     resource_snapshot,
 )
+from app.terminal.commands import experiments as experiments_commands
+from app.terminal.commands import knowledge as knowledge_commands
+from app.terminal.commands import news as news_commands
+from app.terminal.commands import sessions as sessions_commands
+from app.terminal.formatting import _terminal_markdown
+from app.terminal.runtime import CommandRuntime
 from app.terminal_status import ThinkingStatus
 
 app = typer.Typer(
@@ -385,6 +371,20 @@ app.add_typer(learn_app, name="learn", rich_help_panel="Strategy, research, and 
 data_app = typer.Typer(help="See what Trading Agent has stored and how the data is organized.")
 app.add_typer(data_app, name="data", rich_help_panel="Daily records and data")
 console = Console()
+
+
+
+def _command_runtime() -> CommandRuntime:
+    """Capture this invocation's UI and policy boundary without importing the CLI back."""
+    return CommandRuntime(
+        console=console,
+        session_factory=SessionLocal,
+        current_scope=_current_scope,
+        authorize=_authorize_direct,
+        print_model=_print_model,
+        upgrade_database=upgrade_database,
+        get_settings=get_settings,
+    )
 
 
 def _current_scope(db) -> RequestScope:
@@ -3653,222 +3653,6 @@ def _switch_session_model(
         last_runtime_model = None
 
     return controller.activate(selected_provider, model), last_runtime_model
-
-
-_DOCUMENT_FENCE = re.compile(
-    r"```(?P<language>[A-Za-z0-9_-]*)[ \t]*\n(?P<body>.*?)\n```",
-    re.DOTALL,
-)
-_TABLE_DIVIDER_CELL = re.compile(r"^:?-{3,}:?$")
-
-
-def _looks_like_markdown_document(value: str) -> bool:
-    lines = value.splitlines()
-    headings = sum(bool(re.match(r"^\s{0,3}#{1,6}\s+", line)) for line in lines)
-    tables = any(
-        index + 1 < len(lines)
-        and "|" in line
-        and all(
-            _TABLE_DIVIDER_CELL.fullmatch(cell.strip())
-            for cell in lines[index + 1].strip().strip("|").split("|")
-        )
-        for index, line in enumerate(lines)
-        if line.strip().startswith("|")
-    )
-    return headings > 0 and (tables or "**" in value or headings > 1)
-
-
-def _unwrap_document_fences(value: str) -> str:
-    def replace(match: re.Match[str]) -> str:
-        language = match.group("language").casefold()
-        body = match.group("body").strip()
-        if language in {"markdown", "md"}:
-            return body
-        if not language and _looks_like_markdown_document(body):
-            return body
-        return match.group(0)
-
-    return _DOCUMENT_FENCE.sub(replace, value)
-
-
-def _markdown_cells(line: str) -> list[str]:
-    return [cell.strip() for cell in line.strip().strip("|").split("|")]
-
-
-_TABLE_HEADER_LABELS = {
-    "hypothetical description": "Working idea",
-    "encoding": "What must be defined",
-    "current state this session window": "Status",
-    "action required": "Next step",
-    "action required from you before proceeding": "Next step",
-}
-
-
-def _terminal_table_header(value: str) -> str:
-    return _TABLE_HEADER_LABELS.get(value.strip().casefold(), value.strip())
-
-
-def _stack_markdown_tables(value: str) -> str:
-    lines = value.splitlines()
-    rendered: list[str] = []
-    index = 0
-    while index < len(lines):
-        if index + 1 >= len(lines) or "|" not in lines[index]:
-            rendered.append(lines[index])
-            index += 1
-            continue
-        headers = _markdown_cells(lines[index])
-        divider = _markdown_cells(lines[index + 1])
-        if (
-            len(headers) < 2
-            or len(headers) != len(divider)
-            or not all(_TABLE_DIVIDER_CELL.fullmatch(cell) for cell in divider)
-        ):
-            rendered.append(lines[index])
-            index += 1
-            continue
-        index += 2
-        rows: list[list[str]] = []
-        while index < len(lines) and "|" in lines[index]:
-            row = _markdown_cells(lines[index])
-            if len(row) != len(headers):
-                break
-            rows.append(row)
-            index += 1
-        for row in rows:
-            if rendered and rendered[-1]:
-                rendered.append("")
-            title = row[0].strip()
-            if title and len(title) <= 72 and "\n" not in title:
-                rendered.append(f"### {title}")
-            else:
-                rendered.extend((f"**{headers[0]}**", title))
-            for header, cell in zip(headers[1:], row[1:], strict=True):
-                label = _terminal_table_header(header)
-                if label == "What must be defined":
-                    cell = re.sub(r"(?i)^need:\s*", "", cell)
-                rendered.extend(("", f"**{label}**", cell))
-        if not rows:
-            rendered.extend(
-                [
-                    " · ".join(headers),
-                    " · ".join(divider),
-                ]
-            )
-    return "\n".join(rendered)
-
-
-_TERMINAL_CODE = re.compile(r"(```.*?```|`[^`\n]+`)", re.DOTALL)
-_TERMINAL_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9])")
-_INTERNAL_IDENTIFIER = re.compile(
-    r"(?<![/.])\b[a-z][a-z0-9]*(?:_[a-z0-9]+){2,}\b(?:\.\.\.)?"
-)
-_BRACKETED_INTERNAL_IDENTIFIER = re.compile(
-    r"\[(?P<name>[a-z][a-z0-9]*(?:_[a-z0-9]+)+)\]"
-)
-_INTERNAL_LABELS = {
-    "edge_requires_evidence": "evidence requirement",
-    "validate_strategy_draft": "strategy review",
-    "create_strategy_version": "strategy save",
-}
-
-
-def _humanize_terminal_prose(value: str) -> str:
-    """Keep model implementation jargon out of the normal trader-facing display."""
-
-    def friendly_identifier(value: str) -> str:
-        name = value.removesuffix("...")
-        if name.startswith("create_trade_plan_function_call"):
-            return "confirmed journal save"
-        return _INTERNAL_LABELS.get(name, name.replace("_", " "))
-
-    def humanize_identifier(match: re.Match[str]) -> str:
-        return friendly_identifier(match.group(0))
-
-    def humanize_bracketed(match: re.Match[str]) -> str:
-        return friendly_identifier(match.group("name"))
-
-    parts = _TERMINAL_CODE.split(value)
-    for index in range(0, len(parts), 2):
-        prose = parts[index]
-        prose = _BRACKETED_INTERNAL_IDENTIFIER.sub(humanize_bracketed, prose)
-        prose = _INTERNAL_IDENTIFIER.sub(humanize_identifier, prose)
-        prose = re.sub(
-            r"(?i)(?:unavailable\s*)?❌\s*(?:disabled|unavailable)?\s*",
-            "Unavailable — ",
-            prose,
-        )
-        prose = re.sub(
-            r"(?i)(?:available\s*)?✅\s*(?:available)?\s*",
-            "Available — ",
-            prose,
-        )
-        prose = prose.replace("⚠️", "Caution —").replace("⚠", "Caution —")
-        parts[index] = prose
-    return "".join(parts)
-
-
-def _space_dense_terminal_questions(value: str) -> str:
-    """Make model-generated clarification requests readable in a terminal."""
-
-    parts = _TERMINAL_CODE.split(value)
-    for index in range(0, len(parts), 2):
-        blocks = re.split(r"(\n[ \t]*\n)", parts[index])
-        for block_index in range(0, len(blocks), 2):
-            block = blocks[block_index]
-            stripped = block.strip()
-            if (
-                stripped.count("?") < 2
-                or any(
-                    line.lstrip().startswith(("#", "-", "*", ">", "|"))
-                    for line in stripped.splitlines()
-                )
-            ):
-                continue
-            sentences = _TERMINAL_SENTENCE_BOUNDARY.split(
-                re.sub(r"[ \t]*\n[ \t]*", " ", stripped)
-            )
-            groups: list[list[str]] = []
-            current: list[str] = []
-            for sentence in sentences:
-                if "?" in sentence and current:
-                    groups.append(current)
-                    current = []
-                current.append(sentence)
-            if current:
-                groups.append(current)
-            if len(groups) < 2:
-                continue
-            leading = block[: len(block) - len(block.lstrip())]
-            trailing = block[len(block.rstrip()) :]
-            blocks[block_index] = (
-                leading
-                + "\n\n".join(" ".join(group) for group in groups)
-                + trailing
-            )
-        parts[index] = "".join(blocks)
-    return "".join(parts)
-
-
-def _terminal_markdown(value: str) -> str:
-    normalized = unicodedata.normalize(
-        "NFC",
-        value.replace("\r\n", "\n").replace("\r", "\n"),
-    )
-    safe = "".join(
-        character
-        for character in normalized
-        if character in {"\n", "\t"}
-        or unicodedata.category(character) not in {"Cc", "Cf", "Zl", "Zp"}
-    )
-    safe = _unwrap_document_fences(safe)
-    safe = _stack_markdown_tables(safe)
-    safe = _humanize_terminal_prose(safe)
-    safe = _space_dense_terminal_questions(safe)
-    safe = re.sub(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+", "### ", safe)
-    safe = re.sub(r"(?m)^(?:[ \t]*[-*_][ \t]*){3,}$", "", safe)
-    safe = re.sub(r"\n{3,}", "\n\n", safe)
-    return safe.strip()
 
 
 def _render_agent_reply(
@@ -9307,26 +9091,12 @@ def sessions_list(
     limit: Annotated[int, typer.Option(min=1, max=100)] = 20,
     show_internal_ids: Annotated[bool, typer.Option()] = False,
 ) -> None:
-    """List recent interactive sessions."""
-    upgrade_database()
-    with SessionLocal() as db:
-        conversations = list_conversations(db, limit, scope=_current_scope(db))
-        table = Table(title="Trading Agent sessions")
-        table.add_column("Name")
-        table.add_column("Title")
-        table.add_column("Updated")
-        if show_internal_ids:
-            table.add_column("Internal UUID")
-        for conversation in conversations:
-            values = [
-                conversation.name,
-                conversation.title,
-                str(conversation.updated_at),
-            ]
-            if show_internal_ids:
-                values.append(str(conversation.id))
-            table.add_row(*values)
-        console.print(table)
+    'List recent interactive sessions.'
+    sessions_commands.sessions_list(
+        _command_runtime(),
+        limit=limit,
+        show_internal_ids=show_internal_ids,
+    )
 
 
 @database_app.command("upgrade")
@@ -10434,32 +10204,13 @@ def knowledge_import_command(
     ],
     yes: Annotated[bool, typer.Option("--yes")] = False,
 ) -> None:
-    """Import and index external trading material without changing model weights."""
-    _authorize_direct(
-        "import_strategy_knowledge",
-        {"path": str(path.resolve()), "strategy": strategy},
-        mutating=True,
-        assume_yes=yes,
+    'Import and index external trading material without changing model weights.'
+    knowledge_commands.knowledge_import_command(
+        _command_runtime(),
+        path=path,
+        strategy=strategy,
+        yes=yes,
     )
-    upgrade_database()
-    with SessionLocal() as db:
-        try:
-            result = import_knowledge_path(
-                db,
-                path,
-                strategy,
-                scope=_current_scope(db),
-            )
-        except (
-            FileNotFoundError,
-            OSError,
-            ValueError,
-            LookupError,
-            json.JSONDecodeError,
-        ) as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(2) from exc
-        _print_model(result)
 
 
 @knowledge_app.command("paste")
@@ -10468,29 +10219,13 @@ def knowledge_paste_command(
     name: Annotated[str, typer.Option()] = "pasted-notes",
     yes: Annotated[bool, typer.Option("--yes")] = False,
 ) -> None:
-    """Paste one note interactively into an isolated strategy."""
-    text = typer.prompt("Knowledge text")
-    _authorize_direct(
-        "import_strategy_knowledge",
-        {"source": "paste", "strategy": strategy, "name": name},
-        mutating=True,
-        assume_yes=yes,
+    'Paste one note interactively into an isolated strategy.'
+    knowledge_commands.knowledge_paste_command(
+        _command_runtime(),
+        strategy=strategy,
+        name=name,
+        yes=yes,
     )
-    upgrade_database()
-    with SessionLocal() as db:
-        try:
-            _print_model(
-                import_knowledge_text(
-                    db,
-                    text,
-                    strategy,
-                    name,
-                    scope=_current_scope(db),
-                )
-            )
-        except (ValueError, LookupError) as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(2) from exc
 
 
 @knowledge_app.command("search")
@@ -10499,74 +10234,16 @@ def knowledge_search_command(
     query: Annotated[str, typer.Argument()],
     limit: Annotated[int, typer.Option(min=1, max=25)] = 8,
 ) -> None:
-    """Search only one strategy version's indexed knowledge."""
-    upgrade_database()
-    with SessionLocal() as db:
-        scope = _current_scope(db)
-        try:
-            playbook, version = resolve_strategy_version(
-                db,
-                strategy,
-                scope=scope,
-            )
-            items = search_strategy_knowledge(
-                db,
-                version.id,
-                query,
-                limit,
-                scope=scope,
-            )
-        except (ValueError, LookupError) as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(2) from exc
-        _print_model(
-            {
-                "strategy": playbook.name,
-                "version": version.version,
-                "results": [
-                    {
-                        "id": item.id,
-                        "kind": item.kind,
-                        "source_reference": item.source_reference,
-                        "occurred_at": item.occurred_at,
-                        "content": item.content,
-                        "content_hash": item.content_hash,
-                    }
-                    for item in items
-                ],
-            }
-        )
-
-
-def _set_knowledge_excluded(
-    item_id: uuid.UUID,
-    strategy: str,
-    *,
-    excluded: bool,
-    yes: bool,
-) -> None:
-    action = "exclude_strategy_knowledge" if excluded else "restore_strategy_knowledge"
-    _authorize_direct(
-        action,
-        {"item_id": str(item_id), "strategy": strategy},
-        mutating=True,
-        assume_yes=yes,
+    "Search only one strategy version's indexed knowledge."
+    knowledge_commands.knowledge_search_command(
+        _command_runtime(),
+        strategy=strategy,
+        query=query,
+        limit=limit,
     )
-    upgrade_database()
-    with SessionLocal() as db:
-        try:
-            item = set_strategy_knowledge_excluded(
-                db,
-                strategy,
-                item_id,
-                scope=_current_scope(db),
-                excluded=excluded,
-            )
-        except LookupError as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(1) from exc
-    status = "excluded from retrieval" if excluded else "restored to retrieval"
-    console.print(f"[green]{item.id} is {status} for {strategy}.[/green]")
+
+
+
 
 
 @knowledge_app.command("exclude")
@@ -10575,8 +10252,13 @@ def knowledge_exclude_command(
     strategy: Annotated[str, typer.Option(help="Exact strategy version scope.")],
     yes: Annotated[bool, typer.Option("--yes")] = False,
 ) -> None:
-    """Quarantine one item from strategy retrieval without deleting evidence."""
-    _set_knowledge_excluded(item_id, strategy, excluded=True, yes=yes)
+    'Quarantine one item from strategy retrieval without deleting evidence.'
+    knowledge_commands.knowledge_exclude_command(
+        _command_runtime(),
+        item_id=item_id,
+        strategy=strategy,
+        yes=yes,
+    )
 
 
 @knowledge_app.command("restore")
@@ -10585,8 +10267,13 @@ def knowledge_restore_command(
     strategy: Annotated[str, typer.Option(help="Exact strategy version scope.")],
     yes: Annotated[bool, typer.Option("--yes")] = False,
 ) -> None:
-    """Restore one quarantined item to its exact strategy version."""
-    _set_knowledge_excluded(item_id, strategy, excluded=False, yes=yes)
+    'Restore one quarantined item to its exact strategy version.'
+    knowledge_commands.knowledge_restore_command(
+        _command_runtime(),
+        item_id=item_id,
+        strategy=strategy,
+        yes=yes,
+    )
 
 
 @experiment_app.command("start")
@@ -10599,40 +10286,17 @@ def experiment_start(
     timeframe: Annotated[str | None, typer.Option()] = None,
     yes: Annotated[bool, typer.Option("--yes")] = False,
 ) -> None:
-    """Start a test frozen to one exact strategy definition hash."""
-    try:
-        request = StrategyExperimentCreate(
-            strategy=strategy,
-            name=name,
-            mode=mode,
-            hypothesis=hypothesis,
-            instrument=instrument,
-            timeframe=timeframe,
-        )
-    except ValidationError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(2) from exc
-    _authorize_direct(
-        "create_strategy_experiment",
-        request.model_dump(mode="json"),
-        mutating=True,
-        assume_yes=yes,
+    'Start a test frozen to one exact strategy definition hash.'
+    experiments_commands.experiment_start(
+        _command_runtime(),
+        strategy=strategy,
+        name=name,
+        mode=mode,
+        hypothesis=hypothesis,
+        instrument=instrument,
+        timeframe=timeframe,
+        yes=yes,
     )
-    upgrade_database()
-    with SessionLocal() as db:
-        try:
-            _print_model(
-                StrategyExperimentRead.model_validate(
-                    create_strategy_experiment(
-                        db,
-                        request,
-                        scope=_current_scope(db),
-                    )
-                )
-            )
-        except LookupError as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(2) from exc
 
 
 @experiment_app.command("sample")
@@ -10644,43 +10308,13 @@ def experiment_sample(
     ],
     yes: Annotated[bool, typer.Option("--yes")] = False,
 ) -> None:
-    """Add one eligible, excluded, or unclear test observation."""
-    try:
-        request = StrategyTestSampleCreate.model_validate_json(file.read_text())
-    except (OSError, ValidationError) as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(2) from exc
-    _authorize_direct(
-        "add_strategy_test_sample",
-        {
-            "experiment_id": str(experiment_id),
-            **request.model_dump(mode="json"),
-        },
-        mutating=True,
-        assume_yes=yes,
+    'Add one eligible, excluded, or unclear test observation.'
+    experiments_commands.experiment_sample(
+        _command_runtime(),
+        experiment_id=experiment_id,
+        file=file,
+        yes=yes,
     )
-    upgrade_database()
-    with SessionLocal() as db:
-        try:
-            sample = add_strategy_test_sample(
-                db,
-                experiment_id,
-                request,
-                scope=_current_scope(db),
-            )
-            _print_model(
-                {
-                    "id": sample.id,
-                    "experiment_id": sample.experiment_id,
-                    "classification": sample.classification,
-                    "outcome_r": sample.outcome_r,
-                    "feature_snapshot": sample.feature_snapshot,
-                    "created_at": sample.created_at,
-                }
-            )
-        except (ValueError, LookupError) as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(2) from exc
 
 
 @experiment_app.command("correlations")
@@ -10688,44 +10322,21 @@ def experiment_correlations(
     experiment_id: str,
     minimum_samples: Annotated[int, typer.Option(min=5, max=1000)] = 10,
 ) -> None:
-    """Measure descriptive feature/outcome correlations for one isolated test."""
-    upgrade_database()
-    with SessionLocal() as db:
-        try:
-            experiment = resolve_strategy_experiment(
-                db,
-                experiment_id,
-                scope=_current_scope(db),
-            )
-        except LookupError as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(1) from exc
-        _print_model(
-            experiment_feature_correlations(
-                db,
-                experiment.id,
-                scope=_current_scope(db),
-                minimum_samples=minimum_samples,
-            )
-        )
+    'Measure descriptive feature/outcome correlations for one isolated test.'
+    experiments_commands.experiment_correlations(
+        _command_runtime(),
+        experiment_id=experiment_id,
+        minimum_samples=minimum_samples,
+    )
 
 
 @experiment_app.command("report")
 def experiment_report(experiment_id: str) -> None:
-    """Show sample counts, exclusions, expectancy, and feature correlations."""
-    upgrade_database()
-    with SessionLocal() as db:
-        try:
-            _print_model(
-                strategy_experiment_report(
-                    db,
-                    experiment_id,
-                    scope=_current_scope(db),
-                )
-            )
-        except LookupError as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(1) from exc
+    'Show sample counts, exclusions, expectancy, and feature correlations.'
+    experiments_commands.experiment_report(
+        _command_runtime(),
+        experiment_id=experiment_id,
+    )
 
 
 @experiment_app.command("complete")
@@ -10733,45 +10344,21 @@ def experiment_complete(
     experiment_id: str,
     yes: Annotated[bool, typer.Option("--yes")] = False,
 ) -> None:
-    """Freeze a running backtest or forward test."""
-    _authorize_direct(
-        "complete_strategy_experiment",
-        {"experiment_id": str(experiment_id)},
-        mutating=True,
-        assume_yes=yes,
+    'Freeze a running backtest or forward test.'
+    experiments_commands.experiment_complete(
+        _command_runtime(),
+        experiment_id=experiment_id,
+        yes=yes,
     )
-    upgrade_database()
-    with SessionLocal() as db:
-        try:
-            _print_model(
-                StrategyExperimentRead.model_validate(
-                    complete_strategy_experiment(
-                        db,
-                        experiment_id,
-                        scope=_current_scope(db),
-                    )
-                )
-            )
-        except (ValueError, LookupError) as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(2) from exc
 
 
 @experiment_app.command("show")
 def experiment_show(experiment_id: str) -> None:
-    """Show an experiment and its frozen strategy hash."""
-    upgrade_database()
-    with SessionLocal() as db:
-        try:
-            experiment = resolve_strategy_experiment(
-                db,
-                experiment_id,
-                scope=_current_scope(db),
-            )
-        except LookupError as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(1) from exc
-        _print_model(StrategyExperimentRead.model_validate(experiment))
+    'Show an experiment and its frozen strategy hash.'
+    experiments_commands.experiment_show(
+        _command_runtime(),
+        experiment_id=experiment_id,
+    )
 
 
 @news_app.command("sync")
@@ -10784,78 +10371,17 @@ def news_sync(
     news_limit: Annotated[int, typer.Option(min=1, max=250)] = 50,
     yes: Annotated[bool, typer.Option("--yes")] = False,
 ) -> None:
-    """Fetch and idempotently retain event/headline metadata, not article bodies."""
-    try:
-        start_date = date.fromisoformat(start)
-        end_date = date.fromisoformat(end)
-        connector = create_news_connector(get_settings())
-    except (ValueError, BrokerConfigurationError) as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(2) from exc
-    country_values = [value.strip() for value in countries.split(",") if value.strip()]
-    _authorize_direct(
-        "synchronize_news",
-        {
-            "start": start,
-            "end": end,
-            "countries": country_values,
-            "news_country": news_country,
-            "minimum_importance": minimum_importance,
-            "news_limit": news_limit,
-        },
-        mutating=True,
-        assume_yes=yes,
+    'Fetch and idempotently retain event/headline metadata, not article bodies.'
+    news_commands.news_sync(
+        _command_runtime(),
+        start=start,
+        end=end,
+        countries=countries,
+        news_country=news_country,
+        minimum_importance=minimum_importance,
+        news_limit=news_limit,
+        yes=yes,
     )
-    upgrade_database()
-
-    async def fetch():
-        try:
-            calendar = await connector.calendar(
-                start=start_date,
-                end=end_date,
-                countries=country_values,
-                minimum_importance=minimum_importance,
-            )
-            headlines = await connector.news(
-                country=news_country,
-                limit=news_limit,
-            )
-            return calendar, headlines
-        finally:
-            await connector.aclose()
-
-    try:
-        calendar, headlines = asyncio.run(fetch())
-    except RuntimeError as exc:
-        console.print("[bold red]News sync unavailable[/bold red]")
-        console.print(str(exc))
-        console.print(
-            "[dim]Previously stored calendar data remains available. "
-            "Wait for the provider's retry window, then run this command again.[/dim]"
-        )
-        raise typer.Exit(1) from None
-    with SessionLocal() as db:
-        calendar_count = store_calendar_events(db, tuple(calendar))
-        news_count = store_news_items(db, tuple(headlines))
-    provider_name = get_settings().news_provider.replace("-", " ").title()
-    console.print("[bold green]✓ News sync complete[/bold green]")
-    console.print(f"[bold]Source[/bold]  {provider_name}")
-    console.print(
-        f"[bold]Calendar[/bold]  {len(calendar)} received · {calendar_count} new"
-    )
-    if headlines:
-        console.print(
-            f"[bold]Headlines[/bold] {len(headlines)} received · {news_count} new"
-        )
-    elif get_settings().news_provider == "forex-factory":
-        console.print(
-            "[dim]Forex Factory supplies calendar events, not a headline API.[/dim]"
-        )
-    if not calendar and not headlines:
-        console.print(
-            "[yellow]No matching items were found for this date, currency, "
-            "and impact filter.[/yellow]"
-        )
 
 
 @news_app.command("upcoming")
@@ -10865,105 +10391,14 @@ def news_upcoming(
     minimum_importance: Annotated[int, typer.Option(min=0, max=3)] = 2,
     details: Annotated[bool, typer.Option("--details")] = False,
 ) -> None:
-    """Show concise upcoming events from the stored calendar."""
-    currency_values = tuple(
-        dict.fromkeys(
-            value.strip().upper()
-            for value in currencies.split(",")
-            if value.strip()
-        )
+    'Show concise upcoming events from the stored calendar.'
+    news_commands.news_upcoming(
+        _command_runtime(),
+        hours=hours,
+        currencies=currencies,
+        minimum_importance=minimum_importance,
+        details=details,
     )
-    now = datetime.now(UTC)
-    through = now + timedelta(hours=hours)
-    upgrade_database()
-    with SessionLocal() as db:
-        statement = (
-            select(EconomicEvent)
-            .where(
-                EconomicEvent.scheduled_at >= now,
-                EconomicEvent.scheduled_at <= through,
-                EconomicEvent.importance >= minimum_importance,
-            )
-            .order_by(EconomicEvent.scheduled_at, EconomicEvent.importance.desc())
-        )
-        if currency_values:
-            statement = statement.where(
-                EconomicEvent.currency.in_(currency_values)
-            )
-        events = tuple(db.scalars(statement))
-
-    console.print("[bold]Trading Agent: Upcoming economic events[/bold]")
-    if not events:
-        console.print(
-            "[yellow]No stored events match this window and filter.[/yellow]"
-        )
-        console.print(
-            "[dim]Run `trade news sync` to refresh the calendar, then try again.[/dim]"
-        )
-        return
-    local_timezone = datetime.now().astimezone().tzinfo
-    table = Table(show_header=True, box=None, pad_edge=False)
-    table.add_column("Time", no_wrap=True)
-    table.add_column("Currency", no_wrap=True)
-    table.add_column("Impact", no_wrap=True)
-    table.add_column("Event")
-    impact_names = {0: "Info", 1: "Low", 2: "Medium", 3: "High"}
-    for event in events:
-        local_time = event.scheduled_at.astimezone(local_timezone)
-        table.add_row(
-            local_time.strftime("%a %H:%M %Z"),
-            event.currency or "—",
-            impact_names[event.importance],
-            event.title,
-        )
-    console.print(table)
-    console.print(
-        f"[dim]{len(events)} event(s) through "
-        f"{through.astimezone(local_timezone).strftime('%a %H:%M %Z')} · "
-        "stored provider evidence, not trading instructions[/dim]"
-    )
-    if details:
-        for event in events:
-            insight = event_insight(event.title, event.currency)
-            local_time = event.scheduled_at.astimezone(local_timezone)
-            console.print()
-            console.rule(f"[bold]{event.title}[/bold]", style="dim")
-            console.print(
-                f"[dim]{local_time.strftime('%A, %H:%M %Z')} · "
-                f"{event.currency or '—'} · "
-                f"{impact_names[event.importance]} impact[/dim]"
-            )
-            console.print()
-            values = Table(show_header=True, box=None, pad_edge=False)
-            values.add_column("Actual", min_width=12)
-            values.add_column("Forecast", min_width=12)
-            values.add_column("Previous", min_width=12)
-            values.add_row(
-                f"[bold]{event.actual or 'Pending'}[/bold]",
-                event.forecast or "—",
-                event.previous or "—",
-            )
-            console.print(values)
-            console.print()
-            console.print("[bold]What it measures[/bold]")
-            console.print(insight.measures)
-            console.print()
-            console.print("[bold]Why markets watch it[/bold]")
-            console.print(insight.why_markets_watch)
-            console.print()
-            if insight.sensitive_markets:
-                console.print("[bold]Commonly sensitive markets[/bold]")
-                console.print(" · ".join(insight.sensitive_markets))
-                console.print()
-            console.print("[bold yellow]Interpret carefully[/bold yellow]")
-            console.print(f"[dim]{insight.interpretation_caution}[/dim]")
-            if insight.source_label and insight.source_url:
-                console.print()
-                console.print("[bold]Primary reference[/bold]")
-                console.print(insight.source_label)
-                console.print(
-                    f"[link={insight.source_url}]{insight.source_url}[/link]"
-                )
 
 
 @news_app.command("history")
@@ -10972,51 +10407,12 @@ def news_history(
     currency: Annotated[str | None, typer.Option()] = None,
     limit: Annotated[int, typer.Option(min=1, max=50)] = 10,
 ) -> None:
-    """Show stored past observations for one requested economic event."""
-    upgrade_database()
-    with SessionLocal() as db:
-        try:
-            events = economic_event_history(
-                db,
-                event,
-                currency=currency,
-                limit=limit,
-            )
-        except ValueError as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(2) from exc
-
-    console.print(f"[bold]Trading Agent: Previous {event.strip()} releases[/bold]")
-    if not events:
-        console.print("[yellow]No matching past releases are stored yet.[/yellow]")
-        console.print(
-            "[dim]The free weekly feed builds history as calendar syncs are retained; "
-            "it is not a complete historical archive.[/dim]"
-        )
-        return
-
-    local_timezone = datetime.now().astimezone().tzinfo
-    impact_names = {0: "Info", 1: "Low", 2: "Medium", 3: "High"}
-    table = Table(show_header=True, box=None, pad_edge=False)
-    table.add_column("Date", no_wrap=True)
-    table.add_column("Event")
-    table.add_column("Impact", no_wrap=True)
-    table.add_column("Actual", no_wrap=True)
-    table.add_column("Forecast", no_wrap=True)
-    table.add_column("Previous", no_wrap=True)
-    for item in events:
-        table.add_row(
-            item.scheduled_at.astimezone(local_timezone).strftime("%Y-%m-%d %H:%M %Z"),
-            item.title,
-            impact_names[item.importance],
-            item.actual or "—",
-            item.forecast or "—",
-            item.previous or "—",
-        )
-    console.print(table)
-    console.print(
-        f"[dim]{len(events)} stored release(s) · "
-        "values are provider evidence, not a directional signal[/dim]"
+    'Show stored past observations for one requested economic event.'
+    news_commands.news_history(
+        _command_runtime(),
+        event=event,
+        currency=currency,
+        limit=limit,
     )
 
 
@@ -11029,138 +10425,25 @@ def news_watch(
     once: Annotated[bool, typer.Option("--once")] = False,
     yes: Annotated[bool, typer.Option("--yes")] = False,
 ) -> None:
-    """Refresh the calendar on a schedule and print newly due event alerts."""
-    settings = get_settings()
-    if not news_provider_configured(settings):
-        console.print(
-            "[red]Select a configured news provider before starting calendar watch.[/red]"
-        )
-        raise typer.Exit(2)
-    currency_values = tuple(
-        dict.fromkeys(
-            value.strip().upper()
-            for value in currencies.split(",")
-            if value.strip()
-        )
+    'Refresh the calendar on a schedule and print newly due event alerts.'
+    news_commands.news_watch(
+        _command_runtime(),
+        interval_seconds=interval_seconds,
+        alert_minutes=alert_minutes,
+        currencies=currencies,
+        minimum_importance=minimum_importance,
+        once=once,
+        yes=yes,
     )
-    _authorize_direct(
-        "synchronize_news",
-        {
-            "mode": "watch",
-            "interval_seconds": interval_seconds,
-            "alert_minutes": alert_minutes,
-            "currencies": currency_values,
-            "minimum_importance": minimum_importance,
-        },
-        mutating=True,
-        assume_yes=yes,
-    )
-    upgrade_database()
-    console.print("[bold]Trading Agent: Economic calendar watch[/bold]")
-    console.print(
-        f"Refreshing every {interval_seconds}s · alert window {alert_minutes}m · "
-        f"currencies {', '.join(currency_values) or 'all'}"
-    )
-    console.print("[dim]Press Ctrl-C to stop. No orders can be placed.[/dim]")
-    notified: set[tuple[str, str]] = set()
-
-    async def refresh():
-        connector = create_news_connector(settings)
-        try:
-            today = datetime.now(UTC).date()
-            return await connector.calendar(
-                start=today,
-                end=today + timedelta(days=settings.startup_news_horizon_days),
-                countries=currency_values,
-                minimum_importance=minimum_importance,
-            )
-        finally:
-            await connector.aclose()
-
-    try:
-        while True:
-            try:
-                fetched = tuple(asyncio.run(refresh()))
-            except RuntimeError as exc:
-                console.print(
-                    f"[yellow]Calendar refresh unavailable: {exc}. "
-                    "Using stored events.[/yellow]"
-                )
-            else:
-                with SessionLocal() as db:
-                    added = store_calendar_events(db, fetched)
-                console.print(
-                    f"[dim]{datetime.now().astimezone().strftime('%H:%M:%S %Z')} · "
-                    f"{len(fetched)} received · {added} new[/dim]"
-                )
-
-            now = datetime.now(UTC)
-            through = now + timedelta(minutes=alert_minutes)
-            with SessionLocal() as db:
-                statement = (
-                    select(EconomicEvent)
-                    .where(
-                        EconomicEvent.scheduled_at >= now,
-                        EconomicEvent.scheduled_at <= through,
-                        EconomicEvent.importance >= minimum_importance,
-                    )
-                    .order_by(
-                        EconomicEvent.scheduled_at,
-                        EconomicEvent.importance.desc(),
-                    )
-                )
-                if currency_values:
-                    statement = statement.where(
-                        EconomicEvent.currency.in_(currency_values)
-                    )
-                due = tuple(db.scalars(statement))
-            new_due = tuple(
-                event
-                for event in due
-                if (event.source, event.source_event_id) not in notified
-            )
-            for event in new_due:
-                local_time = event.scheduled_at.astimezone()
-                console.print()
-                console.print(
-                    f"[bold yellow]Economic event approaching · "
-                    f"{event.currency or '—'} · "
-                    f"{local_time.strftime('%H:%M %Z')}[/bold yellow]"
-                )
-                console.print(event.title)
-                console.print(
-                    f"[dim]Impact {event.importance}/3 · source {event.source} · "
-                    "untrusted calendar evidence[/dim]"
-                )
-                notified.add((event.source, event.source_event_id))
-            if once:
-                return
-            time.sleep(interval_seconds)
-    except KeyboardInterrupt:
-        console.print("\n[dim]Calendar watch stopped.[/dim]")
 
 
 @sessions_app.command("show")
 def sessions_show(session: str) -> None:
-    """Show the saved transcript for one session."""
-    upgrade_database()
-    with SessionLocal() as db:
-        scope = _current_scope(db)
-        conversation: ConversationSession | None = resolve_conversation(
-            db,
-            session,
-            scope=scope,
-        )
-        if conversation is None:
-            console.print(f"[red]Conversation {session} was not found.[/red]")
-            raise typer.Exit(1)
-        for turn in conversation_transcript(
-            db,
-            conversation,
-            scope=scope,
-            limit=100,
-        ):
-            console.print(Panel(turn["content"], title=turn["role"]))
+    'Show the saved transcript for one session.'
+    sessions_commands.sessions_show(
+        _command_runtime(),
+        session=session,
+    )
 
 
 @app.command(rich_help_panel="Core advisor workflow")
