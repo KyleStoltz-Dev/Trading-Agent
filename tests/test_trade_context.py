@@ -5,14 +5,19 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 import app.cli as cli_module
+from app.connectors import BrokerConfigurationError
 from app.market_data.contracts import AccountState, Candle, PositionState
+from app.policy import PolicyViolation
 from app.services import trade_context as trade_context_module
 from app.services.agent import TOOLS
 from app.services.evidence import record_chart_feedback
 from app.services.trade_context import (
     collect_and_close_broker_trade_context,
     collect_broker_trade_context,
+    model_trade_context_payload,
     stored_trade_context,
 )
 from app.services.trading_workflow import normalize_instrument_symbol
@@ -118,6 +123,8 @@ def test_stored_context_selects_latest_open_plan_and_normalizes_symbol(
         target=Decimal("3530"),
         risk_percent=Decimal("0.5"),
         planned_r=Decimal("3"),
+        source="synthetic-demo-gold-v1",
+        thesis="Synthetic demo data for workflow testing.",
         status="planned",
         created_at=now,
     )
@@ -140,6 +147,8 @@ def test_stored_context_selects_latest_open_plan_and_normalizes_symbol(
 
     assert result["instrument"] == "XAU_USD"
     assert result["active_plan"]["reference"] == active.reference
+    assert result["active_plan"]["is_synthetic"] is True
+    assert result["active_plan"]["record_role"] == "saved_journal_plan"
     assert result["linked_charts"] == []
     trade_context_module.list_trade_plans.assert_called_once_with(
         database,
@@ -218,6 +227,32 @@ def test_trade_context_tool_is_a_single_read_only_surface() -> None:
     }
 
 
+def test_model_context_labels_saved_plan_and_hides_internal_missing_fields() -> None:
+    stored = {
+        "instrument": "XAU_USD",
+        "active_plan": {"reference": "synthetic-plan", "is_synthetic": True},
+        "recent_comparable_plans": [],
+    }
+    broker = {
+        "provider": None,
+        "quote": None,
+        "missing": [
+            {"read": "broker", "reason": "not_configured"},
+            {"read": "candles:H4", "reason": "TimeoutError"},
+        ],
+    }
+
+    payload = model_trade_context_payload(stored, broker)
+
+    assert "active_plan" not in payload
+    assert payload["saved_plan"]["reference"] == "synthetic-plan"
+    assert "missing" not in payload["broker"]
+    assert payload["broker"]["limitations"] == [
+        "Read-only broker market data is unavailable.",
+        "Broker candles are unavailable for H4.",
+    ]
+
+
 def test_chart_feedback_is_scoped_to_exact_evidence() -> None:
     evidence = SimpleNamespace(id=uuid.uuid4(), trade_plan_id=uuid.uuid4())
     database = Mock()
@@ -264,6 +299,11 @@ def test_chat_context_is_assembled_without_a_configured_broker(monkeypatch) -> N
     conversation = SimpleNamespace(active_playbook_version_id=None)
     checkpoint = SimpleNamespace(instrument="XAU_USD")
     scope = RequestScope(workspace_id=uuid.uuid4(), account_id=uuid.uuid4())
+    monkeypatch.setattr(
+        cli_module,
+        "_configured_broker_connection",
+        Mock(side_effect=BrokerConfigurationError("not configured")),
+    )
 
     context, references = cli_module._automatic_chat_trade_context(
         Mock(),
@@ -274,5 +314,25 @@ def test_chat_context_is_assembled_without_a_configured_broker(monkeypatch) -> N
     )
 
     assert "CURRENT READ-ONLY TRADE CONTEXT" in context
-    assert '"reason":"not_configured"' in context
+    assert "Read-only broker market data is unavailable." in context
+    assert '"missing"' not in context
+    assert '"reason"' not in context
     assert references == []
+    assert cli_module._configured_broker_connection.call_args.kwargs["scope"] == scope
+
+
+def test_automatic_context_policy_failure_stops_all_reads(monkeypatch) -> None:
+    authorize = Mock(side_effect=PolicyViolation("policy changed"))
+    stored = Mock()
+    broker = Mock()
+    monkeypatch.setattr(cli_module, "_authorize_direct", authorize)
+    monkeypatch.setattr(cli_module, "stored_trade_context", stored)
+    monkeypatch.setattr(cli_module, "_configured_broker_connection", broker)
+    with pytest.raises(PolicyViolation):
+        cli_module._automatic_chat_trade_context(
+            Mock(), cli_module.Settings(), SimpleNamespace(active_playbook_version_id=None),
+            SimpleNamespace(instrument="XAU_USD"),
+            scope=RequestScope(uuid.uuid4(), uuid.uuid4()),
+        )
+    stored.assert_not_called()
+    broker.assert_not_called()

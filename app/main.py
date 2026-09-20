@@ -54,7 +54,6 @@ from app.models import (
     ConversationSession,
     TradePlan,
     TradeReflection,
-    TradingAccount,
 )
 from app.policy import PolicyEngine, ToolContext
 from app.providers import ProviderConfigurationError, create_model_provider
@@ -110,6 +109,7 @@ from app.services.agent_gateway import (
     selectable_agent_models,
     start_agent_session,
 )
+from app.services.broker_selection import selected_account_broker_connection
 from app.services.chart_analysis import SYSTEM_PROMPT, analyze_chart
 from app.services.chat_webhooks import (
     ChatWebhookReplayError,
@@ -906,10 +906,20 @@ def agent_context(
         )
     except (LookupError, ValueError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    effective_broker = "none"
+    try:
+        _, connection = selected_account_broker_connection(
+            db, scope=scope, configured_provider=settings.broker_provider,
+            metatrader_platform=settings.metatrader_platform,
+        )
+    except (BrokerConfigurationError, LookupError):
+        pass
+    else:
+        effective_broker = "oanda" if connection.provider == "oanda-v20" else "metatrader"
     return AgentContextRead(
         workspace_id=scope.workspace_id,
         account_id=scope.account_id,
-        broker_provider=settings.broker_provider,
+        broker_provider=effective_broker,
         news_provider=settings.news_provider,
     )
 
@@ -1402,30 +1412,11 @@ def broker_state(
         connector = None
         try:
             settings = get_settings()
-            account = db.scalar(
-                select(TradingAccount).where(
-                    TradingAccount.workspace_id == scope.workspace_id,
-                    TradingAccount.id == scope.account_id,
-                )
-            )
-            if account is None:
-                raise BrokerConfigurationError(
-                    "the selected trading account was not found"
-                )
-            if settings.broker_provider == "oanda":
-                provider = "oanda-v20"
-            elif settings.broker_provider == "metatrader":
-                provider = f"metatrader-{settings.metatrader_platform}-bridge"
-            else:
-                raise BrokerConfigurationError(
-                    "select a supported read-only broker before loading account state"
-                )
-            connection = db.scalar(
-                select(BrokerConnection).where(
-                    BrokerConnection.workspace_id == scope.workspace_id,
-                    BrokerConnection.account_id == scope.account_id,
-                    BrokerConnection.provider == provider,
-                )
+            account, connection = selected_account_broker_connection(
+                db,
+                scope=scope,
+                configured_provider=settings.broker_provider,
+                metatrader_platform=settings.metatrader_platform,
             )
             connector = create_broker_connector(
                 settings,
@@ -1436,7 +1427,7 @@ def broker_state(
                 connector.account(),
                 connector.positions(),
             )
-        except BrokerConfigurationError as exc:
+        except (BrokerConfigurationError, LookupError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except (OandaConnectorError, MetaTraderBridgeError) as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc

@@ -1,4 +1,5 @@
 import uuid
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from decimal import Decimal
 from io import StringIO
@@ -498,9 +499,12 @@ def test_broker_sync_validates_configuration_before_mutation_confirmation(
     )
     confirmation = Mock(return_value=False)
     monkeypatch.setattr(cli_module, "get_settings", Mock(return_value=settings))
+    monkeypatch.setattr(cli_module, "upgrade_database", Mock())
+    monkeypatch.setattr(cli_module, "SessionLocal", lambda: nullcontext(Mock()))
+    monkeypatch.setattr(cli_module, "_current_scope", Mock(return_value=TEST_SCOPE))
     monkeypatch.setattr(
         cli_module,
-        "create_broker_connector",
+        "_configured_broker_connection",
         Mock(
             side_effect=BrokerConfigurationError(
                 "BROKER_PROVIDER must be oanda or metatrader for broker reads"
@@ -600,6 +604,10 @@ def test_preflight_help_states_strategy_grade_and_no_order_boundary() -> None:
 def test_chat_trade_intent_offers_existing_preflight_with_default_yes(
     monkeypatch,
 ) -> None:
+    monkeypatch.setattr(
+        cli_module, "_configured_broker_connection",
+        Mock(side_effect=BrokerConfigurationError("no saved connection")),
+    )
     version_id = uuid.uuid4()
     conversation = SimpleNamespace(
         workspace_id=TEST_SCOPE.workspace_id,
@@ -921,6 +929,10 @@ def test_chat_trade_intent_decline_records_turns_without_launching(
 
 
 def test_chat_returns_after_preflight_validation_exit(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cli_module, "_configured_broker_connection",
+        Mock(side_effect=BrokerConfigurationError("no saved connection")),
+    )
     conversation = SimpleNamespace(
         workspace_id=TEST_SCOPE.workspace_id,
         account_id=TEST_SCOPE.account_id,
@@ -954,6 +966,10 @@ def test_chat_returns_after_preflight_validation_exit(monkeypatch) -> None:
 def test_chat_no_strategy_guides_recovery_then_resumes_preflight(
     monkeypatch,
 ) -> None:
+    monkeypatch.setattr(
+        cli_module, "_configured_broker_connection",
+        Mock(side_effect=BrokerConfigurationError("no saved connection")),
+    )
     version_id = uuid.uuid4()
     conversation = SimpleNamespace(
         workspace_id=TEST_SCOPE.workspace_id,

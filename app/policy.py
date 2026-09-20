@@ -82,6 +82,7 @@ DIRECT_ACTION_METADATA = {
     "get_broker_state": {"mutating": False, "deterministic": False},
     "exclude_strategy_knowledge": {"mutating": True, "deterministic": False},
     "get_live_quote": {"mutating": False, "deterministic": False},
+    "get_trade_context": {"mutating": False, "deterministic": False},
     "get_system_health": {"mutating": False, "deterministic": False},
     "get_recent_tradingview_alerts": {"mutating": False, "deterministic": False},
     "get_trade_plan": {"mutating": False, "deterministic": False},

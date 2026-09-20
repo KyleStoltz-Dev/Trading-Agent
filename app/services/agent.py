@@ -54,6 +54,7 @@ from app.services.account_constraints import (
 )
 from app.services.analytics import build_edge_report
 from app.services.broker_review import broker_trade_review
+from app.services.broker_selection import selected_account_broker_connection
 from app.services.broker_sync import synchronize_broker
 from app.services.catalog import active_instrument_specification
 from app.services.chart_analysis import SYSTEM_PROMPT, analyze_chart
@@ -115,6 +116,7 @@ from app.services.strategy_workspace import (
 from app.services.tool_audit import AuditedToolExecutor
 from app.services.trade_context import (
     collect_and_close_broker_trade_context,
+    model_trade_context_payload,
     stored_trade_context,
 )
 from app.services.trading_workflow import (
@@ -143,6 +145,8 @@ promise an outcome, select authoritative position size yourself, or imply that c
 increases permissible risk. Use the deterministic risk tool for calculations. Use journal
 tools when relevant, but every journal mutation requires the trader's terminal confirmation.
 There are no broker execution tools. State missing capabilities plainly.
+Broker connectivity enables read-only market and account evidence only. Never say that a
+missing broker blocks execution, because order execution is not a product capability.
 For a hypothetical example, label it as fabricated and illustrative. Do not describe a current
 market regime, recent price action, live volume, scheduled news, or available liquidity unless a
 tool returned that evidence for this request.
@@ -158,6 +162,10 @@ nearby economic events,
 linked screenshots, and recent comparable plans. Do not ask the trader for any value the pack
 already contains. If one source fails, use the remaining evidence and identify only the missing
 fact that materially affects the conclusion.
+A saved journal plan is not proof of a live order, open position, or current trading intent.
+Call it a saved plan and use broker positions as the authority for whether a position is open.
+When a plan has is_synthetic=true, always label it as synthetic test data. Never expose a
+raw missing-read object or schema key; translate it into one brief customer-facing limitation.
 When the trader corrects a saved chart analysis, identify the exact evidence reference and offer
 to save one concise correction with record_chart_feedback. A correction is training/evaluation
 evidence only: it must not alter an immutable strategy or claim the correction is universally true.
@@ -1586,38 +1594,12 @@ class TradingAgent:
 
     def _broker_account_connection(self) -> tuple[TradingAccount, BrokerConnection | None]:
         scope = self._require_scope()
-        account = self.db.scalar(
-            select(TradingAccount).where(
-                TradingAccount.workspace_id == scope.workspace_id,
-                TradingAccount.id == scope.account_id,
-            )
+        return selected_account_broker_connection(
+            self.db,
+            scope=scope,
+            configured_provider=self.settings.broker_provider,
+            metatrader_platform=self.settings.metatrader_platform,
         )
-        if account is None:
-            raise LookupError("selected trading account no longer exists")
-        if self.settings.broker_provider == "oanda":
-            provider = "oanda-v20"
-        elif self.settings.broker_provider == "metatrader":
-            provider = f"metatrader-{self.settings.metatrader_platform}-bridge"
-        elif self.settings.broker_provider in {
-            "ibkr",
-            "alpaca",
-            "twelve-data",
-            "ctrader",
-        }:
-            raise BrokerConfigurationError(
-                f"BROKER_PROVIDER={self.settings.broker_provider} is planned and "
-                "not available for live reads yet"
-            )
-        else:
-            raise BrokerConfigurationError("no broker provider is configured")
-        connection = self.db.scalar(
-            select(BrokerConnection).where(
-                BrokerConnection.workspace_id == scope.workspace_id,
-                BrokerConnection.account_id == scope.account_id,
-                BrokerConnection.provider == provider,
-            )
-        )
-        return account, connection
 
     def _broker_connector(self):
         account, connection = self._broker_account_connection()
@@ -2575,7 +2557,7 @@ class TradingAgent:
                     }
                 ],
             }
-            if self.settings.broker_provider != "none":
+            try:
                 connector = self._broker_connector()
                 broker = asyncio.run(
                     collect_and_close_broker_trade_context(
@@ -2588,6 +2570,8 @@ class TradingAgent:
                         candle_count=arguments["candle_count"],
                     )
                 )
+            except (BrokerConfigurationError, LookupError):
+                pass
 
             account = broker.get("account")
             quote = broker.get("quote")
@@ -2616,7 +2600,11 @@ class TradingAgent:
                 plan = stored["active_plan"]
                 self._reference(
                     "journal",
-                    f"Active {plan['instrument']} plan",
+                    (
+                        f"Synthetic saved {plan['instrument']} plan"
+                        if plan.get("is_synthetic")
+                        else f"Saved {plan['instrument']} plan"
+                    ),
                     f"trade-plan:{plan['reference']}",
                     plan["created_at"],
                 )
@@ -2643,7 +2631,7 @@ class TradingAgent:
                             "broker_provider": self.settings.broker_provider,
                             "assembled_at": stored["assembled_at"],
                         },
-                        {**stored, "broker": broker},
+                        model_trade_context_payload(stored, broker),
                     ),
                 }
             )
@@ -2697,7 +2685,7 @@ class TradingAgent:
                     "broker history already has a cursor; refusing to rewind imported history"
                 )
             if from_cursor is not None:
-                if self.settings.broker_provider == "oanda" and not from_cursor.isdigit():
+                if connection.provider == "oanda-v20" and not from_cursor.isdigit():
                     raise ValueError("OANDA history cursor must contain only digits")
                 self.db.add(
                     ConnectorCursor(
@@ -2710,17 +2698,19 @@ class TradingAgent:
                 )
                 self.db.flush()
             connector = self._broker_connector()
-            try:
-                result = asyncio.run(
-                    synchronize_broker(
+
+            async def sync_and_close():
+                try:
+                    return await synchronize_broker(
                         self.db,
                         scope=scope,
                         connection_id=connection.id,
                         connector=connector,
                     )
-                )
-            finally:
-                asyncio.run(connector.aclose())
+                finally:
+                    await connector.aclose()
+
+            result = asyncio.run(sync_and_close())
             self._reference(
                 "broker",
                 f"{connection.provider} execution-history synchronization",
@@ -3584,8 +3574,11 @@ class TradingAgent:
                         "do not prove manipulation or predict an outcome."
                     ),
                 }
-                if self.settings.broker_provider != "none":
+                try:
                     broker = self._broker_connector()
+                except (BrokerConfigurationError, LookupError):
+                    result["missing"].append("read-only broker market data is unavailable")
+                else:
                     try:
                         candles = list(
                             await broker.candles(
@@ -3606,8 +3599,6 @@ class TradingAgent:
                             )
                     finally:
                         await broker.aclose()
-                else:
-                    result["missing"].append("read-only broker market data is not configured")
                 if news_provider_configured(self.settings):
                     news_connector = create_news_connector(self.settings)
                     try:

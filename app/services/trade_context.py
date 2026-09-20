@@ -138,6 +138,11 @@ async def collect_and_close_broker_trade_context(
 
 
 def _plan_summary(plan: TradePlan) -> dict[str, Any]:
+    source = str(getattr(plan, "source", "manual") or "manual")
+    thesis = str(getattr(plan, "thesis", "") or "")
+    is_synthetic = source.casefold().startswith("synthetic") or (
+        "synthetic demo" in thesis.casefold()
+    )
     return {
         "reference": plan.reference,
         "instrument": plan.instrument,
@@ -153,8 +158,41 @@ def _plan_summary(plan: TradePlan) -> dict[str, Any]:
         "risk_percent": plan.risk_percent,
         "planned_r": plan.planned_r,
         "status": plan.status,
+        "source": source,
+        "is_synthetic": is_synthetic,
+        "record_role": "saved_journal_plan",
         "created_at": plan.created_at,
     }
+
+
+def model_trade_context_payload(stored: dict[str, Any], broker: dict[str, Any]) -> dict[str, Any]:
+    """Build a model-facing context without internal error/schema vocabulary."""
+    model_broker = {key: value for key, value in broker.items() if key != "missing"}
+    limitations: list[str] = []
+    for missing in broker.get("missing", []):
+        read = missing.get("read") if isinstance(missing, dict) else str(missing)
+        if read == "broker":
+            message = "Read-only broker market data is unavailable."
+        elif read == "quote":
+            message = "The current broker quote is unavailable."
+        elif read == "account":
+            message = "Current broker account state is unavailable."
+        elif read == "positions":
+            message = "Current broker positions are unavailable."
+        elif str(read).startswith("candles:"):
+            timeframe = str(read).partition(":")[2]
+            message = f"Broker candles are unavailable for {timeframe}."
+        else:
+            message = "Part of the read-only broker evidence is unavailable."
+        if message not in limitations:
+            limitations.append(message)
+    if limitations:
+        model_broker["limitations"] = limitations
+
+    payload = {key: value for key, value in stored.items() if key != "active_plan"}
+    payload["saved_plan"] = stored.get("active_plan")
+    payload["broker"] = model_broker
+    return payload
 
 
 def stored_trade_context(

@@ -40,6 +40,8 @@ def test_agent_context_and_model_catalog_are_available_to_dashboard(
     scope = RequestScope(workspace_id=uuid.uuid4(), account_id=uuid.uuid4())
     monkeypatch.setattr(main_module, "get_settings", _settings)
     monkeypatch.setattr(main_module, "resolve_current_scope", lambda *_args, **_kwargs: scope)
+    selection = Mock(return_value=(object(), SimpleNamespace(provider="oanda-v20")))
+    monkeypatch.setattr(main_module, "selected_account_broker_connection", selection)
     monkeypatch.setattr(
         main_module,
         "selectable_agent_models",
@@ -68,10 +70,11 @@ def test_agent_context_and_model_catalog_are_available_to_dashboard(
     assert context.json() == {
         "workspace_id": str(scope.workspace_id),
         "account_id": str(scope.account_id),
-        "broker_provider": "none",
+        "broker_provider": "oanda",
         "news_provider": "none",
     }
     assert models.status_code == 200
+    assert selection.call_args.kwargs["scope"] == scope
     assert models.json()[0]["model"] == "qwen3.5:9b"
 
 
