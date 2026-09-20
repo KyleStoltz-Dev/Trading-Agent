@@ -10,7 +10,8 @@ import pytest
 import app.cli as cli_module
 from app.connectors import BrokerConfigurationError
 from app.market_data.contracts import AccountState, Candle, PositionState
-from app.policy import PolicyViolation
+from app.policy import PolicyEngine, PolicyViolation
+from app.services import conversation_context as context_module
 from app.services import trade_context as trade_context_module
 from app.services.agent import TOOLS
 from app.services.evidence import record_chart_feedback
@@ -283,7 +284,7 @@ def test_instrument_normalization_matches_conversation_symbols() -> None:
 def test_chat_context_is_assembled_without_a_configured_broker(monkeypatch) -> None:
     now = datetime(2026, 9, 2, 12, tzinfo=UTC)
     monkeypatch.setattr(
-        cli_module,
+        context_module,
         "stored_trade_context",
         Mock(
             return_value={
@@ -300,17 +301,18 @@ def test_chat_context_is_assembled_without_a_configured_broker(monkeypatch) -> N
     checkpoint = SimpleNamespace(instrument="XAU_USD")
     scope = RequestScope(workspace_id=uuid.uuid4(), account_id=uuid.uuid4())
     monkeypatch.setattr(
-        cli_module,
-        "_configured_broker_connection",
+        context_module,
+        "selected_account_broker_connection",
         Mock(side_effect=BrokerConfigurationError("not configured")),
     )
 
-    context, references = cli_module._automatic_chat_trade_context(
+    context, references = context_module.assemble_trade_context(
         Mock(),
         cli_module.Settings(broker_provider="none"),
         conversation,
         checkpoint,
         scope=scope,
+        policy=PolicyEngine.load(),
     )
 
     assert "CURRENT READ-ONLY TRADE CONTEXT" in context
@@ -318,21 +320,22 @@ def test_chat_context_is_assembled_without_a_configured_broker(monkeypatch) -> N
     assert '"missing"' not in context
     assert '"reason"' not in context
     assert references == []
-    assert cli_module._configured_broker_connection.call_args.kwargs["scope"] == scope
+    assert context_module.selected_account_broker_connection.call_args.kwargs["scope"] == scope
 
 
 def test_automatic_context_policy_failure_stops_all_reads(monkeypatch) -> None:
     authorize = Mock(side_effect=PolicyViolation("policy changed"))
     stored = Mock()
     broker = Mock()
-    monkeypatch.setattr(cli_module, "_authorize_direct", authorize)
-    monkeypatch.setattr(cli_module, "stored_trade_context", stored)
-    monkeypatch.setattr(cli_module, "_configured_broker_connection", broker)
+    policy = Mock(authorize_registered_action=authorize)
+    monkeypatch.setattr(context_module, "stored_trade_context", stored)
+    monkeypatch.setattr(context_module, "selected_account_broker_connection", broker)
     with pytest.raises(PolicyViolation):
-        cli_module._automatic_chat_trade_context(
+        context_module.assemble_trade_context(
             Mock(), cli_module.Settings(), SimpleNamespace(active_playbook_version_id=None),
             SimpleNamespace(instrument="XAU_USD"),
             scope=RequestScope(uuid.uuid4(), uuid.uuid4()),
+            policy=policy,
         )
     stored.assert_not_called()
     broker.assert_not_called()

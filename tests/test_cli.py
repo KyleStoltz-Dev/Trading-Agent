@@ -338,7 +338,7 @@ def test_starter_profile_uses_safe_defaults_and_commits(monkeypatch) -> None:
     monkeypatch.setattr(cli_module, "upsert_trader_profile", upsert)
     monkeypatch.setattr(cli_module, "configure_learning_curriculum", curriculum)
     monkeypatch.setattr(cli_module, "update_env_file", update)
-    monkeypatch.setattr(cli_module, "snapshot_env_file", Mock(return_value=None))
+    monkeypatch.setattr(cli_module, "settings_transaction", lambda _path: nullcontext())
 
     cli_module._create_starter_profile(database, settings, scope=TEST_SCOPE)
 
@@ -2342,8 +2342,9 @@ def test_cancelled_chat_request_is_audited_without_closing_chat(
 ) -> None:
     update = Mock()
     add = Mock()
-    monkeypatch.setattr(cli_module, "update_turn_outcome", update)
-    monkeypatch.setattr(cli_module, "add_turn", add)
+    from app.services import request_lifecycle
+    monkeypatch.setattr(request_lifecycle, "update_turn_outcome", update)
+    monkeypatch.setattr(request_lifecycle, "add_turn", add)
     agent = SimpleNamespace(
         last_tool_audit=(
             SimpleNamespace(succeeded=True) if tool_succeeded else None

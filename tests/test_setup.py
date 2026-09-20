@@ -1,8 +1,11 @@
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Event
 
 import pytest
 
+from app.services.settings_store import restore_env_file, settings_transaction
 from app.setup import (
     beginner_setup_settings,
     dependency_guidance,
@@ -44,6 +47,76 @@ def test_setup_normalizes_duplicate_provider_without_touching_secrets(
 def test_setup_refuses_to_write_secret_settings(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unsupported"):
         update_env_file(tmp_path / ".env", {"OPENAI_API_KEY": "secret"})
+
+
+def test_concurrent_settings_updates_preserve_each_interfaces_changes(tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    changes = [
+        {"MODEL_PROVIDER": "openai", "OPENAI_MODEL": "gpt-6-astra"},
+        {"BROKER_PROVIDER": "oanda"},
+        {"NEWS_PROVIDER": "forex-factory"},
+    ]
+    barrier = Barrier(len(changes))
+
+    def update(values):
+        barrier.wait(timeout=5)
+        update_env_file(env_file, values)
+
+    with ThreadPoolExecutor(max_workers=len(changes)) as pool:
+        list(pool.map(update, changes))
+    contents = env_file.read_text()
+    for values in changes:
+        for key, value in values.items():
+            assert f"{key}={value}\n" in contents
+
+
+@pytest.mark.parametrize("failure", [RuntimeError, KeyboardInterrupt])
+def test_setup_rollback_never_erases_another_sessions_update(tmp_path, failure):
+    path = tmp_path / ".env"
+    update_env_file(path, {"MODEL_PROVIDER": "ollama"})
+    attempted = Event()
+
+    def other_interface():
+        attempted.set()
+        update_env_file(path, {"MODEL_PROVIDER": "openai"})
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with pytest.raises(failure):
+            with settings_transaction(path):
+                update_env_file(path, {"BROKER_PROVIDER": "oanda"})
+                writer = pool.submit(other_interface)
+                assert attempted.wait(timeout=2)
+                assert not writer.done()
+                raise failure("setup did not commit")
+        writer.result(timeout=5)
+    assert path.read_text() == "MODEL_PROVIDER=openai\n"
+
+
+def test_settings_transaction_rolls_back_new_file_and_releases_lock(tmp_path):
+    path = tmp_path / ".env"
+    with pytest.raises(RuntimeError):
+        with settings_transaction(path):
+            update_env_file(path, {"BROKER_PROVIDER": "oanda"})
+            raise RuntimeError("database unavailable")
+    assert not path.exists()
+    with settings_transaction(path):
+        update_env_file(path, {"BROKER_PROVIDER": "metatrader"})
+    assert path.read_text() == "BROKER_PROVIDER=metatrader\n"
+
+
+def test_unguarded_snapshot_restore_is_rejected(tmp_path):
+    path = tmp_path / ".env"
+    update_env_file(path, {"MODEL_PROVIDER": "openai"})
+    with pytest.raises(RuntimeError, match="active settings transaction"):
+        restore_env_file(path, b"MODEL_PROVIDER=ollama\n")
+    assert path.read_text() == "MODEL_PROVIDER=openai\n"
+
+
+def test_settings_update_replaces_exported_and_padded_duplicate_keys(tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("export MODEL_PROVIDER = ollama\nMODEL_PROVIDER=anthropic\n")
+    update_env_file(env_file, {"MODEL_PROVIDER": "openai"})
+    assert env_file.read_text() == "MODEL_PROVIDER=openai\n"
 
 
 def test_beginner_setup_is_usable_without_storing_secrets() -> None:
@@ -88,6 +161,9 @@ def test_setup_rejects_environment_injection(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="model name"):
         provider_settings("ollama", "qwen3.5:9b\nOPENAI_API_KEY=injected")
+
+    with pytest.raises(ValueError, match="interpolate"):
+        update_env_file(tmp_path / ".env", {"TRADING_ACCOUNT": "${OPENAI_API_KEY}"})
 
 
 def test_ollama_quality_profile_changes_balanced_and_deep_only() -> None:

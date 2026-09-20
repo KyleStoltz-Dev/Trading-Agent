@@ -6,7 +6,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import ConversationSession, ConversationTurn
-from app.services.trading_workflow import is_dangling_count_clarification
+from app.services.trading_workflow import (
+    WorkflowCheckpoint,
+    advance_workflow,
+    checkpoint_from_record,
+    infer_workflow_checkpoint,
+    is_dangling_count_clarification,
+)
 from app.services.workspaces import (
     RequestScope,
     validate_scope,
@@ -14,6 +20,7 @@ from app.services.workspaces import (
 )
 
 SESSION_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_ACTIVE_STRATEGY = object()
 GENERIC_SESSION_TITLES = frozenset(
     {
         "dashboard trading desk",
@@ -293,6 +300,24 @@ def add_turn(
         raise ValueError("error_type is only valid for partial or failed turns")
     validate_strategy_scope(db, scope, playbook_version_id)
     _validate_conversation_scope(conversation, scope)
+    checkpoint = None
+    if role == "user":
+        # Serialize checkpoint advancement for simultaneous interfaces on one session.
+        db.execute(select(ConversationSession.id).where(
+            ConversationSession.id == conversation.id,
+            ConversationSession.workspace_id == scope.workspace_id,
+            ConversationSession.account_id == scope.account_id,
+        ).with_for_update())
+        previous = conversation_workflow(
+            db, conversation, scope=scope, playbook_version_id=playbook_version_id,
+        )
+        current = advance_workflow(previous, content)
+        if current is not None:
+            checkpoint = {
+                "version": 1, "stage": current.stage, "instrument": current.instrument,
+                "source_message": current.source_message,
+                "status": current.status,
+            }
     turn = ConversationTurn(
         workspace_id=scope.workspace_id,
         account_id=scope.account_id,
@@ -303,6 +328,7 @@ def add_turn(
         request_id=request_id,
         status=status,
         error_type=error_type,
+        workflow_checkpoint=checkpoint,
         created_at=datetime.now(UTC),
     )
     if role == "user" and (
@@ -319,6 +345,46 @@ def add_turn(
     db.commit()
     db.refresh(turn)
     return turn
+
+
+def conversation_workflow(
+    db: Session, conversation: ConversationSession, *, scope: RequestScope,
+    history: list[dict[str, str]] | None = None,
+    playbook_version_id: uuid.UUID | None | object = _ACTIVE_STRATEGY,
+) -> WorkflowCheckpoint | None:
+    """Resume durable intent, including interrupted requests, without replaying model claims."""
+    _validate_conversation_scope(conversation, scope)
+    version = (
+        conversation.active_playbook_version_id
+        if playbook_version_id is _ACTIVE_STRATEGY else playbook_version_id
+    )
+    record = db.scalar(select(ConversationTurn.workflow_checkpoint).where(
+        ConversationTurn.workspace_id == scope.workspace_id,
+        ConversationTurn.account_id == scope.account_id,
+        ConversationTurn.session_id == conversation.id,
+        ConversationTurn.playbook_version_id == version,
+        ConversationTurn.role == "user",
+        ConversationTurn.workflow_checkpoint.is_not(None),
+    ).order_by(ConversationTurn.created_at.desc(), ConversationTurn.id.desc()).limit(1))
+    checkpoint = checkpoint_from_record(record)
+    if checkpoint is not None:
+        return checkpoint
+    if record is not None:
+        # Unknown checkpoint versions must not silently turn into reconstructed state.
+        return None
+    # Bootstrap legacy conversations from already-scoped history; future turns save it.
+    if history is None:
+        messages = db.scalars(select(ConversationTurn.content).where(
+            ConversationTurn.workspace_id == scope.workspace_id,
+            ConversationTurn.account_id == scope.account_id,
+            ConversationTurn.session_id == conversation.id,
+            ConversationTurn.playbook_version_id == version,
+            ConversationTurn.role == "user",
+        ).order_by(ConversationTurn.created_at.desc()).limit(200)).all()
+        return infer_workflow_checkpoint(list(reversed(messages)))
+    return infer_workflow_checkpoint([
+        item["content"] for item in (history or []) if item.get("role") == "user"
+    ])
 
 
 def update_turn_outcome(
