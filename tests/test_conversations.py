@@ -12,6 +12,7 @@ from app.services.conversations import (
     conversation_history,
     conversation_topic_title,
     conversation_transcript,
+    conversation_workflow,
     create_conversation,
     generate_conversation_title,
     get_conversation,
@@ -118,6 +119,30 @@ def test_request_scope_is_immutable() -> None:
 
     with pytest.raises(FrozenInstanceError):
         scope.account_id = uuid.uuid4()  # type: ignore[misc]
+
+
+def test_persisted_workflow_does_not_leak_across_strategy_switches(
+    db_session, workspace_account, request_scope,
+) -> None:
+    workspace, _ = workspace_account
+    version = _strategy_version(
+        db_session, workspace, suffix=uuid.uuid4().hex, definition={},
+    )
+    conversation = create_conversation(db_session, title="Isolation", scope=request_scope)
+    add_turn(db_session, conversation, "user", "Analyze gold", scope=request_scope,
+             playbook_version_id=None)
+    conversation.active_playbook_version_id = version.id
+    db_session.commit()
+    assert conversation_workflow(db_session, conversation, scope=request_scope) is None
+    add_turn(db_session, conversation, "user", "Review my trades", scope=request_scope,
+             playbook_version_id=version.id)
+    checkpoint = conversation_workflow(db_session, conversation, scope=request_scope)
+    assert checkpoint.stage == "review"
+    assert checkpoint.instrument is None
+    conversation.active_playbook_version_id = None
+    db_session.commit()
+    restored = conversation_workflow(db_session, conversation, scope=request_scope)
+    assert restored.instrument == "XAU_USD"
 
 
 def test_session_names_are_predictable_slugs() -> None:

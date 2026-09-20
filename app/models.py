@@ -2334,6 +2334,7 @@ class ConversationTurn(Base):
     )
     status: Mapped[str] = mapped_column(String(16), default="complete", index=True)
     error_type: Mapped[str | None] = mapped_column(String(120))
+    workflow_checkpoint: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
