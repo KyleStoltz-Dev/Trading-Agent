@@ -1,10 +1,11 @@
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 
 import pytest
 
+from app.services.settings_store import restore_env_file, settings_transaction
 from app.setup import (
     beginner_setup_settings,
     dependency_guidance,
@@ -67,6 +68,48 @@ def test_concurrent_settings_updates_preserve_each_interfaces_changes(tmp_path) 
     for values in changes:
         for key, value in values.items():
             assert f"{key}={value}\n" in contents
+
+
+@pytest.mark.parametrize("failure", [RuntimeError, KeyboardInterrupt])
+def test_setup_rollback_never_erases_another_sessions_update(tmp_path, failure):
+    path = tmp_path / ".env"
+    update_env_file(path, {"MODEL_PROVIDER": "ollama"})
+    attempted = Event()
+
+    def other_interface():
+        attempted.set()
+        update_env_file(path, {"MODEL_PROVIDER": "openai"})
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with pytest.raises(failure):
+            with settings_transaction(path):
+                update_env_file(path, {"BROKER_PROVIDER": "oanda"})
+                writer = pool.submit(other_interface)
+                assert attempted.wait(timeout=2)
+                assert not writer.done()
+                raise failure("setup did not commit")
+        writer.result(timeout=5)
+    assert path.read_text() == "MODEL_PROVIDER=openai\n"
+
+
+def test_settings_transaction_rolls_back_new_file_and_releases_lock(tmp_path):
+    path = tmp_path / ".env"
+    with pytest.raises(RuntimeError):
+        with settings_transaction(path):
+            update_env_file(path, {"BROKER_PROVIDER": "oanda"})
+            raise RuntimeError("database unavailable")
+    assert not path.exists()
+    with settings_transaction(path):
+        update_env_file(path, {"BROKER_PROVIDER": "metatrader"})
+    assert path.read_text() == "BROKER_PROVIDER=metatrader\n"
+
+
+def test_unguarded_snapshot_restore_is_rejected(tmp_path):
+    path = tmp_path / ".env"
+    update_env_file(path, {"MODEL_PROVIDER": "openai"})
+    with pytest.raises(RuntimeError, match="active settings transaction"):
+        restore_env_file(path, b"MODEL_PROVIDER=ollama\n")
+    assert path.read_text() == "MODEL_PROVIDER=openai\n"
 
 
 def test_settings_update_replaces_exported_and_padded_duplicate_keys(tmp_path) -> None:

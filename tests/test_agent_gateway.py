@@ -37,8 +37,13 @@ def test_pippy_turn_uses_full_agent_tools_and_denies_unconfirmed_mutation(
     conversation = SimpleNamespace(
         id=session_id,
         active_playbook_version_id=None,
+        workspace_id=scope.workspace_id,
+        account_id=scope.account_id,
     )
-    user_turn = SimpleNamespace(id=uuid.uuid4())
+    user_turn = SimpleNamespace(
+        id=uuid.uuid4(), workspace_id=scope.workspace_id, account_id=scope.account_id,
+        session_id=session_id, playbook_version_id=None, workflow_checkpoint=None,
+    )
     provider = _FakeProvider()
     written_turns: list[tuple[str, str]] = []
 
