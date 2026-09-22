@@ -520,7 +520,11 @@ TOOLS = [
         "type": "function",
         "name": "get_broker_state",
         "description": (
-            "Get read-only account totals and open positions without account identifiers."
+            "Get read-only account totals and open positions without account identifiers. "
+            "For the local MT5 companion also returns bounded quote, candle and recent "
+            "deal evidence. Raw broker-server times are not UTC; lots are not units. "
+            "Recent activity is separate from imported journal history, and funding "
+            "is not a profitable trade. Use this for MT5 activity not yet imported."
         ),
         "strict": True,
         "parameters": _object_schema({}, []),

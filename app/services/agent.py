@@ -1244,7 +1244,7 @@ class TradingAgent:
                             f"{position.instrument} position",
                             position,
                         )
-                    return {
+                    state = {
                         "currency": account.currency,
                         "balance": account.balance,
                         "equity": account.equity,
@@ -1254,6 +1254,14 @@ class TradingAgent:
                         "source": account.source,
                         "positions": positions,
                     }
+                    support_context = getattr(connector, "support_context", None)
+                    if support_context is not None:
+                        evidence = await support_context()
+                        if evidence is not None:
+                            state["companion_evidence"] = {
+                                key: value for key, value in evidence.items() if key != "account_id"
+                            }
+                    return state
                 finally:
                     await connector.aclose()
 
