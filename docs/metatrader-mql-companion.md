@@ -32,11 +32,7 @@ connector and can be registered through its policy-confirmed setup flow. The rec
 itself does not update PostgreSQL, reconcile positions, or expose new model tools.
 No order submission, modification or cancellation code exists in the EA/receiver.
 
-## Agent integration (dependent follow-up)
-
-The following agent evidence and saved-pairing setup flow is delivered in a separate,
-dependent integration change. The companion foundation alone exposes authenticated
-read-only HTTP data; it does not add these agent/setup behaviors.
+## Using the existing agent tools
 
 The adapter exposes authenticated GET account, positions, symbols, quote and candle
 routes. `get_broker_state` now also returns bounded companion evidence when the
