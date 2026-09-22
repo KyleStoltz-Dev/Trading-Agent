@@ -1,5 +1,9 @@
 # MetaTrader read-only bridge
 
+For the experimental same-computer Mac/Wine route without the Windows Python
+package, see [MQL5 companion connection test](metatrader-mql-companion.md). It is
+not yet a replacement for this bridge's journal synchronization contract.
+
 ## Purpose and boundary
 
 Trading Agent can run on macOS, Linux, or Windows while MetaTrader runs elsewhere. The agent
