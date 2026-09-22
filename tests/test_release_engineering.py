@@ -65,6 +65,11 @@ def test_wheel_and_sdist_require_runtime_release_content(tmp_path) -> None:
         archive.writestr("app/trading-rules.json", "{}")
         archive.writestr("app/harness/HARNESS.md", "harness")
         archive.writestr("app/migrations/env.py", "")
+        archive.writestr("app/metatrader_companion.py", "")
+        archive.writestr("app/metatrader_companion_api.py", "")
+        archive.writestr("app/metatrader_pairing.py", "")
+        archive.writestr("app/metatrader_refresh.py", "")
+        archive.writestr("app/companions/TradingAgentReadOnly.mq5", "")
         archive.writestr("app/migrations/versions/revision.py", "")
         archive.writestr("trading_agent-0.1.0.dist-info/METADATA", metadata)
         archive.writestr(
@@ -72,7 +77,8 @@ def test_wheel_and_sdist_require_runtime_release_content(tmp_path) -> None:
             "[console_scripts]\n"
             "trade = app.cli:run\n"
             "trading-agent = app.cli:run\n"
-            "trading-agent-mt5-bridge = app.metatrader_bridge_server:run\n",
+            "trading-agent-mt5-bridge = app.metatrader_bridge_server:run\n"
+            "trading-agent-mt5-companion = app.metatrader_companion:run\n",
         )
     assert verify_wheel(wheel, project_name="trading-agent", version="0.1.0").kind == (
         "wheel"
@@ -94,6 +100,12 @@ def test_wheel_and_sdist_require_runtime_release_content(tmp_path) -> None:
         "alembic.ini": b"",
         "app/harness/HARNESS.md": b"",
         "app/migrations/env.py": b"",
+        "app/metatrader_companion.py": b"",
+        "app/metatrader_companion_api.py": b"",
+        "app/metatrader_pairing.py": b"",
+        "app/metatrader_refresh.py": b"",
+        "app/companions/TradingAgentReadOnly.mq5": b"",
+        "docs/metatrader-mql-companion.md": b"",
         "app/migrations/versions/revision.py": b"",
         "app/trading-rules.json": b"{}",
         "install-trading-agent.ps1": b"",

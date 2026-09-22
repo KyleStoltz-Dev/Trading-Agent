@@ -84,6 +84,38 @@ The model can propose a hypothesis. It cannot promote one to an edge.
 
 ## Near-term priorities
 
+### Same-computer MT5 / Mac companion — started 2026-09-22
+
+An experimental MQL5 EA and authenticated loopback receiver now provide the first
+read-only connection-test slice: account state, a selected symbol's quote and a
+bounded recent deal window. No Windows Python package or database mutation is
+required. This is not yet a journal-sync integration or a production-qualified
+Mac/Wine connection. See [scope and qualification checklist](metatrader-mql-companion.md).
+Terminal/Wine reception has now been verified. Remaining gates: broker-confirmed time normalization,
+resumable history including cancelled/rejected orders, then policy-approved
+account-scoped journal ingestion and guided connection setup. MT4 remains separate.
+
+The local companion now includes a controlled compiler/deployer, fixed-file self-reload
+request, exact-build acknowledgement, failed-update file restoration, and reuse of a
+private saved pairing across receiver restarts. A one-time legacy-EA bootstrap remains
+necessary. On 2026-09-22, a successful automatic refresh was verified end to end on
+the Mac/Wine demo installation, including exact-build acknowledgement and continuing
+XAUUSD bid/ask reception. Failure recovery and broader platform compatibility remain
+qualification gates; the updater never restarts MT5 or enables trading permissions.
+
+Read-only broker-tool checkpoint (2026-09-22): the receiver now serves account,
+position, symbol, and optionally timezone-normalized quote/candle endpoints for the
+existing connector. A dependent integration change will expose bounded, source-labelled
+raw MT5 evidence through `get_broker_state` and add saved-pairing registration through
+the OS credential vault with explicit mutation confirmation. No new model tool is needed.
+Version 1.03 was refreshed automatically on Mac/Wine and live-verified with open
+position retrieval plus 50 bars each on H4/M15/M5/M1. A funding record was correctly
+kept separate from executions. The local broker timezone remains unqualified;
+raw broker evidence is available, normalized time-dependent reads remain gated.
+Journal ingestion is explicitly refused until resumable history, cancellation/
+rejection records and lifecycle handling are reliable. No local account selection
+or journal data was changed by this implementation test.
+
 ### Beginner-first setup and connection center
 
 Implementation checkpoint (2026-09-03): running `trade` without an existing configuration

@@ -23,6 +23,7 @@ REQUIRED_ENTRY_POINTS = {
     "trade = app.cli:run",
     "trading-agent = app.cli:run",
     "trading-agent-mt5-bridge = app.metatrader_bridge_server:run",
+    "trading-agent-mt5-companion = app.metatrader_companion:run",
 }
 FORBIDDEN_PARTS = frozenset(
     {
@@ -135,6 +136,11 @@ def verify_wheel(path: Path, *, project_name: str, version: str) -> VerifiedArti
         "app/trading-rules.json",
         "app/harness/HARNESS.md",
         "app/migrations/env.py",
+        "app/metatrader_companion.py",
+        "app/metatrader_companion_api.py",
+        "app/metatrader_pairing.py",
+        "app/metatrader_refresh.py",
+        "app/companions/TradingAgentReadOnly.mq5",
     }
     missing = sorted(required_exact - names)
     if missing:
@@ -188,6 +194,12 @@ def verify_sdist(path: Path, *, version: str) -> VerifiedArtifact:
         f"{root}/alembic.ini",
         f"{root}/app/harness/HARNESS.md",
         f"{root}/app/migrations/env.py",
+        f"{root}/app/metatrader_companion.py",
+        f"{root}/app/metatrader_companion_api.py",
+        f"{root}/app/metatrader_pairing.py",
+        f"{root}/app/metatrader_refresh.py",
+        f"{root}/app/companions/TradingAgentReadOnly.mq5",
+        f"{root}/docs/metatrader-mql-companion.md",
         f"{root}/app/trading-rules.json",
         f"{root}/install-trading-agent.ps1",
         f"{root}/install-trading-agent.sh",

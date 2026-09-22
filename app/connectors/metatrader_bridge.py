@@ -355,6 +355,7 @@ class MetaTraderReadOnlyBridgeConnector:
             },
             timeout=httpx.Timeout(timeout_seconds),
             follow_redirects=False,
+            trust_env=False,
         )
 
     @staticmethod
@@ -383,7 +384,6 @@ class MetaTraderReadOnlyBridgeConnector:
                             _retry_delay(response.headers.get("retry-after"), attempt)
                         )
                         continue
-                    response.raise_for_status()
                     chunks: list[bytes] = []
                     total = 0
                     async for chunk in response.aiter_bytes():
@@ -393,6 +393,44 @@ class MetaTraderReadOnlyBridgeConnector:
                                 "MetaTrader bridge response exceeded the configured limit"
                             )
                         chunks.append(chunk)
+                    if response.status_code == 409:
+                        # Only fixed, locally defined error codes become user text;
+                        # never render arbitrary provider response bodies or secrets.
+                        try:
+                            detail = json.loads(b"".join(chunks)).get("detail", {})
+                            code = detail.get("code") if isinstance(detail, dict) else None
+                        except (ValueError, AttributeError):
+                            code = None
+                        messages = {
+                            "broker_timezone_required": (
+                                "MT5 broker timezone is not verified. Account state and raw broker "
+                                "evidence are available; normalized market timestamps are not."
+                            ),
+                            "ambiguous_broker_time": (
+                                "MT5 timestamp falls in an ambiguous or missing daylight-saving "
+                                "interval; it was not converted."
+                            ),
+                            "positions_unavailable": (
+                                "MT5 positions were not received. Keep MT5 open with the current "
+                                "companion; unknown positions are not an empty account."
+                            ),
+                            "quote_unavailable": "MT5 has no quote for the subscribed symbol yet.",
+                            "candles_unavailable": (
+                                "MT5 has not supplied that candle timeframe yet. "
+                                "The companion supports H4, M15, M5 and M1."
+                            ),
+                            "companion_candle_limit": (
+                                "MT5 companion supplies up to 50 candles per timeframe."
+                            ),
+                            "companion_import_not_qualified": (
+                                "MT5 recent activity is available for read-only review, but this "
+                                "companion does not yet support reliable journal imports. "
+                                "Nothing was imported."
+                            ),
+                        }
+                        if code in messages:
+                            raise MetaTraderBridgeError(messages[code])
+                    response.raise_for_status()
                 payload = json.loads(b"".join(chunks))
                 if not isinstance(payload, dict):
                     raise MetaTraderBridgeError(
@@ -512,6 +550,15 @@ class MetaTraderReadOnlyBridgeConnector:
         )
         self._verify_account(account.external_account_id)
         return account
+
+    async def support_context(self) -> dict[str, Any] | None:
+        """Bounded companion evidence, kept distinct from imported journal history."""
+        health = await self.health()
+        if health.get("transport") != "mql-companion":
+            return None
+        payload = await self._get_json("/v1/support-context")
+        self._verify_account(str(payload.get("account_id", "")))
+        return payload
 
     async def positions(self) -> Sequence[PositionState]:
         retrieved_at = datetime.now(UTC)

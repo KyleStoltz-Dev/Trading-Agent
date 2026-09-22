@@ -15,3 +15,6 @@ dist/
 .worktrees/
 .DS_Store
 paper-trading-*.csv
+# Local MetaEditor compilation output; ship reviewed source only.
+app/companions/*.ex5
+app/companions/*.log

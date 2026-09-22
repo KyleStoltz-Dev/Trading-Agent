@@ -30,6 +30,7 @@ dependencies = [
 trading-agent = "app.cli:run"
 trade = "app.cli:run"
 trading-agent-mt5-bridge = "app.metatrader_bridge_server:run"
+trading-agent-mt5-companion = "app.metatrader_companion:run"
 
 [project.urls]
 Repository = "https://github.com/KyleStoltz-Dev/Trading-Agent"
@@ -67,6 +68,8 @@ exclude = [
   "**/__pycache__",
   "**/*.pyc",
   "**/*.pyo",
+  "app/companions/*.ex5",
+  "app/companions/*.log",
 ]
 
 [tool.hatch.build.targets.sdist]
@@ -103,6 +106,8 @@ exclude = [
   "**/__pycache__",
   "**/*.pyc",
   "**/*.pyo",
+  "app/companions/*.ex5",
+  "app/companions/*.log",
 ]
 
 [tool.pytest.ini_options]
