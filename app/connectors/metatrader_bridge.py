@@ -416,11 +416,19 @@ class MetaTraderReadOnlyBridgeConnector:
                             ),
                             "quote_unavailable": "MT5 has no quote for the subscribed symbol yet.",
                             "candles_unavailable": (
-                                "MT5 has not supplied that candle timeframe yet. "
-                                "The companion supports H4, M15, M5 and M1."
+                                "MT5 could not return that history page. It may still be loading "
+                                "or outside the broker/terminal history limits. Try again later."
                             ),
                             "companion_candle_limit": (
                                 "MT5 companion supplies up to 50 candles per timeframe."
+                            ),
+                            "invalid_candle_request": (
+                                "Use a standard MT5 timeframe and 1–5000 candles per page."
+                            ),
+                            "candle_reader_busy": "MT5 is handling other candle reads; try again.",
+                            "candle_read_pending": (
+                                "MT5 candle history is still loading or the companion needs an "
+                                "update. Keep MT5 open and retry; no history was invented."
                             ),
                             "companion_import_not_qualified": (
                                 "MT5 recent activity is available for read-only review, but this "
@@ -559,6 +567,22 @@ class MetaTraderReadOnlyBridgeConnector:
         payload = await self._get_json("/v1/support-context")
         self._verify_account(str(payload.get("account_id", "")))
         return payload
+
+    async def companion_candles(
+        self, instrument: str, timeframe: str, *, count: int,
+        before_broker_time: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Candle pages with honest raw broker clocks, even before timezone qualification."""
+        health = await self.health()
+        if health.get("transport") != "mql-companion":
+            return None
+        payload = await self._get_json(
+            "/v1/companion/candles",
+            params={"instrument": self._validated_symbol(instrument), "timeframe": timeframe,
+                    "count": count, "before": before_broker_time or 0},
+        )
+        self._verify_account(str(payload.get("account_id", "")))
+        return {key: value for key, value in payload.items() if key != "account_id"}
 
     async def positions(self) -> Sequence[PositionState]:
         retrieved_at = datetime.now(UTC)

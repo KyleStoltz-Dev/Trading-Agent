@@ -1,6 +1,6 @@
 // Trading Agent experimental local companion. Reads only; never submits orders.
 #property strict
-#property version "1.03"
+#property version "1.04"
 #property description "Read-only account, quote and recent-deal snapshots to your local Trading Agent."
 #define COMPANION_BUILD_ID "development"
 
@@ -14,6 +14,7 @@ string last_status = "";
 string last_quote_status = "";
 string last_reload_request = "";
 const int MAX_DEALS = 500;
+ulong last_snapshot_msc = 0;
 
 void Status(const string message)
 {
@@ -330,6 +331,88 @@ bool Snapshot(string &body)
    return true;
 }
 
+bool ReadTimeframe(const string label, ENUM_TIMEFRAMES &period)
+{
+   string labels[21] = {"M1","M2","M3","M4","M5","M6","M10","M12","M15","M20","M30",
+                        "H1","H2","H3","H4","H6","H8","H12","D1","W1","MN1"};
+   ENUM_TIMEFRAMES periods[21] = {PERIOD_M1,PERIOD_M2,PERIOD_M3,PERIOD_M4,PERIOD_M5,PERIOD_M6,
+      PERIOD_M10,PERIOD_M12,PERIOD_M15,PERIOD_M20,PERIOD_M30,PERIOD_H1,PERIOD_H2,PERIOD_H3,
+      PERIOD_H4,PERIOD_H6,PERIOD_H8,PERIOD_H12,PERIOD_D1,PERIOD_W1,PERIOD_MN1};
+   for(int i = 0; i < 21; i++)
+      if(label == labels[i]) { period = periods[i]; return true; }
+   return false;
+}
+
+bool DigitsOnly(const string value, const int max_length)
+{
+   if(StringLen(value) < 1 || StringLen(value) > max_length) return false;
+   for(int i = 0; i < StringLen(value); i++)
+   {
+      ushort c = StringGetCharacter(value, i);
+      if(c < '0' || c > '9') return false;
+   }
+   return true;
+}
+
+void HandleCandleRead()
+{
+   if(!PinnedAccount() || !TerminalInfoInteger(TERMINAL_CONNECTED)) return;
+   string base = "http://127.0.0.1:" + IntegerToString(ReceiverPort);
+   string headers = "Authorization: Bearer " + ReceiverToken + "\r\n";
+   char empty[], response[];
+   string response_headers;
+   int code = WebRequest("GET", base + "/v1/companion/candle-request", headers,
+                         1000, empty, response, response_headers);
+   if(code != 200 || ArraySize(response) > 128) return;
+   string fields[];
+   string wire = CharArrayToString(response, 0, WHOLE_ARRAY, CP_UTF8);
+   if(StringSplit(wire, '|', fields) != 4 || StringLen(fields[0]) != 32) return;
+   for(int i = 0; i < 32; i++)
+   {
+      ushort c = StringGetCharacter(fields[0], i);
+      if(!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return;
+   }
+   ENUM_TIMEFRAMES period;
+   if(!ReadTimeframe(fields[1], period) || !DigitsOnly(fields[2], 4) ||
+      !DigitsOnly(fields[3], 10)) return;
+   int requested = (int)StringToInteger(fields[2]);
+   long before = StringToInteger(fields[3]);
+   if(requested < 1 || requested > 5000 || before < 0 || before > 4102444800) return;
+   bool custom = false;
+   if(!SymbolExist(QuoteSymbol, custom) || custom || !SymbolSelect(QuoteSymbol, true)) return;
+   MqlRates rates[];
+   int count = before == 0 ? CopyRates(QuoteSymbol, period, 0, requested, rates) :
+      CopyRates(QuoteSymbol, period, (datetime)(before - 1), requested, rates);
+   datetime current_bar = iTime(QuoteSymbol, period, 0);
+   if(current_bar <= 0 || count > requested) count = -1;
+   string candles = "[";
+   for(int i = 0; i < count; i++)
+   {
+      if(i > 0) candles += ",";
+      candles += "{\"broker_time_seconds\":" + IntegerToString((long)rates[i].time) +
+         ",\"open\":" + Number(rates[i].open) + ",\"high\":" + Number(rates[i].high) +
+         ",\"low\":" + Number(rates[i].low) + ",\"close\":" + Number(rates[i].close) +
+         ",\"tick_volume\":" + IntegerToString(rates[i].tick_volume) +
+         ",\"complete\":" + (rates[i].time < current_bar ? "true" : "false") + "}";
+   }
+   candles += "]";
+   if(!PinnedAccount() || !TerminalInfoInteger(TERMINAL_CONNECTED)) return;
+   string body = "{\"request_id\":" + Q(fields[0]) +
+      ",\"account_id\":" + Q(IntegerToString(ExpectedAccount)) +
+      ",\"broker_server\":" + Q(ExpectedServer) + ",\"symbol\":" + Q(QuoteSymbol) +
+      ",\"request\":{\"timeframe\":" + Q(fields[1]) + ",\"count\":" +
+      IntegerToString(requested) + ",\"before\":" + IntegerToString(before) + "}" +
+      ",\"captured_at\":" + Q(CaptureTime()) + ",\"status\":" +
+      Q(count > 0 ? "ok" : "unavailable") + ",\"candles\":" + candles + "}";
+   char payload[];
+   StringToCharArray(body, payload, 0, WHOLE_ARRAY, CP_UTF8);
+   ArrayResize(payload, ArraySize(payload) - 1);
+   headers += "Content-Type: application/json\r\n";
+   // A fixed candle-only response, never orders, scripts, URLs, or terminal settings.
+   WebRequest("POST", base + "/v1/companion/candle-result", headers, 3000,
+              payload, response, response_headers);
+}
+
 int OnInit()
 {
    if(MQLInfoInteger(MQL_TESTER))
@@ -356,7 +439,7 @@ int OnInit()
       Print("Trading Agent: login/server mismatch. No data will be sent.");
       return INIT_FAILED;
    }
-   if(!EventSetTimer(10)) return INIT_FAILED;
+   if(!EventSetTimer(1)) return INIT_FAILED;
    Print("Trading Agent: read-only companion started. No orders can be submitted by this EA.");
    return INIT_SUCCEEDED;
 }
@@ -364,6 +447,12 @@ int OnInit()
 void OnTimer()
 {
    if(CheckLocalRefresh()) return;
+   if(GetTickCount64() - last_snapshot_msc < 10000)
+   {
+      HandleCandleRead();
+      return;
+   }
+   last_snapshot_msc = GetTickCount64();
    string body;
    if(!Snapshot(body)) return;
    char payload[], response[];
@@ -375,7 +464,7 @@ void OnTimer()
    string url = "http://127.0.0.1:" + IntegerToString(ReceiverPort) + "/v1/companion/snapshot";
    ResetLastError();
    int code = WebRequest("POST", url, headers, 3000, payload, response, response_headers);
-   // Responses are never evaluated as commands. Do not log tokens or payloads.
+   // Snapshot acknowledgements are never evaluated as commands. Do not log private data.
    if(code == 200)
       Status("Receiving confirmed. Read-only snapshot accepted; journal unchanged.");
    else if(code == -1)

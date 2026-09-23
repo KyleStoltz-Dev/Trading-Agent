@@ -1197,6 +1197,23 @@ class TradingAgent:
             async def read_candles():
                 connector = self._broker_connector()
                 try:
+                    before = arguments.get("before_broker_time")
+                    raw_reader = getattr(connector, "companion_candles", None)
+                    if raw_reader is not None:
+                        raw = await raw_reader(
+                            arguments["instrument"], arguments["timeframe"],
+                            count=arguments["count"], before_broker_time=before,
+                        )
+                        if raw is not None:
+                            self._reference(
+                                "broker", f"{raw['instrument']} {raw['timeframe']} candle page",
+                                "metatrader-companion", datetime.fromisoformat(raw["captured_at"]),
+                            )
+                            return raw
+                    if before is not None:
+                        raise ValueError(
+                            "Broker-time candle pagination is supported by the MT5 companion only"
+                        )
                     candles = await connector.candles(
                         arguments["instrument"],
                         arguments["timeframe"],
@@ -1244,7 +1261,7 @@ class TradingAgent:
                             f"{position.instrument} position",
                             position,
                         )
-                    return {
+                    state = {
                         "currency": account.currency,
                         "balance": account.balance,
                         "equity": account.equity,
@@ -1254,6 +1271,14 @@ class TradingAgent:
                         "source": account.source,
                         "positions": positions,
                     }
+                    support_context = getattr(connector, "support_context", None)
+                    if support_context is not None:
+                        evidence = await support_context()
+                        if evidence is not None:
+                            state["companion_evidence"] = {
+                                key: value for key, value in evidence.items() if key != "account_id"
+                            }
+                    return state
                 finally:
                     await connector.aclose()
 

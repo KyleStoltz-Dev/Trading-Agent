@@ -17,6 +17,10 @@ not supported by this source.
   requested symbol's latest available bid/ask, up to 50 candles each on H4/M15/M5/M1,
   and up to 500 deals from a seven-day server-time window. Candle volume is tick
   count, not contracts. The latest bar stays provisional.
+- On demand: read any of MT5's 21 standard timeframes, with up to 5,000 candles per
+  HTTP request and older pages selected by broker bar-open time. The chat tool uses
+  up to 500 bars per page to keep model context bounded. The four small automatic
+  snapshots are a startup preview, not the limit of candle access.
 - Retain deal/order/position IDs, deal type and entry classification, volume in
   **lots**, price, profit, commission, swap and fee. Cash movements are preserved
   as deal records, not mislabeled as fills.
@@ -32,11 +36,7 @@ connector and can be registered through its policy-confirmed setup flow. The rec
 itself does not update PostgreSQL, reconcile positions, or expose new model tools.
 No order submission, modification or cancellation code exists in the EA/receiver.
 
-## Agent integration (dependent follow-up)
-
-The following agent evidence and saved-pairing setup flow is delivered in a separate,
-dependent integration change. The companion foundation alone exposes authenticated
-read-only HTTP data; it does not add these agent/setup behaviors.
+## Using the existing agent tools
 
 The adapter exposes authenticated GET account, positions, symbols, quote and candle
 routes. `get_broker_state` now also returns bounded companion evidence when the
@@ -63,6 +63,27 @@ account/position reads and clearly labelled raw quote/candle/deal evidence remai
 available through `get_broker_state`. The adapter refuses to fabricate UTC timestamps.
 Ambiguous and nonexistent daylight-saving times are rejected, not guessed. A recent
 snapshot never proves that its last tick is fresh.
+
+`get_recent_candles` now uses the companion's raw candle-read route when connected
+to MT5. It returns human-readable **broker wall times**, source, symbol, timeframe,
+tick counts, provisional-bar flags, requested/returned counts and a pagination cursor.
+It therefore works before UTC qualification without pretending the timestamps are UTC.
+Pass the returned `next_before_broker_time` as `before_broker_time` to request the
+previous page; use null for the latest bars. No candles or research datasets are saved.
+
+Supported timeframes: M1, M2, M3, M4, M5, M6, M10, M12, M15, M20, M30, H1, H2, H3,
+H4, H6, H8, H12, D1, W1 and MN1. Access remains scoped to the paired broker symbol.
+It does not guarantee unlimited history: broker availability and terminal Max Bars
+still apply. Partial pages and loading/unavailable responses are explicit; they do
+not establish full-history coverage. See [MT5 CopyRates](https://www.mql5.com/en/docs/series/copyrates)
+and [standard timeframes](https://www.mql5.com/en/docs/constants/chartconstants/enum_timeframes).
+
+The EA polls once per second for a strict candle-only request: random request ID,
+allowlisted timeframe, bounded count and optional broker-time upper bound. No symbol,
+URL, path, script, order parameters or arbitrary commands are accepted from that lane.
+At most four reads can wait for up to eight seconds each. Results must match the
+request, pinned account/server/symbol and fresh capture time. Late/replayed/malformed
+results are rejected. The automatic snapshots remain on a ten-second cadence.
 
 `sync_broker_history` still requires the existing mutation confirmation, and the
 companion rejects ingestion before any cursor advance or trade import. Reliable
@@ -159,6 +180,13 @@ combination or failed-update recovery. Private account records are not included 
 References: [template reapplication and permission restrictions](https://www.mql5.com/en/docs/chart_operations/chartapplytemplate),
 [MetaEditor compiler interface](https://www.metatrader5.com/en/metaeditor/help/beginning/integration_ide).
 
+Version 1.04 was subsequently compiled and refreshed through the same mechanism.
+Live read-only checks returned 60 gold candles on every one of the 21 timeframes.
+Two H1 requests returned 500 bars each, with the second page strictly earlier than
+the first and no overlap. Broker times remained explicitly unconverted; no candle
+dataset, journal records or orders were written. This qualifies those reads on this
+installation, not unlimited history or every broker.
+
 ## Inspect safely
 
 Use an authenticated local HTTP client with `Authorization: Bearer <temporary token>`:
@@ -167,6 +195,9 @@ Use an authenticated local HTTP client with `Authorization: Bearer <temporary to
   transmission is **not** a guarantee that the market is open or the quote is fresh.
 - `GET /v1/companion/snapshot`: the bounded snapshot, when recently received.
 - `POST /v1/companion/snapshot`: EA upload, not a remote-command endpoint.
+- `GET /v1/companion/candles`: on-demand raw candle page for the paired symbol.
+- `GET /v1/companion/candle-request`: fixed candle-only request for the EA, or 204.
+- `POST /v1/companion/candle-result`: matching validated response; never persisted.
 
 All endpoints require authentication. No docs UI, CORS, public listener, forwarded
 headers, database writes or access logging. The launcher binds to IPv4 loopback

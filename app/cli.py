@@ -9445,24 +9445,50 @@ def _configured_oanda_connection(db) -> BrokerConnection:
 def broker_configure_metatrader(
     label: Annotated[str, typer.Option(prompt=True)],
     yes: Annotated[bool, typer.Option("--yes")] = False,
+    companion_preset: Annotated[
+        Path | None, typer.Option(
+            "--companion-preset",
+            help="Reuse your private local MQL companion pairing; no token entry.",
+        )
+    ] = None,
 ) -> None:
     """Verify and register one read-only MT4/MT5 bridge account."""
     settings = get_settings()
     legacy = getattr(settings, "broker_secret_backend", "legacy-env") == "legacy-env"
-    token = (
-        secret_value(getattr(settings, "metatrader_bridge_token", None))
-        if legacy
-        else typer.prompt("MetaTrader bridge token", hide_input=True).strip()
-    )
-    account_id = (
-        secret_value(getattr(settings, "metatrader_account_id", None))
-        if legacy
-        else typer.prompt("MetaTrader account ID").strip()
-    )
+    pairing = None
+    if companion_preset is not None:
+        from app.metatrader_pairing import read_pairing
+
+        if legacy or settings.deployment_mode != "local-single-user":
+            raise typer.BadParameter(
+                "Companion pairing requires local setup with OS credential storage."
+            )
+        try:
+            pairing = read_pairing(companion_preset)
+        except (OSError, ValueError):
+            raise typer.BadParameter(
+                "Cannot read a private, valid companion pairing file."
+            ) from None
+    if pairing:
+        token, account_id = pairing.token, pairing.account
+    else:
+        token = (
+            secret_value(getattr(settings, "metatrader_bridge_token", None))
+            if legacy else typer.prompt("MetaTrader bridge token", hide_input=True).strip()
+        )
+        account_id = (
+            secret_value(getattr(settings, "metatrader_account_id", None))
+            if legacy else typer.prompt("MetaTrader account ID").strip()
+        )
+    companion_settings = {
+        "metatrader_bridge_url": f"http://127.0.0.1:{pairing.port}",
+        "metatrader_platform": "mt5",
+    } if pairing else {}
     connector_settings = settings.model_copy(
         update={
             "metatrader_bridge_token": SecretStr(token or ""),
             "metatrader_account_id": SecretStr(account_id or ""),
+            **companion_settings,
         }
     ) if hasattr(settings, "model_copy") else settings
     try:
@@ -9478,6 +9504,11 @@ def broker_configure_metatrader(
     async def verify():
         try:
             health = await connector.health()
+            if pairing and (
+                health.get("broker_server") != pairing.server
+                or health.get("transport") != "mql-companion"
+            ):
+                raise MetaTraderBridgeError("Receiver does not match the saved companion pairing.")
             account = await connector.account()
             return health, account
         finally:
@@ -9493,7 +9524,7 @@ def broker_configure_metatrader(
         )
         raise typer.Exit(1) from exc
     display_mode = _display_account_mode(
-        settings.metatrader_platform,
+        connector_settings.metatrader_platform,
         settings.metatrader_mode,
     )
     arguments = {
@@ -9501,7 +9532,7 @@ def broker_configure_metatrader(
         "label": label,
         "currency": account_state.currency,
         "environment": display_mode,
-        "platform": settings.metatrader_platform,
+        "platform": connector_settings.metatrader_platform,
         "read_only": health["read_only"],
     }
     try:
@@ -9520,7 +9551,7 @@ def broker_configure_metatrader(
         account, connection = configure_account(
             db,
             workspace_id=scope.workspace_id,
-            broker=settings.metatrader_platform.upper(),
+            broker=connector_settings.metatrader_platform.upper(),
             external_account_id=account_state.external_account_id,
             label=label,
             currency=account_state.currency,
@@ -9543,6 +9574,8 @@ def broker_configure_metatrader(
                         "BROKER_PROVIDER": "metatrader",
                         "TRADING_WORKSPACE": workspace.slug,
                         "TRADING_ACCOUNT": str(account.id),
+                        **({"METATRADER_BRIDGE_URL": connector_settings.metatrader_bridge_url,
+                            "METATRADER_PLATFORM": "mt5"} if pairing else {}),
                     },
                 )
                 db.commit()

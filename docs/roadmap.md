@@ -105,9 +105,9 @@ qualification gates; the updater never restarts MT5 or enables trading permissio
 
 Read-only broker-tool checkpoint (2026-09-22): the receiver now serves account,
 position, symbol, and optionally timezone-normalized quote/candle endpoints for the
-existing connector. A dependent integration change will expose bounded, source-labelled
-raw MT5 evidence through `get_broker_state` and add saved-pairing registration through
-the OS credential vault with explicit mutation confirmation. No new model tool is needed.
+existing connector. `get_broker_state` includes bounded, source-labelled raw MT5
+quote/candle/deal evidence; there is no new model tool or policy bypass. Saved-pairing
+registration reuses the OS credential vault with explicit mutation confirmation.
 Version 1.03 was refreshed automatically on Mac/Wine and live-verified with open
 position retrieval plus 50 bars each on H4/M15/M5/M1. A funding record was correctly
 kept separate from executions. The local broker timezone remains unqualified;
@@ -115,6 +115,13 @@ raw broker evidence is available, normalized time-dependent reads remain gated.
 Journal ingestion is explicitly refused until resumable history, cancellation/
 rejection records and lifecycle handling are reliable. No local account selection
 or journal data was changed by this implementation test.
+
+Follow-up: restore the agent/setup integration through a PR based directly on main
+(the original integration was merged into the companion branch). Candle reads now
+support all 21 standard MT5 timeframes on demand and bounded older-page retrieval,
+instead of restricting analysis to the four 50-bar automatic previews. The existing
+policy-checked candle tool can use explicit raw broker-wall times without guessing UTC.
+This remains read-only market access, not backtesting or a persisted strategy dataset.
 
 ### Beginner-first setup and connection center
 

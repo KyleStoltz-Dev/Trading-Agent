@@ -296,7 +296,9 @@ def test_mql_source_is_packaged_and_has_no_order_or_dll_calls():
     assert '"http://127.0.0.1:"' in text
     assert "HistorySelect(since, until)" in text
     assert "PinnedAccount()" in text
-    assert "EventSetTimer(10)" in text
+    assert "EventSetTimer(1)" in text
+    assert "GetTickCount64() - last_snapshot_msc < 10000" in text
+    assert "HandleCandleRead()" in text
     assert 'WebRequest("POST", url, headers, 3000' in text
     assert "CP_UTF8" in text
 
