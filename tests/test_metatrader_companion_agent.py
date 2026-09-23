@@ -37,3 +37,24 @@ def test_agent_existing_broker_tool_receives_evidence_without_account_id(monkeyp
     with pytest.raises(PolicyViolation):
         execute("get_broker_state", {})
     provider_read.assert_not_called()
+
+
+def test_existing_candle_tool_reads_raw_mt5_evidence_without_guessing_timezone(monkeypatch):
+    _, connector, _ = setup()
+    agent = TradingAgent(
+        db=Mock(), engine=Mock(), settings=Settings(), confirm_mutation=lambda *_: False,
+        provider=SimpleNamespace(name="test", model="test"),
+    )
+    monkeypatch.setattr(agent, "_broker_connector", lambda: connector)
+    execute = policy_wrapped_executor(agent._execute_tool, agent.hooks, TOOL_METADATA)
+    result = json.loads(execute("get_recent_candles", {
+        "instrument": "XAUUSD.a", "timeframe": "H4", "count": 2,
+        "before_broker_time": None,
+    }))
+    content = result["result"]["content"]
+    assert content["returned_count"] == 2
+    assert content["market_time_basis"] == "broker_server_unconverted"
+    assert content["volume_unit"] == "tick_count"
+    assert content["next_before_broker_time"] > 0
+    assert "account_id" not in content
+    agent.db.commit.assert_not_called()

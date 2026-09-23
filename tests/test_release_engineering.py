@@ -67,6 +67,7 @@ def test_wheel_and_sdist_require_runtime_release_content(tmp_path) -> None:
         archive.writestr("app/migrations/env.py", "")
         archive.writestr("app/metatrader_companion.py", "")
         archive.writestr("app/metatrader_companion_api.py", "")
+        archive.writestr("app/metatrader_candles.py", "")
         archive.writestr("app/metatrader_pairing.py", "")
         archive.writestr("app/metatrader_refresh.py", "")
         archive.writestr("app/companions/TradingAgentReadOnly.mq5", "")
@@ -102,6 +103,7 @@ def test_wheel_and_sdist_require_runtime_release_content(tmp_path) -> None:
         "app/migrations/env.py": b"",
         "app/metatrader_companion.py": b"",
         "app/metatrader_companion_api.py": b"",
+        "app/metatrader_candles.py": b"",
         "app/metatrader_pairing.py": b"",
         "app/metatrader_refresh.py": b"",
         "app/companions/TradingAgentReadOnly.mq5": b"",

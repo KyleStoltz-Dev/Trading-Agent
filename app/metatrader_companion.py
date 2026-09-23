@@ -1,7 +1,7 @@
 """Loopback-only receiver for the experimental MQL5 companion.
 
-This is a read-only transport. Nothing is persisted or
-sent back to the terminal except acknowledgement; there is no execution surface.
+This is a read-only transport. Nothing is persisted. Terminal responses contain
+acknowledgements or bounded, typed candle-read requests; there is no execution surface.
 """
 
 import argparse
@@ -292,9 +292,25 @@ def create_companion_app(
                 raise HTTPException(503, "No recent terminal snapshot; keep MT5 open and connected")
             return snapshot
 
+    from app.metatrader_candles import attach_candle_mailbox
     from app.metatrader_companion_api import attach_broker_routes
 
-    attach_broker_routes(app, current_snapshot, symbol=symbol, broker_timezone=broker_timezone)
+    mailbox = attach_candle_mailbox(
+        app,
+        authenticate=authenticate,
+        current=current_snapshot,
+        account_id=account_id,
+        broker_server=broker_server,
+        symbol=symbol,
+        utc_now=utc_now,
+    )
+    attach_broker_routes(
+        app,
+        current_snapshot,
+        symbol=symbol,
+        broker_timezone=broker_timezone,
+        mailbox=mailbox,
+    )
     return app
 
 

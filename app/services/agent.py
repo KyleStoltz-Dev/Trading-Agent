@@ -1197,6 +1197,23 @@ class TradingAgent:
             async def read_candles():
                 connector = self._broker_connector()
                 try:
+                    before = arguments.get("before_broker_time")
+                    raw_reader = getattr(connector, "companion_candles", None)
+                    if raw_reader is not None:
+                        raw = await raw_reader(
+                            arguments["instrument"], arguments["timeframe"],
+                            count=arguments["count"], before_broker_time=before,
+                        )
+                        if raw is not None:
+                            self._reference(
+                                "broker", f"{raw['instrument']} {raw['timeframe']} candle page",
+                                "metatrader-companion", datetime.fromisoformat(raw["captured_at"]),
+                            )
+                            return raw
+                    if before is not None:
+                        raise ValueError(
+                            "Broker-time candle pagination is supported by the MT5 companion only"
+                        )
                     candles = await connector.candles(
                         arguments["instrument"],
                         arguments["timeframe"],

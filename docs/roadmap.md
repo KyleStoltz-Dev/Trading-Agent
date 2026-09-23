@@ -116,6 +116,13 @@ Journal ingestion is explicitly refused until resumable history, cancellation/
 rejection records and lifecycle handling are reliable. No local account selection
 or journal data was changed by this implementation test.
 
+Follow-up: restore the agent/setup integration through a PR based directly on main
+(the original integration was merged into the companion branch). Candle reads now
+support all 21 standard MT5 timeframes on demand and bounded older-page retrieval,
+instead of restricting analysis to the four 50-bar automatic previews. The existing
+policy-checked candle tool can use explicit raw broker-wall times without guessing UTC.
+This remains read-only market access, not backtesting or a persisted strategy dataset.
+
 ### Beginner-first setup and connection center
 
 Implementation checkpoint (2026-09-03): running `trade` without an existing configuration

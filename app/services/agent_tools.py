@@ -495,7 +495,7 @@ TOOLS = [
     {
         "type": "function",
         "name": "get_live_quote",
-        "description": "Get one timestamped current quote from the configured OANDA feed.",
+        "description": "Get one timestamped quote from the selected read-only broker feed.",
         "strict": True,
         "parameters": _object_schema(
             {"instrument": {"type": "string"}},
@@ -505,15 +505,24 @@ TOOLS = [
     {
         "type": "function",
         "name": "get_recent_candles",
-        "description": "Get timestamped recent OANDA candles without persisting every update.",
+        "description": (
+            "Read candles from the selected broker, without journal writes. MT5 companion "
+            "supports all 21 standard timeframes, M1 through MN1. For older MT5 pages, pass "
+            "the returned next_before_broker_time as before_broker_time; otherwise null. "
+            "MT5 raw broker-wall times are not UTC, volume is tick count, and partial pages "
+            "do not prove complete history. Never invent unavailable bars."
+        ),
         "strict": True,
         "parameters": _object_schema(
             {
                 "instrument": {"type": "string"},
                 "timeframe": {"type": "string"},
                 "count": {"type": "integer", "minimum": 1, "maximum": 500},
+                "before_broker_time": {
+                    "type": ["integer", "null"], "minimum": 1, "maximum": 4102444800,
+                },
             },
-            ["instrument", "timeframe", "count"],
+            ["instrument", "timeframe", "count", "before_broker_time"],
         ),
     },
     {

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import FastAPI, HTTPException, Request
+from pydantic import ValidationError
 
 if TYPE_CHECKING:
     from app.metatrader_companion import CompanionSnapshot
@@ -40,6 +41,7 @@ def attach_broker_routes(
     *,
     symbol: str,
     broker_timezone: str | None,
+    mailbox,
 ) -> None:
     try:
         zone = ZoneInfo(broker_timezone) if broker_timezone else None
@@ -65,6 +67,7 @@ def attach_broker_routes(
             "history_coverage": "recent_window_only",
             "journal_import_available": False,
             "trade_allowed_by_bridge": False,
+            "candle_reads": "on_demand",
         }
 
     @app.get("/v1/account")
@@ -131,15 +134,42 @@ def attach_broker_routes(
             "time": broker_time(data.quote.broker_time_msc, zone),
         }
 
-    @app.get("/v1/candles")
-    def candles(request: Request, instrument: str, timeframe: str, count: int):
+    async def read_candles(request, instrument, timeframe, count, before):
+        from app.metatrader_candles import CandleRead, CandleReply
+
         data = current(request)
         require_symbol(instrument)
-        if not 1 <= count <= 50:
-            raise HTTPException(409, {"code": "companion_candle_limit"})
-        series = next((s for s in data.candle_series if s.timeframe == timeframe), None)
-        if series is None:
+        try:
+            query = CandleRead(timeframe=timeframe.upper(), count=count, before=before)
+        except ValidationError:
+            raise HTTPException(409, {"code": "invalid_candle_request"}) from None
+        cached = next((s for s in data.candle_series if s.timeframe == query.timeframe), None)
+        if not before and cached is not None and len(cached.candles) >= count:
+            return CandleReply(
+                request_id="0" * 32,
+                account_id=data.account_id,
+                broker_server=data.broker_server,
+                symbol=symbol,
+                request=query,
+                captured_at=data.captured_at,
+                status="ok",
+                candles=cached.candles[-count:],
+            )
+        result = await mailbox.read(query)
+        current(request)  # Do not serve a result after the terminal stream has gone stale.
+        if result.status != "ok":
             raise HTTPException(409, {"code": "candles_unavailable"})
+        return result
+
+    @app.get("/v1/candles")
+    async def candles(
+        request: Request, instrument: str, timeframe: str, count: int, before: int = 0
+    ):
+        current(request)
+        require_symbol(instrument)
+        if zone is None:
+            raise HTTPException(409, {"code": "broker_timezone_required"})
+        result = await read_candles(request, instrument, timeframe, count, before)
         return {
             "candles": [
                 {
@@ -151,9 +181,40 @@ def attach_broker_routes(
                     "volume": str(bar.tick_volume),
                     "complete": bar.complete,
                 }
-                for bar in series.candles[-count:]
+                for bar in result.candles
             ],
             "volume_unit": "tick_count",
+            "next_before_broker_time": result.candles[0].broker_time_seconds,
+        }
+
+    @app.get("/v1/companion/candles")
+    async def raw_candles(
+        request: Request, instrument: str, timeframe: str, count: int, before: int = 0
+    ):
+        result = await read_candles(request, instrument, timeframe, count, before)
+        return {
+            "account_id": result.account_id,
+            "source": "metatrader-mt5-bridge",
+            "instrument": result.symbol,
+            "venue": result.broker_server,
+            "timeframe": result.request.timeframe,
+            "captured_at": result.captured_at.isoformat(),
+            "market_time_basis": "broker_server_unconverted",
+            "volume_unit": "tick_count",
+            "requested_count": count,
+            "returned_count": len(result.candles),
+            "partial": len(result.candles) < count,
+            "next_before_broker_time": result.candles[0].broker_time_seconds,
+            "history_coverage": "requested_page_only",
+            "candles": [
+                {
+                    **bar.model_dump(mode="json"),
+                    "broker_wall_time": datetime.fromtimestamp(bar.broker_time_seconds, UTC)
+                    .replace(tzinfo=None)
+                    .isoformat(),
+                }
+                for bar in result.candles
+            ],
         }
 
     @app.get("/v1/events")
