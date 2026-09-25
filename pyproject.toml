@@ -58,7 +58,7 @@ dev = [
 [dependency-groups]
 release = [
   "editables==0.6",
-  "hatchling==1.32.0",
+  "hatchling==1.32.4",
   "pip-audit==2.10.1",
 ]
 
